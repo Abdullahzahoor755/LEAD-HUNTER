@@ -1,0 +1,17 @@
+venv/
+__pycache__/
+.env
+token.json
+credentials.json
+service_account.json
+*.pyc
+.pytest_cache/
+*.csv
+logs/
+
+# Local/dev editor and scratch files
+.codex/
+.vscode/
+recreate_db.py
+test_email.py
+test_scrape.py
