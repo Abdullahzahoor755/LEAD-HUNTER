@@ -165,6 +165,24 @@ def render_landing_styles() -> None:
         [data-testid="stSidebar"] label {
             color: #cbd5e1 !important;
         }
+        .sidebar-brand {
+            padding: .25rem .1rem 1rem;
+            margin-bottom: .4rem;
+            border-bottom: 1px solid rgba(148, 163, 184, .14);
+        }
+        .sidebar-brand-title {
+            color: #f8fafc;
+            font-weight: 850;
+            font-size: 1.05rem;
+            line-height: 1.2;
+            letter-spacing: 0;
+        }
+        .sidebar-brand-subtitle {
+            color: #94a3b8;
+            font-size: .78rem;
+            line-height: 1.35;
+            margin-top: .18rem;
+        }
         .app-shell {
             max-width: var(--page-max-width);
             margin: 0 auto;
@@ -446,6 +464,28 @@ def render_landing_styles() -> None:
             gap: .75rem;
             margin-top: .8rem;
         }
+        .marketing-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(220px, 1fr));
+            gap: .8rem;
+            margin: 1rem 0;
+        }
+        .marketing-card {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: rgba(15, 23, 42, .66);
+            padding: 1rem;
+        }
+        .marketing-card h4 {
+            margin: 0 0 .4rem;
+            color: var(--text-strong);
+            font-size: 1rem;
+        }
+        .marketing-card p {
+            margin: 0;
+            color: var(--muted);
+            line-height: 1.5;
+        }
         .dashboard-input [data-testid="stTextInput"] {
             margin-bottom: .65rem;
         }
@@ -538,7 +578,8 @@ def render_landing_styles() -> None:
                 margin-top: .85rem;
             }
             .hero-metrics,
-            .locked-grid {
+            .locked-grid,
+            .marketing-grid {
                 grid-template-columns: 1fr;
             }
         }
@@ -1103,15 +1144,6 @@ def extract_google_oauth_client(credentials_json: Dict[str, Any]) -> Dict[str, s
 
 
 def render_settings_page() -> None:
-    st.markdown(
-        """
-        <div class="page-section">
-            <div class="main-title">Settings</div>
-            <div class="main-subtitle">Manage workspace integrations and automation setup.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
     render_gmail_settings()
 
 
@@ -1254,7 +1286,7 @@ def render_plan_onboarding() -> bool:
     return True
 
 
-def render_dashboard_header() -> None:
+def render_module_header(title: str, subtitle: str) -> None:
     auth = st.session_state.get("auth", {}) or {}
     plan = current_plan()
     tenant_id = html.escape(str(auth.get("tenant_id", "")))
@@ -1265,8 +1297,8 @@ def render_dashboard_header() -> None:
         f"""
         <div class="top-hero">
             <div class="hero-stack">
-                <h1 class="hero-title">Lead Hunter AI</h1>
-                <p class="hero-note">Generate leads, review contacts, export CSVs, and manage outreach from one clean workspace.</p>
+                <h1 class="hero-title">{html.escape(title)}</h1>
+                <p class="hero-note">{html.escape(subtitle)}</p>
             </div>
             <div class="summary-stack">
                 <div class="hero-badge-row">
@@ -1280,6 +1312,13 @@ def render_dashboard_header() -> None:
         </div>
         """,
         unsafe_allow_html=True,
+    )
+
+
+def render_dashboard_header() -> None:
+    render_module_header(
+        "Email CRM",
+        "Find leads, manage contacts, generate agency kits, and automate outreach.",
     )
 
 
@@ -1518,6 +1557,169 @@ def render_admin_page() -> None:
     render_admin_payments()
 
 
+def render_pro_action_page(title: str, caption: str, button_label: str, agent_name: str, payload: Dict[str, Any] | None = None) -> None:
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-title">{html.escape(title)}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-caption">{html.escape(caption)}</div>', unsafe_allow_html=True)
+    if not has_pro_features():
+        st.markdown('<span class="premium-badge">Pro</span>', unsafe_allow_html=True)
+        st.warning(LOCKED_FEATURE_MESSAGE)
+        st.button(button_label, use_container_width=True, disabled=True)
+        st.markdown("</div></div>", unsafe_allow_html=True)
+        return
+    if st.button(button_label, use_container_width=True):
+        with st.spinner("Queueing automation job..."):
+            enqueue_job(agent_name, payload or {})
+            st.success("Automation job queued.")
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def render_email_crm_page(tenant: TenantContext, page: str) -> None:
+    render_module_header(
+        "Email CRM",
+        "Find leads, manage contacts, generate agency kits, and automate outreach.",
+    )
+    normalized_page = str(page or "Generate Leads")
+    if normalized_page == "Generate Leads":
+        snapshot_response = api_request("GET", "/dashboard/snapshot")
+        snapshot = snapshot_response.json()
+        if not snapshot_response.is_success:
+            st.error(str(snapshot.get("detail", "Could not load dashboard snapshot.")))
+            return
+        frame = load_dashboard_data(tenant)
+        render_generation_status_card(snapshot)
+        render_actions(tenant)
+        render_dashboard_page(frame, snapshot)
+        return
+    if normalized_page == "Live Leads":
+        frame = filtered_frame(load_dashboard_data(tenant))
+        render_table_page(frame, STANDARD_LEAD_EXPORT_COLUMNS)
+        return
+    if normalized_page == "AI Agency Kit":
+        frame = load_dashboard_data(tenant)
+        render_agency_kit_panel(frame)
+        return
+    if normalized_page == "Outreach":
+        render_pro_action_page(
+            "Outreach",
+            "Queue personalized outreach for qualified leads with a connected Gmail account.",
+            "Send Outreach - Pro",
+            "outreach",
+        )
+        return
+    if normalized_page == "Replies":
+        render_pro_action_page(
+            "Replies",
+            "Check Gmail replies and update lead statuses.",
+            "Check Replies - Pro",
+            "reply_monitor",
+            {"mode": "once"},
+        )
+        frame = load_dashboard_data(tenant)
+        render_table_page(frame, ["company_url", "verified_email", "country", "reply_status", "last_reply_at"])
+        return
+    if normalized_page == "Followups":
+        render_pro_action_page(
+            "Followups",
+            "Run scheduled follow-up messages for leads that have not replied yet.",
+            "Run Followups - Pro",
+            "followup",
+        )
+        frame = load_dashboard_data(tenant)
+        render_table_page(frame, ["company_url", "country", "industry", "outreach_status", "followup_count", "reply_status", "last_reply_at"])
+        return
+    if normalized_page == "CSV Export":
+        frame = load_dashboard_data(tenant)
+        render_table_page(frame, STANDARD_LEAD_EXPORT_COLUMNS)
+        return
+    st.info("Choose an Email CRM tool from the sidebar.")
+
+
+def render_marketing_campaign_page(page: str = "Campaign Generator") -> None:
+    render_module_header(
+        "AI Marketing Campaign Kit",
+        "Turn any lead or business idea into a complete ad campaign.",
+    )
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">AI Marketing Campaign Kit is coming next</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-caption">Turn any lead or business idea into Facebook ads, Google ad copy, reels scripts, landing page copy, and a 7-day content plan.</div>',
+        unsafe_allow_html=True,
+    )
+    cards = [
+        ("Facebook/Instagram Ads", "Generate ad angles, primary text, headlines, and calls to action."),
+        ("Google Search Ads", "Create intent-driven search ad copy for service and local lead campaigns."),
+        ("Reels & TikTok Scripts", "Turn offers into short-form hooks, scripts, and content prompts."),
+    ]
+    card_markup = "".join(
+        f'<div class="marketing-card"><h4>{html.escape(title)}</h4><p>{html.escape(body)}</p></div>'
+        for title, body in cards
+    )
+    st.markdown(f'<div class="marketing-grid">{card_markup}</div>', unsafe_allow_html=True)
+    st.button("Coming Soon", use_container_width=True, disabled=True)
+    st.caption(f"Selected tool: {page}")
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def render_sidebar_navigation() -> Dict[str, str]:
+    st.sidebar.markdown(
+        """
+        <div class="sidebar-brand">
+            <div class="sidebar-brand-title">Lead Hunter AI</div>
+            <div class="sidebar-brand-subtitle">AI Agency Operating System</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.sidebar.markdown("### Workspace")
+    if st.sidebar.button("Logout", use_container_width=True):
+        st.session_state["auth"] = {}
+        st.session_state["latest_subscription"] = {}
+        st.session_state["plan_onboarding_seen"] = ""
+        st.rerun()
+    refresh_enabled = st.sidebar.checkbox("Auto-refresh", value=True)
+    if refresh_enabled and st_autorefresh:
+        st_autorefresh(interval=30_000, key="dashboard_refresh")
+
+    modules = ["Email CRM", "Marketing Kit", "Settings"]
+    if is_admin_user():
+        modules.append("Admin")
+    if st.session_state.get("sidebar_module") not in modules:
+        st.session_state["sidebar_module"] = "Email CRM"
+    st.sidebar.markdown("### Modules")
+    module = st.sidebar.radio("Module", modules, key="sidebar_module", label_visibility="collapsed")
+
+    page = ""
+    if module == "Email CRM":
+        crm_pages = ["Generate Leads", "Live Leads", "AI Agency Kit", "Outreach", "Replies", "Followups", "CSV Export"]
+        if st.session_state.get("email_crm_page") not in crm_pages:
+            st.session_state["email_crm_page"] = "Generate Leads"
+        st.sidebar.markdown("### Email CRM")
+        page = st.sidebar.radio("Email CRM", crm_pages, key="email_crm_page", label_visibility="collapsed")
+    elif module == "Marketing Kit":
+        marketing_pages = [
+            "Campaign Generator",
+            "Generate from Lead",
+            "Generate from Business Idea",
+            "Ad Copy",
+            "Reels Script",
+            "7-Day Content Calendar",
+        ]
+        if st.session_state.get("marketing_kit_page") not in marketing_pages:
+            st.session_state["marketing_kit_page"] = "Campaign Generator"
+        st.sidebar.markdown("### Marketing Kit")
+        page = st.sidebar.radio("Marketing Kit", marketing_pages, key="marketing_kit_page", label_visibility="collapsed")
+    elif module == "Settings":
+        settings_pages = ["Workspace Settings", "Billing & Plan"]
+        if st.session_state.get("settings_page") not in settings_pages:
+            st.session_state["settings_page"] = "Workspace Settings"
+        st.sidebar.markdown("### Settings")
+        page = st.sidebar.radio("Settings", settings_pages, key="settings_page", label_visibility="collapsed")
+    elif module == "Admin":
+        page = "Admin Dashboard"
+    return {"module": module, "page": page}
+
+
 def main() -> None:
     bootstrap_dashboard_state()
     tenant = require_login()
@@ -1529,49 +1731,25 @@ def main() -> None:
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    st.sidebar.markdown("### Workspace")
-    if st.sidebar.button("Logout", use_container_width=True):
-        st.session_state["auth"] = {}
-        st.session_state["latest_subscription"] = {}
-        st.session_state["plan_onboarding_seen"] = ""
-        st.rerun()
-    refresh_enabled = st.sidebar.checkbox("Auto-refresh", value=True)
-    if refresh_enabled and st_autorefresh:
-        st_autorefresh(interval=30_000, key="dashboard_refresh")
-    st.sidebar.markdown("### Navigation")
-    pages = ["Dashboard", "Billing", "Live Leads", "Replies", "Outreach Logs", "Settings"]
-    if is_admin_user():
-        pages.append("Admin")
-    page = st.sidebar.radio("Page", pages, label_visibility="collapsed")
+    navigation = render_sidebar_navigation()
+    module = navigation["module"]
+    page = navigation["page"]
 
-    render_dashboard_header()
-    if page == "Dashboard":
-        snapshot_response = api_request("GET", "/dashboard/snapshot")
-        snapshot = snapshot_response.json()
-        if not snapshot_response.is_success:
-            st.error(str(snapshot.get("detail", "Could not load dashboard snapshot.")))
-            st.markdown("</div>", unsafe_allow_html=True)
-            return
-        frame = load_dashboard_data(tenant)
-        render_generation_status_card(snapshot)
-        render_actions(tenant)
-        render_dashboard_page(frame, snapshot)
-    elif page == "Billing":
-        render_billing_page()
-    elif page == "Live Leads":
-        frame = filtered_frame(load_dashboard_data(tenant))
-        render_table_page(frame, STANDARD_LEAD_EXPORT_COLUMNS)
-        render_agency_kit_panel(frame)
-    elif page == "Replies":
-        frame = load_dashboard_data(tenant)
-        render_table_page(frame, ["company_url", "verified_email", "country", "reply_status", "last_reply_at"])
-    elif page == "Outreach Logs":
-        frame = load_dashboard_data(tenant)
-        render_table_page(frame, ["company_url", "country", "industry", "outreach_status", "followup_count", "reply_status", "last_reply_at"])
-    elif page == "Admin":
+    if module == "Email CRM":
+        render_email_crm_page(tenant, page)
+    elif module == "Marketing Kit":
+        render_marketing_campaign_page(page)
+    elif module == "Settings":
+        if page == "Billing & Plan":
+            render_module_header("Settings", "Manage plans, billing, and workspace preferences.")
+            render_billing_page()
+        else:
+            render_module_header("Settings", "Manage workspace integrations and automation setup.")
+            render_settings_page()
+    elif module == "Admin":
         render_admin_page()
     else:
-        render_settings_page()
+        render_email_crm_page(tenant, "Generate Leads")
     st.markdown("</div>", unsafe_allow_html=True)
 
 
