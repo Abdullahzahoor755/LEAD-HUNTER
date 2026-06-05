@@ -5,6 +5,8 @@ Streamlit analytics dashboard backed by PostgreSQL.
 from __future__ import annotations
 
 from datetime import datetime
+import html
+import json
 import mimetypes
 import os
 from pathlib import Path
@@ -101,18 +103,176 @@ def render_landing_styles() -> None:
     st.markdown(
         """
         <style>
-        .stApp {
-            background:
-                radial-gradient(circle at 12% 10%, rgba(34, 211, 238, .18), transparent 28%),
-                radial-gradient(circle at 88% 8%, rgba(168, 85, 247, .18), transparent 28%),
-                radial-gradient(circle at 50% 90%, rgba(16, 185, 129, .10), transparent 32%),
-                linear-gradient(135deg, #050816 0%, #0a1024 48%, #070815 100%);
+        :root {
+            --page-max-width: 1160px;
+            --surface: rgba(15, 23, 42, .82);
+            --surface-strong: rgba(2, 6, 23, .9);
+            --surface-soft: rgba(15, 23, 42, .62);
+            --line: rgba(148, 163, 184, .16);
+            --line-strong: rgba(125, 211, 252, .2);
+            --text: #e2e8f0;
+            --text-strong: #f8fafc;
+            --muted: #94a3b8;
+            --accent: #22d3ee;
+            --accent-2: #8b5cf6;
         }
-        .block-container {padding-top: 2.25rem; padding-bottom: 2.5rem;}
+        .stApp {
+            color: var(--text);
+            background:
+                linear-gradient(180deg, rgba(14, 165, 233, .08), transparent 260px),
+                linear-gradient(135deg, #060814 0%, #0b1020 54%, #080b13 100%);
+        }
+        .block-container {
+            max-width: var(--page-max-width);
+            padding-top: 2.2rem;
+            padding-bottom: 2.5rem;
+            padding-left: 1.6rem;
+            padding-right: 1.6rem;
+        }
+        [data-testid="stHeader"] {
+            background: transparent;
+        }
+        [data-testid="stToolbar"] {visibility: hidden; height: 0;}
+        [data-testid="stDecoration"] {display: none;}
+        [data-testid="stSidebar"] {
+            background: #070b15;
+            border-right: 1px solid rgba(148, 163, 184, .12);
+        }
+        [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+            padding: 1.1rem .9rem;
+        }
+        [data-testid="stSidebar"] .stRadio [role="radiogroup"] {
+            gap: .35rem;
+        }
+        [data-testid="stSidebar"] .stRadio [role="radio"] {
+            border-radius: 8px;
+            padding: .48rem .62rem;
+            background: transparent;
+            border: 1px solid transparent;
+        }
+        [data-testid="stSidebar"] .stRadio [role="radio"][aria-checked="true"] {
+            background: rgba(15, 23, 42, .95);
+            border-color: rgba(148, 163, 184, .18);
+        }
+        [data-testid="stSidebar"] .stButton > button,
+        [data-testid="stSidebar"] .stCheckbox,
+        [data-testid="stSidebar"] .stRadio {
+            margin-bottom: .35rem;
+        }
+        [data-testid="stSidebar"] .stSlider {
+            padding-bottom: .25rem;
+        }
+        [data-testid="stSidebar"] label {
+            color: #cbd5e1 !important;
+        }
+        .app-shell {
+            max-width: var(--page-max-width);
+            margin: 0 auto;
+        }
+        .page-section {
+            margin-top: .9rem;
+        }
+        .page-card {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--surface);
+            box-shadow: 0 14px 34px rgba(0, 0, 0, .14), inset 0 1px 0 rgba(255, 255, 255, .035);
+        }
+        .page-card-inner {
+            padding: 1rem;
+        }
+        .page-title {
+            margin: 0;
+            font-size: 1.45rem;
+            line-height: 1.2;
+            color: var(--text-strong);
+            font-weight: 850;
+            letter-spacing: 0;
+        }
+        .page-subtitle {
+            margin: .35rem 0 0;
+            color: var(--muted);
+            line-height: 1.6;
+        }
+        .top-hero {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 1rem;
+            min-height: 156px;
+            max-height: 220px;
+            margin-top: .1rem;
+            margin-bottom: .9rem;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: rgba(15, 23, 42, .78);
+            padding: 1.05rem;
+            box-shadow: 0 16px 38px rgba(0, 0, 0, .16);
+        }
+        .hero-panel {
+            border: 0;
+            border-radius: 0;
+            background: transparent;
+            padding: 0;
+            box-shadow: none;
+        }
+        .hero-stack {display: flex; flex-direction: column; gap: .45rem; min-width: 0;}
+        .hero-title {
+            margin: 0;
+            color: var(--text-strong);
+            font-size: 2rem;
+            line-height: 1.15;
+            font-weight: 800;
+            letter-spacing: 0;
+        }
+        .hero-note {
+            color: var(--muted);
+            line-height: 1.5;
+            margin: 0;
+            max-width: 720px;
+        }
+        .hero-badge-row {
+            display: flex;
+            align-items: center;
+            gap: .5rem;
+            flex-wrap: wrap;
+            margin-top: 0;
+        }
+        .plan-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: .32rem .72rem;
+            border-radius: 999px;
+            border: 1px solid rgba(34, 211, 238, .28);
+            color: #c7f9ff;
+            background: rgba(8, 47, 73, .42);
+            font-size: .84rem;
+            font-weight: 800;
+            letter-spacing: 0;
+        }
+        .hero-metrics {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(210px, 1fr));
+            gap: .75rem;
+            margin-top: .9rem;
+        }
+        .hero-metric {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: rgba(15, 23, 42, .82);
+            padding: .85rem;
+            min-width: 0;
+            word-break: normal;
+            overflow-wrap: normal;
+        }
+        .hero-metric .label {color: var(--muted); font-size: .8rem; margin: 0 0 .35rem;}
+        .hero-metric .value {color: var(--text-strong); font-size: 1.12rem; font-weight: 800; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
+        .hero-metric .hint {color: #cbd5e1; font-size: .82rem; margin: .2rem 0 0;}
         .landing-shell {
             position: relative;
             overflow: hidden;
-            border: 1px solid rgba(148, 163, 184, .18);
+            border: 1px solid var(--line);
             border-radius: 18px;
             padding: 1.35rem;
             background: linear-gradient(145deg, rgba(15, 23, 42, .82), rgba(2, 6, 23, .7));
@@ -199,9 +359,8 @@ def render_landing_styles() -> None:
         }
         .feature-card {
             border: 1px solid rgba(148, 163, 184, .18);
-            border-radius: 14px;
+            border-radius: 8px;
             padding: 1rem;
-            min-height: 158px;
             background: linear-gradient(150deg, rgba(15, 23, 42, .72), rgba(15, 23, 42, .36));
             box-shadow: inset 0 1px 0 rgba(255, 255, 255, .07), 0 16px 40px rgba(0, 0, 0, .18);
         }
@@ -209,7 +368,7 @@ def render_landing_styles() -> None:
         .feature-card p {margin: 0; color: #cbd5e1; line-height: 1.55;}
         .auth-card {
             border: 1px solid rgba(125, 211, 252, .24);
-            border-radius: 18px;
+            border-radius: 8px;
             padding: 1.15rem 1.15rem .9rem;
             background: linear-gradient(180deg, rgba(15, 23, 42, .86), rgba(2, 6, 23, .74));
             box-shadow: 0 22px 70px rgba(0, 0, 0, .35), 0 0 0 1px rgba(255, 255, 255, .04) inset;
@@ -239,10 +398,150 @@ def render_landing_styles() -> None:
             background: linear-gradient(90deg, #22d3ee, #a78bfa);
             box-shadow: 0 12px 32px rgba(34, 211, 238, .18);
         }
-        .plan-card {border: 1px solid rgba(148, 163, 184, .22); border-radius: 8px; padding: 1rem; min-height: 330px; background: rgba(15, 23, 42, .72); color: #e2e8f0;}
+        .plan-card {border: 1px solid rgba(148, 163, 184, .22); border-radius: 8px; padding: 1rem; background: rgba(15, 23, 42, .72); color: #e2e8f0;}
         .plan-card-active {border: 2px solid #22d3ee;}
         .plan-price {font-size: 1.4rem; font-weight: 800; color: #f8fafc;}
-        .plan-badge {display: inline-block; border-radius: 999px; padding: .25rem .7rem; background: #eef2ff; color: #3730a3; font-weight: 700;}
+        .premium-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: .35rem;
+            border-radius: 999px;
+            padding: .26rem .7rem;
+            border: 1px solid rgba(244, 114, 182, .24);
+            background: rgba(76, 29, 149, .26);
+            color: #f5d0fe;
+            font-size: .78rem;
+            font-weight: 800;
+        }
+        .section-title {
+            margin: 0 0 .25rem;
+            color: var(--text-strong);
+            font-size: 1.15rem;
+            font-weight: 850;
+        }
+        .section-caption {
+            margin: 0 0 .9rem;
+            color: var(--muted);
+            line-height: 1.55;
+        }
+        .section-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: .85rem;
+        }
+        .panel-card {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--surface);
+            padding: .9rem;
+            min-width: 0;
+            word-break: normal;
+            overflow-wrap: normal;
+        }
+        .panel-card h3, .panel-card h4 {color: var(--text-strong); margin-top: 0;}
+        .panel-card p, .panel-card li, .panel-card caption {color: var(--text);}
+        .locked-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(220px, 1fr));
+            gap: .75rem;
+            margin-top: .8rem;
+        }
+        .dashboard-input [data-testid="stTextInput"] {
+            margin-bottom: .65rem;
+        }
+        .dashboard-input input {
+            background: rgba(2, 6, 23, .48) !important;
+            border-color: rgba(148, 163, 184, .22) !important;
+            color: var(--text-strong) !important;
+        }
+        .dashboard-input label {
+            color: #dbeafe !important;
+            font-weight: 650;
+        }
+        .dashboard-actions .stButton > button,
+        .dashboard-actions [data-testid="stFormSubmitButton"] button,
+        .dashboard-actions .stDownloadButton button {
+            width: 100%;
+            min-height: 2.55rem;
+            border-radius: 8px;
+        }
+        .dashboard-actions .stButton > button {
+            background: linear-gradient(90deg, #22d3ee, #a78bfa);
+            color: #06101f;
+            font-weight: 900;
+            border: 0;
+        }
+        .dashboard-actions .premium-action {
+            border: 1px solid rgba(244, 114, 182, .22);
+            background: rgba(76, 29, 149, .18);
+            color: #f5d0fe;
+        }
+        .locked-action {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: .5rem;
+        }
+        .settings-note {
+            color: var(--muted);
+            line-height: 1.55;
+            margin: .2rem 0 .85rem;
+        }
+        .summary-stack {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: .4rem;
+            color: var(--muted);
+            font-size: .86rem;
+            max-width: 380px;
+            text-align: right;
+        }
+        .summary-stack span {
+            display: block;
+            max-width: 100%;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .admin-title {
+            margin: 0 0 .8rem;
+            color: var(--text-strong);
+            font-size: 1.45rem;
+            line-height: 1.2;
+            font-weight: 800;
+            letter-spacing: 0;
+        }
+        .main-title {
+            margin: 0 0 .3rem;
+            color: var(--text-strong);
+            font-size: 1.4rem;
+            line-height: 1.2;
+            font-weight: 800;
+            letter-spacing: 0;
+        }
+        .main-subtitle {
+            color: var(--muted);
+            margin: 0 0 .85rem;
+            line-height: 1.5;
+        }
+        @media (max-width: 980px) {
+            .block-container {padding-left: 1rem; padding-right: 1rem; padding-top: 1.4rem;}
+            .top-hero {
+                display: block;
+                max-height: none;
+                min-height: 0;
+            }
+            .summary-stack {
+                align-items: flex-start;
+                text-align: left;
+                margin-top: .85rem;
+            }
+            .hero-metrics,
+            .locked-grid {
+                grid-template-columns: 1fr;
+            }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -333,9 +632,9 @@ def require_login() -> TenantContext | None:
         login_tab, signup_tab = st.tabs(["Login", "Create Free Account"])
         with login_tab:
             with st.form("admin_login"):
-                tenant_id = st.text_input("Tenant ID", value="Tenant-id1")
-                email = st.text_input("Email", value="abdullahzahoorsdk139@gmail.com")
-                password = st.text_input("Password", type="password", value="78563214")
+                tenant_id = st.text_input("Tenant ID", value="", placeholder="Tenant ID")
+                email = st.text_input("Email", value="", placeholder="you@company.com")
+                password = st.text_input("Password", value="", type="password", placeholder="Enter password")
                 submitted = st.form_submit_button("Login", use_container_width=True)
             if submitted:
                 try:
@@ -360,11 +659,11 @@ def require_login() -> TenantContext | None:
                     st.error(str(error))
         with signup_tab:
             with st.form("signup_form"):
-                signup_tenant = st.text_input("Workspace / Tenant ID", placeholder="my-business")
-                signup_name = st.text_input("Business Name", placeholder="Acme Agency")
-                signup_email = st.text_input("Work Email", placeholder="you@company.com")
-                signup_full_name = st.text_input("Your Name", placeholder="Your name")
-                signup_password = st.text_input("Password", type="password")
+                signup_tenant = st.text_input("Workspace / Tenant ID", value="", placeholder="my-business")
+                signup_name = st.text_input("Business Name", value="", placeholder="Acme Agency")
+                signup_email = st.text_input("Work Email", value="", placeholder="you@company.com")
+                signup_full_name = st.text_input("Your Name", value="", placeholder="Your name")
+                signup_password = st.text_input("Password", value="", type="password", placeholder="Create a password")
                 signup_submitted = st.form_submit_button("Start Free", use_container_width=True)
             if signup_submitted:
                 tenant_id = signup_tenant.strip()
@@ -549,74 +848,74 @@ def enqueue_job(agent_name: str, payload: Dict[str, Any] | None = None, *, run_n
 
 
 def render_actions(tenant: TenantContext) -> None:
-    st.subheader("Lead Generation Settings")
+    pro_enabled = has_pro_features()
+    st.markdown(
+        """
+        <div class="page-section page-card">
+            <div class="page-card-inner dashboard-actions">
+                <div class="section-title">Lead Generation Settings</div>
+                <div class="section-caption">Pick a niche and region, then launch lead discovery or automation tasks.</div>
+        """,
+        unsafe_allow_html=True,
+    )
     col_ind, col_loc = st.columns(2)
     with col_ind:
         target_industry = st.text_input("Target Industry", placeholder="e.g. software, logistics")
     with col_loc:
         target_country = st.text_input("Target Country", placeholder="e.g. Saudi Arabia, USA")
 
-    first, second = st.columns(2)
-    third, fourth = st.columns(2)
-    with first:
-        busy = bool(st.session_state.get("lead_generation_busy", False))
-        if st.button("Generate Leads", use_container_width=True, disabled=busy):
-            query_parts = []
-            if target_industry.strip():
-                query_parts.append(f"{target_industry.strip()} companies")
-            if target_country.strip():
-                query_parts.append(f"in {target_country.strip()}")
-            search_query = " ".join(query_parts)
+    busy = bool(st.session_state.get("lead_generation_busy", False))
+    if st.button("Generate Leads", use_container_width=True, disabled=busy):
+        query_parts = []
+        if target_industry.strip():
+            query_parts.append(f"{target_industry.strip()} companies")
+        if target_country.strip():
+            query_parts.append(f"in {target_country.strip()}")
+        search_query = " ".join(query_parts)
 
-            st.session_state["lead_generation_busy"] = True
-            with st.spinner("AI agent is finding leads... this may take 1-3 minutes."):
-                st.info("AI agent is finding leads... this may take 1-3 minutes.")
-                for step in ["Searching businesses...", "Scanning websites...", "Extracting contacts...", "Saving leads..."]:
-                    st.write(step)
-                try:
-                    enqueue_job("lead_generation", {"limit": 10, "query": search_query}, run_now=True)
-                    st.success("Lead generation completed. Refresh to see the latest saved leads.")
-                    st.caption("Job ran successfully.")
-                finally:
-                    st.session_state["lead_generation_busy"] = False
-    with second:
-        if st.button("Send Outreach", use_container_width=True):
-            if not has_pro_features():
-                st.warning(LOCKED_FEATURE_MESSAGE)
-                return
+        st.session_state["lead_generation_busy"] = True
+        with st.spinner("AI agent is finding leads... this may take 1-3 minutes."):
+            st.info("AI agent is finding leads... this may take 1-3 minutes.")
+            for step in ["Searching businesses...", "Scanning websites...", "Extracting contacts...", "Saving leads..."]:
+                st.write(step)
+            try:
+                enqueue_job("lead_generation", {"limit": 10, "query": search_query}, run_now=True)
+                st.success("Lead generation completed. Refresh to see the latest saved leads.")
+                st.caption("Job ran successfully.")
+            finally:
+                st.session_state["lead_generation_busy"] = False
+
+    action_cols = st.columns(3)
+    with action_cols[0]:
+        if st.button("Send Outreach - Pro", use_container_width=True, disabled=not pro_enabled):
             with st.spinner("Queueing outreach..."):
                 enqueue_job("outreach")
                 st.success("Outreach job queued.")
-    with third:
-        if st.button("Check Replies", use_container_width=True):
-            if not has_pro_features():
-                st.warning(LOCKED_FEATURE_MESSAGE)
-                return
+    with action_cols[1]:
+        if st.button("Check Replies - Pro", use_container_width=True, disabled=not pro_enabled):
             with st.spinner("Queueing reply check..."):
                 enqueue_job("reply_monitor", {"mode": "once"})
                 st.success("Reply monitor job queued.")
-    with fourth:
-        if st.button("Run Followups", use_container_width=True):
-            if not has_pro_features():
-                st.warning(LOCKED_FEATURE_MESSAGE)
-                return
+    with action_cols[2]:
+        if st.button("Run Followups - Pro", use_container_width=True, disabled=not pro_enabled):
             with st.spinner("Queueing followups..."):
                 enqueue_job("followup")
                 st.success("Follow-up job queued.")
-    if not has_pro_features():
-        st.caption("Pro automation features")
-        locked = st.columns(3)
-        locked_features = [
-            "Gmail Automation",
-            "Send Outreach",
-            "Reply Monitor",
-            "Followups",
-            "Email CRM",
-            "AI Smart Scoring",
-        ]
-        for index, label in enumerate(locked_features):
-            with locked[index % 3]:
-                st.info(f"Locked: {label}\n\nThis feature is available in Pro plan.")
+
+    if not pro_enabled:
+        locked_features = ["Gmail Automation", "Email CRM", "AI Smart Scoring"]
+        locked_cards = "".join(
+            (
+                '<div class="panel-card">'
+                '<span class="premium-badge">Pro</span>'
+                f'<h4>{html.escape(label)}</h4>'
+                '<p>Upgrade to unlock automated outreach, reply tracking, and Gmail workflows.</p>'
+                "</div>"
+            )
+            for label in locked_features
+        )
+        st.markdown(f'<div class="locked-grid">{locked_cards}</div>', unsafe_allow_html=True)
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
 def load_recent_jobs() -> List[Dict[str, Any]]:
@@ -636,14 +935,29 @@ def render_generation_status_card(snapshot: Dict[str, Any]) -> None:
     queued_or_running = [
         job for job in jobs if str(job.get("status", "")).strip().lower() in {"queued", "running"}
     ]
-    columns = st.columns(4)
-    columns[0].metric("Last job status", str(latest_job.get("status", "unknown") or "unknown").title())
-    columns[1].metric("Total leads", int(snapshot.get("lead_count", 0) or 0))
-    columns[2].metric("Jobs queued/running", len(queued_or_running))
-    columns[3].metric("Last refresh", datetime.utcnow().strftime("%H:%M:%S UTC"))
+    metrics = [
+        ("Last job status", str(latest_job.get("status", "unknown") or "unknown").title(), "Current pipeline"),
+        ("Total leads", str(int(snapshot.get("lead_count", 0) or 0)), "Saved in workspace"),
+        ("Jobs queued/running", str(len(queued_or_running)), "Active processing"),
+        ("Last refresh", datetime.utcnow().strftime("%H:%M:%S UTC"), "Latest sync"),
+    ]
+    cards = "".join(
+        (
+            '<div class="hero-metric">'
+            f'<p class="label">{html.escape(label)}</p>'
+            f'<p class="value">{html.escape(value)}</p>'
+            f'<p class="hint">{html.escape(hint)}</p>'
+            "</div>"
+        )
+        for label, value, hint in metrics
+    )
+    st.markdown(f'<div class="page-section"><div class="hero-metrics">{cards}</div></div>', unsafe_allow_html=True)
 
 
 def render_dashboard_page(frame: pd.DataFrame, snapshot: Dict[str, Any]) -> None:
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Pipeline Overview</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-caption">A compact view of output, sends, replies, and current workload.</div>', unsafe_allow_html=True)
     metrics = st.columns(4)
     metrics[0].metric("Leads", int(snapshot.get("lead_count", 0)))
     metrics[1].metric("Sent", int(snapshot.get("sent_count", 0)))
@@ -651,12 +965,14 @@ def render_dashboard_page(frame: pd.DataFrame, snapshot: Dict[str, Any]) -> None
     metrics[3].metric("Jobs", int(snapshot.get("job_count", 0)))
     if frame.empty:
         st.info("No leads yet. Enter a niche and country to generate your first leads.")
+        st.markdown("</div></div>", unsafe_allow_html=True)
         return
     chart_left, chart_right = st.columns(2)
     with chart_left:
         st.plotly_chart(px.histogram(frame, x="score", nbins=10, title="Lead Scores"), use_container_width=True)
     with chart_right:
         st.plotly_chart(px.pie(frame, names="outreach_status", title="Pipeline"), use_container_width=True)
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
 def render_table_page(frame: pd.DataFrame, columns: List[str]) -> None:
@@ -690,16 +1006,50 @@ def sanitize_csv_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return protected
 
 
+def load_uploaded_json(uploaded_file: Any) -> Dict[str, Any]:
+    if uploaded_file is None:
+        return {}
+    raw = uploaded_file.getvalue()
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    return json.loads(str(raw or "{}"))
+
+
+def extract_google_oauth_client(credentials_json: Dict[str, Any]) -> Dict[str, str]:
+    client_config = credentials_json.get("installed") or credentials_json.get("web") or credentials_json
+    return {
+        "client_id": str(client_config.get("client_id", "")).strip(),
+        "client_secret": str(client_config.get("client_secret", "")).strip(),
+    }
+
+
 def render_settings_page() -> None:
-    st.subheader("Settings")
-    st.caption("Dashboard is backed by PostgreSQL and authenticated against tenant users.")
+    st.markdown(
+        """
+        <div class="page-section">
+            <div class="main-title">Settings</div>
+            <div class="main-subtitle">Manage workspace integrations and automation setup.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     render_gmail_settings()
 
 
 def render_gmail_settings() -> None:
-    st.subheader("Gmail Settings")
+    st.markdown(
+        """
+        <div class="page-section dashboard-actions">
+            <div class="page-card">
+                <div class="page-card-inner">
+                    <div class="section-title">Gmail Automation Setup</div>
+                    <div class="settings-note">Beta setup requires Google credentials.json and token.json. One-click Gmail connect is coming soon.</div>
+        """,
+        unsafe_allow_html=True,
+    )
     if not has_pro_features():
         st.warning(LOCKED_FEATURE_MESSAGE)
+        st.markdown("</div></div></div>", unsafe_allow_html=True)
         return
     try:
         status_response = api_request("GET", "/settings/providers/gmail/status")
@@ -709,30 +1059,47 @@ def render_gmail_settings() -> None:
         status = {"configured": False, "sender_email": ""}
     configured = bool(status.get("configured"))
     sender_email = str(status.get("sender_email", "") or "")
-    st.caption(f"Status: {'configured' if configured else 'not configured'}")
+    st.caption(f"Status: {'connected' if configured else 'not connected'}")
     if sender_email:
         st.caption(f"Sender: {sender_email}")
 
     with st.form("gmail_credentials_form"):
-        client_id = st.text_input("client_id")
-        client_secret = st.text_input("client_secret", type="password")
-        refresh_token = st.text_input("refresh_token", type="password")
-        sender_email_input = st.text_input("sender_email", value=sender_email)
-        submitted = st.form_submit_button("Save Gmail Credentials", use_container_width=True)
+        credentials_file = st.file_uploader("Upload credentials.json", type=["json"])
+        token_file = st.file_uploader("Upload token.json", type=["json"])
+        sender_email_input = st.text_input("Sender email", value=sender_email, placeholder="sales@company.com")
+        submitted = st.form_submit_button("Save Gmail Connection", use_container_width=True)
     if submitted:
+        if credentials_file is None or token_file is None or not sender_email_input.strip():
+            st.error("credentials.json, token.json, and sender email are required.")
+            st.markdown("</div></div></div>", unsafe_allow_html=True)
+            return
+        try:
+            credentials_json = load_uploaded_json(credentials_file)
+            token_json = load_uploaded_json(token_file)
+            client = extract_google_oauth_client(credentials_json)
+            refresh_token = str(token_json.get("refresh_token", "")).strip()
+        except Exception as error:
+            st.error(f"Could not read Gmail setup files: {error}")
+            st.markdown("</div></div></div>", unsafe_allow_html=True)
+            return
+        if not client["client_id"] or not client["client_secret"] or not refresh_token:
+            st.error("Uploaded files are missing client_id, client_secret, or refresh_token.")
+            st.markdown("</div></div></div>", unsafe_allow_html=True)
+            return
         payload = {
-            "client_id": client_id.strip(),
-            "client_secret": client_secret.strip(),
-            "refresh_token": refresh_token.strip(),
+            "client_id": client["client_id"],
+            "client_secret": client["client_secret"],
+            "refresh_token": refresh_token,
             "sender_email": sender_email_input.strip(),
         }
         response = api_request("POST", "/settings/providers/gmail", json=payload)
         body = parse_api_json(response)
         if response.is_success:
-            st.success("Gmail credentials saved.")
+            st.success("Gmail connection saved.")
             st.rerun()
         else:
-            st.error(str(body.get("detail", "Could not save Gmail credentials.")))
+            st.error(str(body.get("detail", "Could not save Gmail connection.")))
+    st.markdown("</div></div></div>", unsafe_allow_html=True)
 
 
 def infer_subscription_status() -> str:
@@ -811,24 +1178,42 @@ def render_plan_onboarding() -> bool:
 def render_dashboard_header() -> None:
     auth = st.session_state.get("auth", {}) or {}
     plan = current_plan()
-    usage = PLAN_DETAILS[plan]["usage"]
-    st.markdown("## Welcome to Lead Hunter AI")
-    st.caption("Generate leads, review contacts, export CSV, and upgrade when you're ready to automate outreach.")
-    left, right = st.columns([3, 1])
-    with left:
-        st.caption(f"Tenant: {auth.get('tenant_id', '')} | User: {auth.get('email', '')} | Last refresh: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
-    with right:
-        st.markdown(f'<span class="plan-badge">{plan}</span>', unsafe_allow_html=True)
-        st.caption(usage)
+    tenant_id = html.escape(str(auth.get("tenant_id", "")))
+    user_email = html.escape(str(auth.get("email", "")))
+    usage = html.escape(PLAN_DETAILS[plan]["usage"])
+    status = html.escape(infer_subscription_status().replace("_", " ").title())
+    st.markdown(
+        f"""
+        <div class="top-hero">
+            <div class="hero-stack">
+                <h1 class="hero-title">Lead Hunter AI</h1>
+                <p class="hero-note">Generate leads, review contacts, export CSVs, and manage outreach from one clean workspace.</p>
+            </div>
+            <div class="summary-stack">
+                <div class="hero-badge-row">
+                    <span class="plan-badge">{html.escape(plan)}</span>
+                    <span class="premium-badge">{status}</span>
+                </div>
+                <span>{tenant_id}</span>
+                <span>{user_email}</span>
+                <span>{usage}</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_subscription_card() -> None:
     auth = st.session_state.get("auth", {})
-    st.subheader("Subscription")
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Subscription</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-caption">Keep an eye on tenant plan and billing state.</div>', unsafe_allow_html=True)
     col1, col2, col3 = st.columns(3)
     col1.metric("Tenant", str(auth.get("tenant_id", "")))
     col2.metric("Plan", current_plan())
     col3.metric("Status", infer_subscription_status().replace("_", " ").title())
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
 def render_latest_subscription_response() -> None:
@@ -935,9 +1320,13 @@ def render_proof_upload() -> None:
 
 def render_billing_page() -> None:
     render_subscription_card()
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Billing</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-caption">Plan selection, subscription requests, and payment proof uploads.</div>', unsafe_allow_html=True)
     render_payment_history()
     render_subscribe_section()
     render_proof_upload()
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
 def render_admin_payments() -> None:
@@ -973,8 +1362,10 @@ def admin_get(path: str) -> Dict[str, Any]:
 
 
 def render_admin_summary() -> None:
-    st.subheader("Admin Dashboard")
-    st.markdown('<span class="plan-badge">Admin</span>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="page-section"><div class="admin-title">Admin Dashboard <span class="plan-badge">Admin</span></div></div>',
+        unsafe_allow_html=True,
+    )
     summary = admin_get("/admin/summary")
     if not summary:
         return
@@ -992,6 +1383,7 @@ def render_admin_summary() -> None:
         ("Leads Today", "leads_generated_today"),
         ("Failed Jobs", "failed_jobs"),
     ]
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
     for start in range(0, len(labels), 4):
         columns = st.columns(4)
         for column, (label, key) in zip(columns, labels[start:start + 4]):
@@ -1001,6 +1393,7 @@ def render_admin_summary() -> None:
         f"Running jobs: {int(summary.get('running_jobs', 0) or 0)} | "
         f"Failed jobs: {int(summary.get('failed_jobs', 0) or 0)}"
     )
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
 def render_admin_tables() -> None:
@@ -1051,45 +1444,55 @@ def main() -> None:
     tenant = require_login()
     if tenant is None:
         return
-    auth = st.session_state["auth"]
     render_landing_styles()
+    st.markdown('<div class="app-shell">', unsafe_allow_html=True)
     if render_plan_onboarding():
+        st.markdown("</div>", unsafe_allow_html=True)
         return
-    render_dashboard_header()
+
+    st.sidebar.markdown("### Workspace")
     if st.sidebar.button("Logout", use_container_width=True):
         st.session_state["auth"] = {}
         st.session_state["latest_subscription"] = {}
         st.session_state["plan_onboarding_seen"] = ""
         st.rerun()
-    refresh_enabled = st.sidebar.checkbox("Auto-refresh every 30 seconds", value=True)
+    refresh_enabled = st.sidebar.checkbox("Auto-refresh", value=True)
     if refresh_enabled and st_autorefresh:
         st_autorefresh(interval=30_000, key="dashboard_refresh")
+    st.sidebar.markdown("### Navigation")
     pages = ["Dashboard", "Billing", "Live Leads", "Replies", "Outreach Logs", "Settings"]
     if is_admin_user():
         pages.append("Admin")
-    page = st.sidebar.radio("Navigation", pages)
-    snapshot_response = api_request("GET", "/dashboard/snapshot")
-    snapshot = snapshot_response.json()
-    if not snapshot_response.is_success:
-        st.error(str(snapshot.get("detail", "Could not load dashboard snapshot.")))
-        return
-    frame = filtered_frame(load_dashboard_data(tenant))
+    page = st.sidebar.radio("Page", pages, label_visibility="collapsed")
+
+    render_dashboard_header()
     if page == "Dashboard":
+        snapshot_response = api_request("GET", "/dashboard/snapshot")
+        snapshot = snapshot_response.json()
+        if not snapshot_response.is_success:
+            st.error(str(snapshot.get("detail", "Could not load dashboard snapshot.")))
+            st.markdown("</div>", unsafe_allow_html=True)
+            return
+        frame = load_dashboard_data(tenant)
         render_generation_status_card(snapshot)
         render_actions(tenant)
         render_dashboard_page(frame, snapshot)
     elif page == "Billing":
         render_billing_page()
     elif page == "Live Leads":
+        frame = filtered_frame(load_dashboard_data(tenant))
         render_table_page(frame, STANDARD_LEAD_EXPORT_COLUMNS)
     elif page == "Replies":
+        frame = load_dashboard_data(tenant)
         render_table_page(frame, ["company_url", "verified_email", "country", "reply_status", "last_reply_at"])
     elif page == "Outreach Logs":
+        frame = load_dashboard_data(tenant)
         render_table_page(frame, ["company_url", "country", "industry", "outreach_status", "followup_count", "reply_status", "last_reply_at"])
     elif page == "Admin":
         render_admin_page()
     else:
         render_settings_page()
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
