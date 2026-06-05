@@ -1167,7 +1167,78 @@ def extract_google_oauth_client(credentials_json: Dict[str, Any]) -> Dict[str, s
 
 
 def render_settings_page() -> None:
+    render_ai_provider_settings()
     render_gmail_settings()
+
+
+def render_ai_provider_settings() -> None:
+    provider_defaults = {
+        "fallback": "",
+        "openai": "gpt-4o-mini",
+        "anthropic": "claude-3-5-haiku-latest",
+        "gemini": "gemini-1.5-flash",
+        "groq": "llama-3.1-8b-instant",
+        "openrouter": "openai/gpt-4o-mini",
+    }
+    providers = list(provider_defaults.keys())
+    st.markdown(
+        """
+        <div class="page-section dashboard-actions">
+            <div class="page-card">
+                <div class="page-card-inner">
+                    <div class="section-title">AI Provider Settings</div>
+                    <div class="settings-note">Choose an optional AI provider for enhanced outputs. Rule-based fallback stays available without an API key.</div>
+        """,
+        unsafe_allow_html=True,
+    )
+    try:
+        status_response = api_request("GET", "/settings/providers/ai/status")
+        status = parse_api_json(status_response)
+    except Exception as error:
+        st.error(f"Could not load AI provider status: {error}")
+        status = {"configured": False, "provider": "fallback", "model": "", "enabled": False}
+    configured = bool(status.get("configured"))
+    current_provider = str(status.get("provider") or "fallback").strip().lower()
+    if current_provider not in providers:
+        current_provider = "fallback"
+    current_model = str(status.get("model") or provider_defaults[current_provider]).strip()
+    enabled = bool(status.get("enabled", False))
+    st.caption(f"Status: {'configured' if configured else 'fallback only'}")
+    st.caption(f"Provider: {current_provider} | Model: {current_model or 'none'} | Enabled: {'yes' if enabled else 'no'}")
+
+    with st.form("ai_provider_settings_form"):
+        selected_provider = st.selectbox("Provider", providers, index=providers.index(current_provider))
+        suggested_model = provider_defaults.get(selected_provider, "")
+        api_key = st.text_input("API Key", value="", type="password", placeholder="Stored securely; leave blank to keep existing key")
+        model = st.text_input("Model", value=current_model or suggested_model, placeholder=suggested_model or "No model required")
+        enabled_input = st.checkbox("Enabled", value=enabled or selected_provider == "fallback")
+        submitted = st.form_submit_button("Save AI Provider", use_container_width=True)
+    if submitted:
+        response = api_request(
+            "POST",
+            "/settings/providers/ai",
+            json={
+                "provider": selected_provider,
+                "api_key": api_key.strip(),
+                "model": model.strip() or suggested_model,
+                "enabled": enabled_input,
+            },
+        )
+        body = parse_api_json(response)
+        if response.is_success:
+            st.success("AI provider settings saved.")
+            st.rerun()
+        else:
+            st.error(str(body.get("detail", "Could not save AI provider settings.")))
+
+    if st.button("Test Connection", use_container_width=True):
+        response = api_request("POST", "/settings/providers/ai/test", json={})
+        body = parse_api_json(response)
+        if response.is_success and body.get("success"):
+            st.success("AI provider responded successfully.")
+        else:
+            st.warning(str(body.get("message", "AI provider test failed safely.")))
+    st.markdown("</div></div></div>", unsafe_allow_html=True)
 
 
 def render_gmail_settings() -> None:

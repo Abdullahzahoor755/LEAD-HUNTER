@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import re
 from typing import Any, Dict, Sequence
 from urllib.parse import urlparse
@@ -10,6 +11,7 @@ from urllib.parse import urlparse
 from app.core.models import Lead, TenantContext
 from app.core.tenant import TenantIsolationError, assert_same_tenant
 from app.db.session import AsyncDatabaseSession, DatabaseSession
+from app.services.ai_provider_service import AIProviderNotConfigured, AIProviderService
 from app.services._async import maybe_await
 
 
@@ -26,16 +28,22 @@ class AgencyGrowthService:
     async def generate_offer_match(self, lead: Lead, tenant: TenantContext) -> Dict[str, Any]:
         self._assert_lead_tenant(lead, tenant)
         offer_match = self.build_offer_match(lead)
+        offer_match = await self._enhance_with_ai(tenant, offer_match, "Lead-to-Offer Matchmaker")
         await self._save_metadata(tenant, lead, "offer_match", offer_match)
         return offer_match
 
     async def generate_whatsapp_sales_kit(self, lead: Lead, tenant: TenantContext) -> Dict[str, Any]:
         self._assert_lead_tenant(lead, tenant)
         sales_kit = self.build_whatsapp_sales_kit(lead)
+        sales_kit = await self._enhance_with_ai(tenant, sales_kit, "WhatsApp Sales Script Generator")
         await self._save_metadata(tenant, lead, "whatsapp_sales_kit", sales_kit)
         return sales_kit
 
-    def generate_mini_agency_plan(self, payload: Dict[str, Any], tenant: TenantContext) -> Dict[str, Any]:
+    async def generate_mini_agency_plan(self, payload: Dict[str, Any], tenant: TenantContext) -> Dict[str, Any]:
+        plan = self.build_mini_agency_plan(payload)
+        return await self._enhance_with_ai(tenant, plan, "Build My Mini Agency Mode")
+
+    def build_mini_agency_plan(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         skill = str(payload.get("skill") or "other").strip().lower()
         target_country = str(payload.get("target_country") or "").strip()
         target_city = str(payload.get("target_city") or "").strip()
@@ -59,6 +67,43 @@ class AgencyGrowthService:
             "next_action": "Pick one niche, collect 25 leads, and send 10 friendly outreach messages today.",
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
+
+    async def _enhance_with_ai(self, tenant: TenantContext, payload: Dict[str, Any], feature_name: str) -> Dict[str, Any]:
+        service = AIProviderService(self.db)
+        try:
+            enhanced = await service.generate_text(
+                tenant,
+                system_prompt=(
+                    "You refine agency operating system JSON for freelancers. Keep the same object shape, "
+                    "make it concise and practical, avoid spammy language, and return only valid JSON."
+                ),
+                user_prompt=(
+                    f"Improve this {feature_name} output while preserving required fields:\n"
+                    f"{json.dumps(payload, ensure_ascii=True)}"
+                ),
+                json_mode=True,
+                temperature=0.25,
+                max_tokens=1800,
+            )
+            status = await service.status(tenant)
+        except AIProviderNotConfigured:
+            return payload
+        except Exception:
+            fallback = dict(payload)
+            fallback["mode"] = "fallback"
+            fallback["ai_error"] = "AI provider failed; fallback used"
+            return fallback
+        if isinstance(enhanced, dict):
+            merged = dict(payload)
+            merged.update(enhanced)
+            merged["mode"] = "ai_enhanced"
+            merged["provider"] = status.get("provider", "")
+            return merged
+        merged = dict(payload)
+        merged["mode"] = "ai_enhanced"
+        merged["provider"] = status.get("provider", "")
+        merged["ai_notes"] = str(enhanced)
+        return merged
 
     def build_offer_match(self, lead: Lead) -> Dict[str, Any]:
         profile = self._offer_profile(lead)

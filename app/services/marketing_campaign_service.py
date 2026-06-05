@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import re
 from typing import Any, Dict, Sequence
 from urllib.parse import urlparse
 
 from app.core.models import Lead, Tenant, TenantContext
 from app.db.session import AsyncDatabaseSession, DatabaseSession
+from app.services.ai_provider_service import AIProviderNotConfigured, AIProviderService
 from app.services._async import maybe_await
 
 
@@ -37,12 +39,13 @@ class MarketingCampaignService:
         campaign_goal: str = "",
     ) -> Dict[str, Any]:
         await self._consume_usage(tenant)
-        return self.build_campaign(
+        campaign = self.build_campaign(
             business_idea=business_idea,
             target_location=target_location,
             target_audience=target_audience,
             campaign_goal=campaign_goal,
         )
+        return await self._enhance_with_ai(tenant, campaign, "Marketing Campaign Kit")
 
     async def generate_from_lead(self, tenant: TenantContext, lead_id: str) -> Dict[str, Any]:
         lead = await maybe_await(self.db.leads.get(tenant.tenant_id, lead_id))
@@ -50,6 +53,7 @@ class MarketingCampaignService:
             raise ValueError("Lead not found.")
         await self._consume_usage(tenant)
         campaign = self.build_from_lead(lead)
+        campaign = await self._enhance_with_ai(tenant, campaign, "Lead-based Marketing Campaign Kit")
         metadata = dict(lead.metadata or {})
         metadata["marketing_campaign_kit"] = campaign
         lead.metadata = metadata
@@ -107,6 +111,43 @@ class MarketingCampaignService:
             "next_action": "Launch the campaign with one offer, one landing page, and a small test budget for 7 days.",
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
+
+    async def _enhance_with_ai(self, tenant: TenantContext, payload: Dict[str, Any], feature_name: str) -> Dict[str, Any]:
+        service = AIProviderService(self.db)
+        try:
+            enhanced = await service.generate_text(
+                tenant,
+                system_prompt=(
+                    "You refine marketing campaign JSON for small agencies. Preserve the same object shape, "
+                    "make copy clearer, avoid unrealistic promises, and return only valid JSON."
+                ),
+                user_prompt=(
+                    f"Improve this {feature_name} while keeping all required fields:\n"
+                    f"{json.dumps(payload, ensure_ascii=True)}"
+                ),
+                json_mode=True,
+                temperature=0.25,
+                max_tokens=1800,
+            )
+            status = await service.status(tenant)
+        except AIProviderNotConfigured:
+            return payload
+        except Exception:
+            fallback = dict(payload)
+            fallback["mode"] = "fallback"
+            fallback["ai_error"] = "AI provider failed; fallback used"
+            return fallback
+        if isinstance(enhanced, dict):
+            merged = dict(payload)
+            merged.update(enhanced)
+            merged["mode"] = "ai_enhanced"
+            merged["provider"] = status.get("provider", "")
+            return merged
+        merged = dict(payload)
+        merged["mode"] = "ai_enhanced"
+        merged["provider"] = status.get("provider", "")
+        merged["ai_notes"] = str(enhanced)
+        return merged
 
     async def _consume_usage(self, tenant: TenantContext) -> None:
         tenant_record = await self._get_tenant(tenant.tenant_id)

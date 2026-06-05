@@ -25,6 +25,7 @@ from app.services.auth_service import AuthService
 from app.services.admin_analytics_service import AdminAnalyticsService
 from app.services.agency_growth_service import AgencyGrowthService
 from app.services.agency_kit_service import AgencyKitLimitError, AgencyKitService
+from app.services.ai_provider_service import AIProviderNotConfigured, AIProviderService
 from app.services.billing_service import BillingService
 from app.services.job_service import JobService
 from app.services.lead_service import LeadService
@@ -121,6 +122,13 @@ class GmailProviderSettingsRequest(BaseModel):
     client_secret: str
     refresh_token: str
     sender_email: str
+
+
+class AIProviderSettingsRequest(BaseModel):
+    provider: str = "fallback"
+    api_key: str = ""
+    model: str = ""
+    enabled: bool = True
 
 
 class LeadUpsertRequest(BaseModel):
@@ -468,7 +476,7 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
     ) -> Dict[str, Any]:
         tenant = request.state.tenant
-        plan = AgencyGrowthService(db_session).generate_mini_agency_plan(payload.model_dump(), tenant)
+        plan = await AgencyGrowthService(db_session).generate_mini_agency_plan(payload.model_dump(), tenant)
         return {"tenant_id": tenant.tenant_id, "mini_agency_plan": plan}
 
     @app.post("/jobs")
@@ -580,6 +588,46 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
             "configured": bool(credentials),
             "sender_email": sender_email,
         }
+
+    @app.post("/settings/providers/ai")
+    async def save_ai_provider_settings(
+        payload: AIProviderSettingsRequest,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        try:
+            return await AIProviderService(db_session).save_settings(
+                tenant=tenant,
+                provider=payload.provider,
+                api_key=payload.api_key,
+                model=payload.model,
+                enabled=payload.enabled,
+            )
+        except (AIProviderNotConfigured, SecretEncryptionError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/settings/providers/ai/status")
+    async def ai_provider_status(
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        try:
+            return await AIProviderService(db_session).status(tenant)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.post("/settings/providers/ai/test")
+    async def test_ai_provider(
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        try:
+            return await AIProviderService(db_session).test_connection(tenant)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.get("/dashboard/snapshot")
     async def dashboard_snapshot(
