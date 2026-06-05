@@ -42,6 +42,8 @@ def bootstrap_dashboard_state() -> None:
     st.session_state.setdefault("latest_subscription", {})
     st.session_state.setdefault("plan_onboarding_seen", "")
     st.session_state.setdefault("lead_generation_busy", False)
+    st.session_state.setdefault("marketing_campaign_kit", {})
+    st.session_state.setdefault("marketing_campaign_source", "")
 
 
 PLAN_DETAILS: Dict[str, Dict[str, Any]] = {
@@ -1635,30 +1637,193 @@ def render_email_crm_page(tenant: TenantContext, page: str) -> None:
     st.info("Choose an Email CRM tool from the sidebar.")
 
 
-def render_marketing_campaign_page(page: str = "Campaign Generator") -> None:
+def current_marketing_campaign() -> Dict[str, Any]:
+    campaign = st.session_state.get("marketing_campaign_kit", {}) or {}
+    return campaign if isinstance(campaign, dict) else {}
+
+
+def remember_marketing_campaign(campaign: Dict[str, Any], source: str) -> None:
+    st.session_state["marketing_campaign_kit"] = dict(campaign or {})
+    st.session_state["marketing_campaign_source"] = source
+
+
+def render_marketing_empty_state() -> None:
+    st.info("Generate a campaign from an idea or lead first. Your latest campaign will appear here.")
+
+
+def render_marketing_campaign_output(campaign: Dict[str, Any]) -> None:
+    if not campaign:
+        render_marketing_empty_state()
+        return
+    source = str(st.session_state.get("marketing_campaign_source", "") or "").strip()
+    if source:
+        st.caption(f"Latest campaign: {source}")
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.markdown(f"**Goal:** {campaign.get('campaign_goal', '')}")
+    st.markdown(f"**Business idea:** {campaign.get('business_idea', '')}")
+    st.markdown(f"**Target audience:** {campaign.get('target_audience', '')}")
+    platforms = ", ".join(campaign.get("recommended_platforms", []) or [])
+    st.markdown(f"**Recommended platforms:** {platforms}")
+
+    budget = campaign.get("budget_plan", {}) or {}
+    if budget:
+        cols = st.columns(3)
+        cols[0].markdown(f"**Starter**\n\n{budget.get('starter', '')}")
+        cols[1].markdown(f"**Growth**\n\n{budget.get('growth', '')}")
+        cols[2].markdown(f"**Agency**\n\n{budget.get('agency', '')}")
+
+    landing = campaign.get("landing_page_copy", {}) or {}
+    if landing:
+        st.markdown("**Landing page copy**")
+        st.write(f"Headline: {landing.get('headline', '')}")
+        st.write(f"Subheadline: {landing.get('subheadline', '')}")
+        for item in landing.get("bullets", []) or []:
+            st.write(f"- {item}")
+        st.write(f"CTA: {landing.get('cta', '')}")
+
+    st.markdown(f"**Lead magnet:** {campaign.get('lead_magnet', '')}")
+    st.markdown(f"**Next action:** {campaign.get('next_action', '')}")
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def render_marketing_ad_copy(campaign: Dict[str, Any]) -> None:
+    if not campaign:
+        render_marketing_empty_state()
+        return
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Facebook/Instagram Ads</div>', unsafe_allow_html=True)
+    for index, ad in enumerate(campaign.get("facebook_instagram_ads", []) or [], start=1):
+        st.markdown(f"**Ad {index}**")
+        st.write(f"Primary text: {ad.get('primary_text', '')}")
+        st.write(f"Headline: {ad.get('headline', '')}")
+        st.write(f"Description: {ad.get('description', '')}")
+        st.write(f"CTA: {ad.get('cta', '')}")
+        st.divider()
+    st.markdown('<div class="section-title">Google Search Ads</div>', unsafe_allow_html=True)
+    for index, ad in enumerate(campaign.get("google_search_ads", []) or [], start=1):
+        st.markdown(f"**Search ad {index}**")
+        st.write(f"Headline 1: {ad.get('headline_1', '')}")
+        st.write(f"Headline 2: {ad.get('headline_2', '')}")
+        st.write(f"Headline 3: {ad.get('headline_3', '')}")
+        st.write(f"Description 1: {ad.get('description_1', '')}")
+        st.write(f"Description 2: {ad.get('description_2', '')}")
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def render_marketing_reels_script(campaign: Dict[str, Any]) -> None:
+    if not campaign:
+        render_marketing_empty_state()
+        return
+    script = campaign.get("reels_tiktok_script", {}) or {}
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Reels & TikTok Script</div>', unsafe_allow_html=True)
+    st.markdown(f"**Hook**\n\n{script.get('hook', '')}")
+    st.markdown("**Script**")
+    st.code(str(script.get("script", "")), language=None)
+    st.markdown(f"**CTA**\n\n{script.get('cta', '')}")
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def render_marketing_content_calendar(campaign: Dict[str, Any]) -> None:
+    if not campaign:
+        render_marketing_empty_state()
+        return
+    calendar = campaign.get("seven_day_content_calendar", []) or []
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">7-Day Content Calendar</div>', unsafe_allow_html=True)
+    if calendar:
+        st.dataframe(pd.DataFrame(calendar), use_container_width=True, hide_index=True)
+    else:
+        st.info("No content calendar available in this campaign.")
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def render_campaign_generator_page() -> None:
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Campaign Generator</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-caption">Build a complete fallback campaign from any business or service idea.</div>', unsafe_allow_html=True)
+    with st.form("marketing_campaign_idea_form"):
+        business_idea = st.text_input("Business/service idea", value="", placeholder="e.g. immigration consultancy for Canada visas")
+        target_location = st.text_input("Target location", value="", placeholder="e.g. Dubai, UAE")
+        target_audience = st.text_input("Target audience", value="", placeholder="e.g. working professionals planning to move abroad")
+        campaign_goal = st.text_input("Campaign goal", value="", placeholder="e.g. book consultation calls")
+        submitted = st.form_submit_button("Generate Campaign Kit", use_container_width=True)
+    if submitted:
+        if not business_idea.strip():
+            st.error("Business/service idea is required.")
+        else:
+            response = api_request(
+                "POST",
+                "/marketing/campaign/from-idea",
+                json={
+                    "business_idea": business_idea.strip(),
+                    "target_location": target_location.strip(),
+                    "target_audience": target_audience.strip(),
+                    "campaign_goal": campaign_goal.strip(),
+                },
+            )
+            payload = parse_api_json(response)
+            if response.is_success:
+                campaign = payload.get("marketing_campaign_kit", {})
+                remember_marketing_campaign(campaign, business_idea.strip())
+                st.success("Marketing Campaign Kit generated.")
+            else:
+                st.error(str(payload.get("detail", "Could not generate campaign.")))
+    st.markdown("</div></div>", unsafe_allow_html=True)
+    render_marketing_campaign_output(current_marketing_campaign())
+
+
+def render_generate_from_lead_page(tenant: TenantContext) -> None:
+    frame = load_dashboard_data(tenant)
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Generate from Lead</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-caption">Create ad copy, landing page copy, scripts, and a content plan from an existing lead.</div>', unsafe_allow_html=True)
+    if frame.empty:
+        st.info("No leads yet. Generate or import leads first.")
+        st.markdown("</div></div>", unsafe_allow_html=True)
+        render_marketing_campaign_output(current_marketing_campaign())
+        return
+    lead_rows = [row for _, row in frame.iterrows() if str(row.get("id", "") or "").strip()]
+    labels = {
+        str(row.get("id")): str(row.get("company_url") or row.get("verified_email") or "Lead")[:90]
+        for row in lead_rows
+    }
+    selected_id = st.selectbox("Choose a lead", list(labels.keys()), format_func=lambda item: labels.get(item, item))
+    if st.button("Generate Marketing Kit for Lead", use_container_width=True):
+        response = api_request("POST", f"/marketing/campaign/from-lead/{selected_id}", json={})
+        payload = parse_api_json(response)
+        if response.is_success:
+            campaign = payload.get("marketing_campaign_kit", {})
+            remember_marketing_campaign(campaign, labels.get(selected_id, selected_id))
+            st.success("Marketing Campaign Kit generated and saved to lead metadata.")
+        else:
+            st.error(str(payload.get("detail", "Could not generate campaign from lead.")))
+    st.markdown("</div></div>", unsafe_allow_html=True)
+    render_marketing_campaign_output(current_marketing_campaign())
+
+
+def render_marketing_campaign_page(tenant: TenantContext, page: str = "Campaign Generator") -> None:
     render_module_header(
         "AI Marketing Campaign Kit",
         "Turn any lead or business idea into a complete ad campaign.",
     )
-    st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">AI Marketing Campaign Kit is coming next</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="section-caption">Turn any lead or business idea into Facebook ads, Google ad copy, reels scripts, landing page copy, and a 7-day content plan.</div>',
-        unsafe_allow_html=True,
-    )
-    cards = [
-        ("Facebook/Instagram Ads", "Generate ad angles, primary text, headlines, and calls to action."),
-        ("Google Search Ads", "Create intent-driven search ad copy for service and local lead campaigns."),
-        ("Reels & TikTok Scripts", "Turn offers into short-form hooks, scripts, and content prompts."),
-    ]
-    card_markup = "".join(
-        f'<div class="marketing-card"><h4>{html.escape(title)}</h4><p>{html.escape(body)}</p></div>'
-        for title, body in cards
-    )
-    st.markdown(f'<div class="marketing-grid">{card_markup}</div>', unsafe_allow_html=True)
-    st.button("Coming Soon", use_container_width=True, disabled=True)
-    st.caption(f"Selected tool: {page}")
-    st.markdown("</div></div>", unsafe_allow_html=True)
+    normalized_page = str(page or "Campaign Generator")
+    if normalized_page == "Campaign Generator" or normalized_page == "Generate from Business Idea":
+        render_campaign_generator_page()
+        return
+    if normalized_page == "Generate from Lead":
+        render_generate_from_lead_page(tenant)
+        return
+    if normalized_page == "Ad Copy":
+        render_marketing_ad_copy(current_marketing_campaign())
+        return
+    if normalized_page == "Reels Script":
+        render_marketing_reels_script(current_marketing_campaign())
+        return
+    if normalized_page == "7-Day Content Calendar":
+        render_marketing_content_calendar(current_marketing_campaign())
+        return
+    render_campaign_generator_page()
 
 
 def render_sidebar_navigation() -> Dict[str, str]:
@@ -1738,7 +1903,7 @@ def main() -> None:
     if module == "Email CRM":
         render_email_crm_page(tenant, page)
     elif module == "Marketing Kit":
-        render_marketing_campaign_page(page)
+        render_marketing_campaign_page(tenant, page)
     elif module == "Settings":
         if page == "Billing & Plan":
             render_module_header("Settings", "Manage plans, billing, and workspace preferences.")

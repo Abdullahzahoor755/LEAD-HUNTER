@@ -27,6 +27,7 @@ from app.services.agency_kit_service import AgencyKitLimitError, AgencyKitServic
 from app.services.billing_service import BillingService
 from app.services.job_service import JobService
 from app.services.lead_service import LeadService
+from app.services.marketing_campaign_service import MarketingCampaignLimitError, MarketingCampaignService
 from app.services.plan_gate import PlanGateError, require_pro_plan
 from app.services.provider_credential_service import ProviderCredentialService
 from app.services.security_service import SecretEncryptionError
@@ -150,6 +151,15 @@ class JobRequest(BaseModel):
 
 class AgencyKitBulkRequest(BaseModel):
     lead_ids: list[str] = Field(default_factory=list)
+
+
+class MarketingCampaignIdeaRequest(BaseModel):
+    business_idea: str
+    target_location: str = ""
+    target_country: str = ""
+    target_city: str = ""
+    target_audience: str = ""
+    campaign_goal: str = ""
 
 
 class RunOnceRequest(BaseModel):
@@ -368,6 +378,45 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
             return await AgencyKitService(db_session).generate_bulk(tenant, payload.lead_ids)
         except AgencyKitLimitError as error:
             raise HTTPException(status_code=403, detail=str(error)) from error
+
+    @app.post("/marketing/campaign/from-idea")
+    async def generate_marketing_campaign_from_idea(
+        payload: MarketingCampaignIdeaRequest,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        location = " ".join(
+            item.strip()
+            for item in [payload.target_location, payload.target_city, payload.target_country]
+            if item.strip()
+        ).strip()
+        try:
+            campaign = await MarketingCampaignService(db_session).generate_from_idea(
+                tenant=tenant,
+                business_idea=payload.business_idea,
+                target_location=location,
+                target_audience=payload.target_audience,
+                campaign_goal=payload.campaign_goal,
+            )
+        except MarketingCampaignLimitError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        return {"tenant_id": tenant.tenant_id, "marketing_campaign_kit": campaign}
+
+    @app.post("/marketing/campaign/from-lead/{lead_id}")
+    async def generate_marketing_campaign_from_lead(
+        lead_id: str,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        try:
+            campaign = await MarketingCampaignService(db_session).generate_from_lead(tenant, lead_id)
+        except MarketingCampaignLimitError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"tenant_id": tenant.tenant_id, "lead_id": lead_id, "marketing_campaign_kit": campaign}
 
     @app.post("/jobs")
     async def enqueue_job(
