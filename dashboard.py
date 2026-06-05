@@ -27,8 +27,8 @@ except ImportError:
 
 
 PRODUCT_NAME = "Lead Hunter AI"
-PRODUCT_TAGLINE = "Find business leads in seconds — generate company URLs, emails, phones, and export-ready CSVs."
-LOCKED_FEATURE_MESSAGE = "This feature is available in Pro plan. Upgrade to automate outreach, followups, and reply tracking."
+PRODUCT_TAGLINE = "Find leads, create agency pitches, and launch marketing campaigns."
+LOCKED_FEATURE_MESSAGE = "This feature is available in Pro plan."
 
 st.set_page_config(page_title=PRODUCT_NAME, page_icon="🔎", layout="wide")
 
@@ -131,7 +131,7 @@ def render_landing_styles() -> None:
         }
         .block-container {
             max-width: var(--page-max-width);
-            padding-top: 2.2rem;
+            padding-top: 2.6rem;
             padding-bottom: 2.5rem;
             padding-left: 1.6rem;
             padding-right: 1.6rem;
@@ -206,6 +206,86 @@ def render_landing_styles() -> None:
         .page-card-inner {
             padding: 1rem;
         }
+        .soft-card {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: rgba(15, 23, 42, .66);
+            padding: .9rem;
+            min-width: 0;
+        }
+        .soft-card h4 {
+            margin: 0 0 .4rem;
+            color: var(--text-strong);
+            font-size: .98rem;
+        }
+        .soft-card p {
+            color: var(--muted);
+            line-height: 1.55;
+            margin: 0;
+        }
+        .metric-card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+            gap: .75rem;
+        }
+        .metric-card {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: rgba(15, 23, 42, .72);
+            padding: .85rem;
+            min-width: 0;
+        }
+        .metric-label {color: var(--muted); font-size: .78rem; margin: 0 0 .3rem;}
+        .metric-value {color: var(--text-strong); font-size: 1.18rem; font-weight: 850; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;}
+        .metric-help {color: #cbd5e1; font-size: .8rem; margin: .28rem 0 0; line-height: 1.45;}
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+            padding: .25rem .65rem;
+            border: 1px solid rgba(148, 163, 184, .2);
+            background: rgba(15, 23, 42, .72);
+            color: #dbeafe;
+            font-size: .78rem;
+            font-weight: 800;
+        }
+        .status-badge.success {border-color: rgba(34, 197, 94, .28); color: #bbf7d0; background: rgba(20, 83, 45, .22);}
+        .status-badge.warning {border-color: rgba(251, 191, 36, .28); color: #fde68a; background: rgba(113, 63, 18, .2);}
+        .empty-state {
+            border: 1px dashed rgba(148, 163, 184, .26);
+            border-radius: 8px;
+            background: rgba(15, 23, 42, .42);
+            padding: 1rem;
+            color: var(--text);
+        }
+        .empty-state h4 {margin: 0 0 .3rem; color: var(--text-strong);}
+        .empty-state p {margin: 0; color: var(--muted); line-height: 1.55;}
+        .script-block {
+            border: 1px solid rgba(148, 163, 184, .18);
+            border-radius: 8px;
+            background: rgba(2, 6, 23, .5);
+            padding: .8rem;
+            color: #dbeafe;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+        .mini-card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: .8rem;
+        }
+        .day-card {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: rgba(15, 23, 42, .66);
+            padding: .85rem;
+            min-width: 0;
+        }
+        .day-card strong {color: var(--text-strong);}
+        .day-card p {color: var(--muted); margin: .35rem 0; line-height: 1.5;}
+        .day-card li {color: var(--text); margin: .25rem 0; line-height: 1.45;}
         .page-title {
             margin: 0;
             font-size: 1.45rem;
@@ -224,14 +304,12 @@ def render_landing_styles() -> None:
             align-items: flex-start;
             justify-content: space-between;
             gap: 1rem;
-            min-height: 156px;
-            max-height: 220px;
             margin-top: .1rem;
             margin-bottom: .9rem;
             border: 1px solid var(--line);
             border-radius: 8px;
             background: rgba(15, 23, 42, .78);
-            padding: 1.05rem;
+            padding: .95rem 1rem;
             box-shadow: 0 16px 38px rgba(0, 0, 0, .16);
         }
         .hero-panel {
@@ -298,7 +376,7 @@ def render_landing_styles() -> None:
             position: relative;
             overflow: hidden;
             border: 1px solid var(--line);
-            border-radius: 18px;
+            border-radius: 12px;
             padding: 1.35rem;
             background: linear-gradient(145deg, rgba(15, 23, 42, .82), rgba(2, 6, 23, .7));
             box-shadow: 0 24px 80px rgba(0, 0, 0, .34), inset 0 1px 0 rgba(255, 255, 255, .06);
@@ -331,8 +409,8 @@ def render_landing_styles() -> None:
             margin: 1.05rem 0 .3rem;
         }
         .hero-headline {
-            font-size: clamp(2.45rem, 5vw, 5rem);
-            line-height: .96;
+            font-size: clamp(2rem, 4vw, 3.8rem);
+            line-height: 1.02;
             font-weight: 900;
             letter-spacing: 0;
             margin: .1rem 0 1rem;
@@ -342,7 +420,7 @@ def render_landing_styles() -> None:
         }
         .landing-tagline {
             font-size: 1.05rem;
-            line-height: 1.75;
+            line-height: 1.65;
             color: #cbd5e1;
             max-width: 760px;
         }
@@ -397,6 +475,8 @@ def render_landing_styles() -> None:
             padding: 1.15rem 1.15rem .9rem;
             background: linear-gradient(180deg, rgba(15, 23, 42, .86), rgba(2, 6, 23, .74));
             box-shadow: 0 22px 70px rgba(0, 0, 0, .35), 0 0 0 1px rgba(255, 255, 255, .04) inset;
+            max-width: 420px;
+            margin-left: auto;
         }
         .auth-card h2 {margin: 0 0 .35rem; color: #f8fafc; font-size: 1.35rem;}
         .auth-card p {color: #cbd5e1; margin-top: 0;}
@@ -518,6 +598,14 @@ def render_landing_styles() -> None:
             font-weight: 900;
             border: 0;
         }
+        .stButton > button:disabled,
+        [data-testid="stFormSubmitButton"] button:disabled,
+        .stDownloadButton button:disabled {
+            opacity: .58;
+            border: 1px solid rgba(148, 163, 184, .22) !important;
+            background: rgba(30, 41, 59, .72) !important;
+            color: #cbd5e1 !important;
+        }
         .dashboard-actions .premium-action {
             border: 1px solid rgba(244, 114, 182, .22);
             background: rgba(76, 29, 149, .18);
@@ -572,6 +660,26 @@ def render_landing_styles() -> None:
             margin: 0 0 .85rem;
             line-height: 1.5;
         }
+        [data-testid="stDataFrame"] {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            overflow: hidden;
+            background: rgba(15, 23, 42, .55);
+        }
+        div[data-testid="stMetric"] {
+            background: rgba(15, 23, 42, .42);
+            border: 1px solid rgba(148, 163, 184, .14);
+            border-radius: 8px;
+            padding: .7rem;
+        }
+        .stTabs [data-baseweb="tab-list"] {
+            gap: .4rem;
+        }
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 8px;
+            border: 1px solid rgba(148, 163, 184, .16);
+            background: rgba(15, 23, 42, .46);
+        }
         @media (max-width: 980px) {
             .block-container {padding-left: 1rem; padding-right: 1rem; padding-top: 1.4rem;}
             .top-hero {
@@ -624,6 +732,59 @@ def is_admin_user() -> bool:
     return get_auth_role() == "admin"
 
 
+def render_page_header(title: str, subtitle: str, badge: str | None = None) -> None:
+    badge_markup = f'<span class="plan-badge">{html.escape(badge)}</span>' if badge else ""
+    st.markdown(
+        f"""
+        <div class="page-section">
+            <h1 class="page-title">{html.escape(title)}</h1>
+            <p class="page-subtitle">{html.escape(subtitle)}</p>
+            {badge_markup}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_metric_card(label: str, value: Any, help_text: str | None = None) -> str:
+    help_markup = f'<p class="metric-help">{html.escape(str(help_text))}</p>' if help_text else ""
+    return (
+        '<div class="metric-card">'
+        f'<p class="metric-label">{html.escape(str(label))}</p>'
+        f'<p class="metric-value">{html.escape(str(value))}</p>'
+        f"{help_markup}"
+        "</div>"
+    )
+
+
+def render_section_card(title: str, body: str) -> None:
+    st.markdown(
+        f"""
+        <div class="page-section page-card">
+            <div class="page-card-inner">
+                <div class="section-title">{html.escape(title)}</div>
+                <div class="section-caption">{html.escape(body)}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_empty_state(title: str, message: str, action_label: str | None = None) -> None:
+    action = f'<p><span class="status-badge">{html.escape(action_label)}</span></p>' if action_label else ""
+    st.markdown(
+        f"""
+        <div class="empty-state">
+            <h4>{html.escape(title)}</h4>
+            <p>{html.escape(message)}</p>
+            {action}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def require_login() -> TenantContext | None:
     auth = st.session_state.get("auth", {})
     if auth.get("tenant_id"):
@@ -637,11 +798,11 @@ def require_login() -> TenantContext | None:
     st.markdown('<div class="landing-shell">', unsafe_allow_html=True)
     hero_col, auth_col = st.columns([1.35, .9], gap="large")
     with hero_col:
-        st.markdown('<div class="hero-kicker">Free Lead Finder Beta — Outreach automation available in Pro</div>', unsafe_allow_html=True)
+        st.markdown('<div class="hero-kicker">AI Agency Operating System</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="landing-title">{PRODUCT_NAME}</div>', unsafe_allow_html=True)
-        st.markdown('<div class="hero-headline">Find B2B Leads Before Your Competitors Do</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="hero-headline">{html.escape(PRODUCT_TAGLINE)}</div>', unsafe_allow_html=True)
         st.markdown(
-            '<div class="landing-tagline">Search by niche and country. Generate company URLs, public emails, phones, and export-ready CSVs in seconds.</div>',
+            '<div class="landing-tagline">Use Email CRM to find and manage leads, then use the AI Marketing Kit to create pitches, ad copy, scripts, and campaign plans.</div>',
             unsafe_allow_html=True,
         )
         st.markdown(
@@ -656,9 +817,9 @@ def require_login() -> TenantContext | None:
         st.markdown(
             """
             <div class="pricing-strip">
-                <div class="price-chip"><strong>Free</strong>Lead Finder</div>
-                <div class="price-chip"><strong>Pro</strong>$15/month — Outreach + Email CRM</div>
-                <div class="price-chip"><strong>Agency</strong>$20/month — 1000+ leads + agency workflow</div>
+                <div class="price-chip"><strong>Free</strong>Fallback mode and CSV-ready lead workflow</div>
+                <div class="price-chip"><strong>Pro</strong>Outreach, Gmail, and reply workflow</div>
+                <div class="price-chip"><strong>Agency</strong>Higher limits and agency operating tools</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -666,23 +827,23 @@ def require_login() -> TenantContext | None:
         st.markdown(
             """
             <div class="feature-grid">
-                <div class="feature-card"><h3>Smart Lead Discovery</h3><p>Find potential companies from public web sources by niche and country.</p></div>
-                <div class="feature-card"><h3>Contact Extraction</h3><p>Extract company URLs, business emails, and phone numbers when available.</p></div>
-                <div class="feature-card"><h3>CSV Export Ready</h3><p>Download clean leads and start manual outreach instantly.</p></div>
-                <div class="feature-card"><h3>Pro Automation</h3><p>Upgrade later for Gmail outreach, followups, reply tracking, and CRM workflow.</p></div>
+                <div class="feature-card"><h3>Email CRM</h3><p>Find leads, review contacts, export CSVs, and manage outreach-ready records.</p></div>
+                <div class="feature-card"><h3>AI Agency Kit</h3><p>Turn a lead into service offers, pitch angles, scripts, and proposal outlines.</p></div>
+                <div class="feature-card"><h3>Marketing Campaign Kit</h3><p>Create ad copy, reels scripts, landing page copy, and content calendars.</p></div>
             </div>
+            <div class="settings-note">Works free in fallback mode. Connect your own AI key for enhanced outputs.</div>
             """,
             unsafe_allow_html=True,
         )
 
     with auth_col:
-        st.markdown('<div class="auth-card"><h2>Access your lead cockpit</h2><p>Create a Free workspace or log into an existing tenant.</p>', unsafe_allow_html=True)
+        st.markdown('<div class="auth-card"><h2>Access your workspace</h2><p>Create a Free workspace or log into an existing tenant.</p>', unsafe_allow_html=True)
         login_tab, signup_tab = st.tabs(["Login", "Create Free Account"])
         with login_tab:
             with st.form("admin_login"):
-                tenant_id = st.text_input("Tenant ID", value="", placeholder="Tenant ID")
+                tenant_id = st.text_input("Tenant ID", value="", placeholder="your-workspace")
                 email = st.text_input("Email", value="", placeholder="you@company.com")
-                password = st.text_input("Password", value="", type="password", placeholder="Enter password")
+                password = st.text_input("Password", value="", type="password", placeholder="Enter your password")
                 submitted = st.form_submit_button("Login", use_container_width=True)
             if submitted:
                 try:
@@ -707,11 +868,11 @@ def require_login() -> TenantContext | None:
                     st.error(str(error))
         with signup_tab:
             with st.form("signup_form"):
-                signup_tenant = st.text_input("Workspace / Tenant ID", value="", placeholder="my-business")
+                signup_tenant = st.text_input("Workspace / Tenant ID", value="", placeholder="your-workspace")
                 signup_name = st.text_input("Business Name", value="", placeholder="Acme Agency")
                 signup_email = st.text_input("Work Email", value="", placeholder="you@company.com")
                 signup_full_name = st.text_input("Your Name", value="", placeholder="Your name")
-                signup_password = st.text_input("Password", value="", type="password", placeholder="Create a password")
+                signup_password = st.text_input("Password", value="", type="password", placeholder="Enter your password")
                 signup_submitted = st.form_submit_button("Start Free", use_container_width=True)
             if signup_submitted:
                 tenant_id = signup_tenant.strip()
@@ -931,6 +1092,7 @@ def render_actions(tenant: TenantContext) -> None:
         target_country = st.text_input("Target Country", placeholder="e.g. Saudi Arabia, USA")
 
     busy = bool(st.session_state.get("lead_generation_busy", False))
+    st.caption("This may take 1-3 minutes.")
     if st.button("Generate Leads", use_container_width=True, disabled=busy):
         query_parts = []
         if target_industry.strip():
@@ -973,9 +1135,9 @@ def render_actions(tenant: TenantContext) -> None:
         locked_cards = "".join(
             (
                 '<div class="panel-card">'
-                '<span class="premium-badge">Pro</span>'
+                '<span class="premium-badge">Locked - Pro</span>'
                 f'<h4>{html.escape(label)}</h4>'
-                '<p>Upgrade to unlock automated outreach, reply tracking, and Gmail workflows.</p>'
+                f'<p>{html.escape(LOCKED_FEATURE_MESSAGE)}</p>'
                 "</div>"
             )
             for label in locked_features
@@ -1007,17 +1169,8 @@ def render_generation_status_card(snapshot: Dict[str, Any]) -> None:
         ("Jobs queued/running", str(len(queued_or_running)), "Active processing"),
         ("Last refresh", datetime.utcnow().strftime("%H:%M:%S UTC"), "Latest sync"),
     ]
-    cards = "".join(
-        (
-            '<div class="hero-metric">'
-            f'<p class="label">{html.escape(label)}</p>'
-            f'<p class="value">{html.escape(value)}</p>'
-            f'<p class="hint">{html.escape(hint)}</p>'
-            "</div>"
-        )
-        for label, value, hint in metrics
-    )
-    st.markdown(f'<div class="page-section"><div class="hero-metrics">{cards}</div></div>', unsafe_allow_html=True)
+    cards = "".join(render_metric_card(label, value, hint) for label, value, hint in metrics)
+    st.markdown(f'<div class="page-section"><div class="metric-card-grid">{cards}</div></div>', unsafe_allow_html=True)
 
 
 def render_dashboard_page(frame: pd.DataFrame, snapshot: Dict[str, Any]) -> None:
@@ -1030,7 +1183,7 @@ def render_dashboard_page(frame: pd.DataFrame, snapshot: Dict[str, Any]) -> None
     metrics[2].metric("Replies", int(snapshot.get("reply_count", 0)))
     metrics[3].metric("Jobs", int(snapshot.get("job_count", 0)))
     if frame.empty:
-        st.info("No leads yet. Enter a niche and country to generate your first leads.")
+        render_empty_state("No leads yet", "Enter a niche and country to generate your first leads.", "Generate Leads")
         st.markdown("</div></div>", unsafe_allow_html=True)
         return
     chart_left, chart_right = st.columns(2)
@@ -1042,63 +1195,67 @@ def render_dashboard_page(frame: pd.DataFrame, snapshot: Dict[str, Any]) -> None
 
 
 def render_table_page(frame: pd.DataFrame, columns: List[str]) -> None:
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Lead Table</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-caption">Review saved leads and export the visible columns.</div>', unsafe_allow_html=True)
     visible = frame.copy()
     for column in columns:
         if column not in visible.columns:
             visible[column] = ""
     export_frame = visible[columns]
     if export_frame.empty:
-        st.info("No leads yet. Enter a niche and country to generate your first leads.")
+        render_empty_state("No leads yet", "Enter a niche and country to generate your first leads.", "Generate Leads")
     else:
-        st.caption("Showing latest leads only.")
-    st.dataframe(export_frame, use_container_width=True, hide_index=True)
-    csv_frame = sanitize_csv_frame(export_frame)
-    st.download_button(
-        "Download CSV",
-        csv_frame.to_csv(index=False).encode("utf-8"),
-        file_name="leads.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
+        st.caption(f"Showing {len(export_frame)} lead rows.")
+        st.dataframe(export_frame, use_container_width=True, hide_index=True)
+        csv_frame = sanitize_csv_frame(export_frame)
+        st.download_button(
+            "Export Visible Leads CSV",
+            csv_frame.to_csv(index=False).encode("utf-8"),
+            file_name="leads.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
 def render_agency_kit_details(kit: Dict[str, Any]) -> None:
     if not kit:
-        st.info("No Agency Kit generated yet.")
+        render_empty_state("No Agency Kit yet", "Generate a kit to see service recommendations, outreach copy, and proposal structure.")
         return
     col_service, col_channel, col_score = st.columns([2, 1, 1])
     col_service.markdown(f"**Recommended service**\n\n{kit.get('recommended_service', '')}")
     col_channel.markdown(f"**Channel**\n\n{kit.get('recommended_channel', '')}")
     col_score.markdown(f"**Confidence**\n\n{kit.get('confidence_score', 0)}/100")
     st.markdown(f"**Offer angle**\n\n{kit.get('offer_angle', '')}")
-    st.markdown("**Outreach email**")
-    st.code(str(kit.get("outreach_email", "")), language=None)
-    st.markdown("**WhatsApp / call script**")
-    st.code(str(kit.get("whatsapp_or_call_script", "")), language=None)
+    with st.expander("Outreach email", expanded=True):
+        st.code(str(kit.get("outreach_email", "")), language=None)
+    with st.expander("WhatsApp / call script", expanded=False):
+        st.code(str(kit.get("whatsapp_or_call_script", "")), language=None)
 
     followups = kit.get("followup_sequence", []) or []
     if followups:
-        st.markdown("**Follow-up sequence**")
-        for item in followups:
-            st.write(f"- {item}")
+        with st.expander("Follow-up sequence", expanded=False):
+            for item in followups:
+                st.write(f"- {item}")
 
     proposal = kit.get("proposal_outline", {}) or {}
     if proposal:
-        st.markdown("**Proposal outline**")
-        st.write(f"Problem: {proposal.get('problem', '')}")
-        st.write(f"Solution: {proposal.get('solution', '')}")
-        st.write(f"Timeline: {proposal.get('timeline', '')}")
-        st.write(f"Pricing angle: {proposal.get('pricing_angle', '')}")
-        st.write(f"Next step: {proposal.get('next_step', '')}")
+        with st.expander("Proposal outline", expanded=False):
+            st.write(f"Problem: {proposal.get('problem', '')}")
+            st.write(f"Solution: {proposal.get('solution', '')}")
+            st.write(f"Timeline: {proposal.get('timeline', '')}")
+            st.write(f"Pricing angle: {proposal.get('pricing_angle', '')}")
+            st.write(f"Next step: {proposal.get('next_step', '')}")
 
     landing_copy = kit.get("landing_page_copy", {}) or {}
     if landing_copy:
-        st.markdown("**Landing page copy**")
-        st.write(f"Headline: {landing_copy.get('headline', '')}")
-        st.write(f"Subheadline: {landing_copy.get('subheadline', '')}")
-        for item in landing_copy.get("bullets", []) or []:
-            st.write(f"- {item}")
-        st.write(f"CTA: {landing_copy.get('cta', '')}")
+        with st.expander("Landing page copy", expanded=False):
+            st.write(f"Headline: {landing_copy.get('headline', '')}")
+            st.write(f"Subheadline: {landing_copy.get('subheadline', '')}")
+            for item in landing_copy.get("bullets", []) or []:
+                st.write(f"- {item}")
+            st.write(f"CTA: {landing_copy.get('cta', '')}")
 
     st.markdown(f"**Next action**\n\n{kit.get('next_action', '')}")
 
@@ -1169,6 +1326,7 @@ def extract_google_oauth_client(credentials_json: Dict[str, Any]) -> Dict[str, s
 def render_settings_page() -> None:
     render_ai_provider_settings()
     render_gmail_settings()
+    render_account_plan_settings()
 
 
 def render_ai_provider_settings() -> None:
@@ -1203,8 +1361,13 @@ def render_ai_provider_settings() -> None:
         current_provider = "fallback"
     current_model = str(status.get("model") or provider_defaults[current_provider]).strip()
     enabled = bool(status.get("enabled", False))
-    st.caption(f"Status: {'configured' if configured else 'fallback only'}")
+    status_class = "success" if configured else "warning"
+    st.markdown(
+        f'<span class="status-badge {status_class}">{"Configured" if configured else "Fallback only"}</span>',
+        unsafe_allow_html=True,
+    )
     st.caption(f"Provider: {current_provider} | Model: {current_model or 'none'} | Enabled: {'yes' if enabled else 'no'}")
+    st.caption("Fallback mode works without any API key.")
 
     with st.form("ai_provider_settings_form"):
         selected_provider = st.selectbox("Provider", providers, index=providers.index(current_provider))
@@ -1264,7 +1427,10 @@ def render_gmail_settings() -> None:
         status = {"configured": False, "sender_email": ""}
     configured = bool(status.get("configured"))
     sender_email = str(status.get("sender_email", "") or "")
-    st.caption(f"Status: {'connected' if configured else 'not connected'}")
+    st.markdown(
+        f'<span class="status-badge {"success" if configured else "warning"}">{"Connected" if configured else "Not connected"}</span>',
+        unsafe_allow_html=True,
+    )
     if sender_email:
         st.caption(f"Sender: {sender_email}")
 
@@ -1305,6 +1471,36 @@ def render_gmail_settings() -> None:
         else:
             st.error(str(body.get("detail", "Could not save Gmail connection.")))
     st.markdown("</div></div></div>", unsafe_allow_html=True)
+
+
+def render_account_plan_settings() -> None:
+    auth = st.session_state.get("auth", {}) or {}
+    snapshot: Dict[str, Any] = {}
+    try:
+        response = api_request("GET", "/dashboard/snapshot")
+        body = parse_api_json(response)
+        if response.is_success:
+            snapshot = body
+    except Exception:
+        snapshot = {}
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Account / Plan</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-caption">Current workspace plan and lightweight usage summary.</div>', unsafe_allow_html=True)
+    cards = [
+        ("Workspace", str(auth.get("tenant_id", "") or "Workspace"), "Tenant ID"),
+        ("Current plan", current_plan(), infer_subscription_status().replace("_", " ").title()),
+        ("Saved leads", int(snapshot.get("lead_count", 0) or 0), "This workspace"),
+        ("Jobs", int(snapshot.get("job_count", 0) or 0), "Queued and completed"),
+    ]
+    st.markdown(
+        '<div class="metric-card-grid">'
+        + "".join(render_metric_card(label, value, help_text) for label, value, help_text in cards)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+    if not has_pro_features():
+        st.info("Upgrade to Pro for Gmail automation, outreach, followups, and reply tracking.")
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
 def infer_subscription_status() -> str:
@@ -1574,32 +1770,35 @@ def admin_get(path: str) -> Dict[str, Any]:
 
 
 def render_admin_summary() -> None:
-    st.markdown(
-        '<div class="page-section"><div class="admin-title">Admin Dashboard <span class="plan-badge">Admin</span></div></div>',
-        unsafe_allow_html=True,
-    )
+    render_page_header("Admin Dashboard", "Workspace analytics, users, leads, jobs, and payment approvals.", "Admin")
     summary = admin_get("/admin/summary")
     if not summary:
         return
-    labels = [
-        ("Total Users", "total_users"),
-        ("Tenants", "total_tenants"),
-        ("Leads", "total_leads"),
-        ("Jobs", "total_jobs"),
-        ("Emails Sent", "total_emails_sent"),
-        ("Replies", "total_replies"),
-        ("Free Users", "free_users"),
-        ("Pro Users", "pro_users"),
-        ("Agency Users", "agency_users"),
-        ("Active Today", "active_users_today"),
-        ("Leads Today", "leads_generated_today"),
-        ("Failed Jobs", "failed_jobs"),
+    primary_metrics = [
+        ("Total users", int(summary.get("total_users", 0) or 0), "All workspaces"),
+        ("Active tenants", int(summary.get("total_tenants", 0) or 0), "Current tenants"),
+        ("Total leads", int(summary.get("total_leads", 0) or 0), "Generated leads"),
+        ("Jobs", int(summary.get("total_jobs", 0) or 0), "All job records"),
+    ]
+    secondary_metrics = [
+        ("Emails sent", int(summary.get("total_emails_sent", 0) or 0), "Outbound"),
+        ("Replies", int(summary.get("total_replies", 0) or 0), "Tracked replies"),
+        ("Active today", int(summary.get("active_users_today", 0) or 0), "Users"),
+        ("Failed jobs", int(summary.get("failed_jobs", 0) or 0), "Needs review"),
     ]
     st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
-    for start in range(0, len(labels), 4):
-        columns = st.columns(4)
-        for column, (label, key) in zip(columns, labels[start:start + 4]):
-            column.metric(label, int(summary.get(key, 0) or 0))
+    st.markdown(
+        '<div class="metric-card-grid">'
+        + "".join(render_metric_card(label, value, help_text) for label, value, help_text in primary_metrics)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="page-section metric-card-grid">'
+        + "".join(render_metric_card(label, value, help_text) for label, value, help_text in secondary_metrics)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
     st.caption(
         f"Queued jobs: {int(summary.get('queued_jobs', 0) or 0)} | "
         f"Running jobs: {int(summary.get('running_jobs', 0) or 0)} | "
@@ -1696,13 +1895,14 @@ def remember_offer_match(match: Dict[str, Any], source: str) -> None:
 
 def render_offer_match_output(match: Dict[str, Any]) -> None:
     if not match:
-        st.info("Choose a lead and generate an offer match. The latest result will appear here.")
+        render_empty_state("No offer match yet", "Choose a lead and generate the clearest service offer to sell first.", "Generate Offer Match")
         return
     source = str(st.session_state.get("offer_match_source", "") or "").strip()
     if source:
         st.caption(f"Latest offer match: {source}")
     st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
-    st.markdown(f"**Recommended offer:** {match.get('recommended_offer', '')}")
+    st.markdown('<div class="section-title">Recommended Offer</div>', unsafe_allow_html=True)
+    st.markdown(f"**{match.get('recommended_offer', '')}**")
     cols = st.columns(3)
     cols[0].metric("Category", str(match.get("offer_category", "") or "").replace("_", " ").title())
     cols[1].metric("Best channel", str(match.get("best_channel", "") or "").replace("_", " ").title())
@@ -1726,7 +1926,8 @@ def render_offer_match_output(match: Dict[str, Any]) -> None:
         st.caption(str(pro.get("price_range", "")))
         for item in pro.get("deliverables", []) or []:
             st.write(f"- {item}")
-    st.markdown(f"**Pitch angle**\n\n{match.get('pitch_angle', '')}")
+    st.markdown("**Pitch angle**")
+    st.code(str(match.get("pitch_angle", "")), language=None)
     st.markdown(f"**Next step:** {match.get('next_step', '')}")
     st.markdown("</div></div>", unsafe_allow_html=True)
 
@@ -1768,28 +1969,27 @@ def remember_whatsapp_sales_kit(kit: Dict[str, Any], source: str) -> None:
 
 def render_whatsapp_sales_output(kit: Dict[str, Any]) -> None:
     if not kit:
-        st.info("Choose a lead and generate a sales script. The latest kit will appear here.")
+        render_empty_state("No sales script yet", "Choose a lead and generate WhatsApp, follow-up, voice note, and call scripts.", "Generate WhatsApp Sales Kit")
         return
     source = str(st.session_state.get("whatsapp_sales_source", "") or "").strip()
     if source:
         st.caption(f"Latest sales kit: {source}")
     st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
     st.metric("Recommended channel", str(kit.get("recommended_channel", "") or "").replace("_", " ").title())
-    st.markdown(f"**WhatsApp opener**\n\n{kit.get('whatsapp_opener', '')}")
+    st.markdown("**WhatsApp opener**")
+    st.code(str(kit.get("whatsapp_opener", "")), language=None)
     st.markdown("**Follow-ups**")
-    for key in ["followup_1", "followup_2", "followup_3"]:
-        st.write(f"- {kit.get(key, '')}")
-    st.markdown(f"**Voice note script**\n\n{kit.get('voice_note_script', '')}")
+    st.code("\n\n".join(str(kit.get(key, "")) for key in ["followup_1", "followup_2", "followup_3"]), language=None)
+    st.markdown("**Voice note script**")
+    st.code(str(kit.get("voice_note_script", "")), language=None)
     call_script = kit.get("call_script", {}) or {}
     if call_script:
         st.markdown("**Call script**")
-        for label, value in call_script.items():
-            st.write(f"- {label.replace('_', ' ').title()}: {value}")
+        st.code("\n".join(f"{label.replace('_', ' ').title()}: {value}" for label, value in call_script.items()), language=None)
     objections = kit.get("objection_replies", {}) or {}
     if objections:
         st.markdown("**Objection replies**")
-        for label, value in objections.items():
-            st.write(f"- {label.replace('_', ' ').title()}: {value}")
+        st.code("\n".join(f"{label.replace('_', ' ').title()}: {value}" for label, value in objections.items()), language=None)
     st.markdown(f"**Next step:** {kit.get('next_step', '')}")
     st.markdown("</div></div>", unsafe_allow_html=True)
 
@@ -1897,7 +2097,11 @@ def remember_marketing_campaign(campaign: Dict[str, Any], source: str) -> None:
 
 
 def render_marketing_empty_state() -> None:
-    st.info("Generate a campaign from an idea or lead first. Your latest campaign will appear here.")
+    render_empty_state(
+        "No campaign generated yet",
+        "Generate a campaign from an idea or lead first. Your latest campaign will appear here.",
+        "Campaign Generator",
+    )
 
 
 def render_marketing_campaign_output(campaign: Dict[str, Any]) -> None:
@@ -1908,6 +2112,7 @@ def render_marketing_campaign_output(campaign: Dict[str, Any]) -> None:
     if source:
         st.caption(f"Latest campaign: {source}")
     st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Campaign Strategy</div>', unsafe_allow_html=True)
     st.markdown(f"**Goal:** {campaign.get('campaign_goal', '')}")
     st.markdown(f"**Business idea:** {campaign.get('business_idea', '')}")
     st.markdown(f"**Target audience:** {campaign.get('target_audience', '')}")
@@ -1921,14 +2126,43 @@ def render_marketing_campaign_output(campaign: Dict[str, Any]) -> None:
         cols[1].markdown(f"**Growth**\n\n{budget.get('growth', '')}")
         cols[2].markdown(f"**Agency**\n\n{budget.get('agency', '')}")
 
+    st.markdown("### Facebook/Instagram Ads")
+    for index, ad in enumerate(campaign.get("facebook_instagram_ads", []) or [], start=1):
+        with st.expander(f"Ad {index}", expanded=index == 1):
+            st.write(f"Primary text: {ad.get('primary_text', '')}")
+            st.write(f"Headline: {ad.get('headline', '')}")
+            st.write(f"Description: {ad.get('description', '')}")
+            st.write(f"CTA: {ad.get('cta', '')}")
+
+    st.markdown("### Google Search Ads")
+    for index, ad in enumerate(campaign.get("google_search_ads", []) or [], start=1):
+        with st.expander(f"Search ad {index}", expanded=index == 1):
+            st.write(f"Headline 1: {ad.get('headline_1', '')}")
+            st.write(f"Headline 2: {ad.get('headline_2', '')}")
+            st.write(f"Headline 3: {ad.get('headline_3', '')}")
+            st.write(f"Description 1: {ad.get('description_1', '')}")
+            st.write(f"Description 2: {ad.get('description_2', '')}")
+
+    script = campaign.get("reels_tiktok_script", {}) or {}
+    if script:
+        st.markdown("### Reels Script")
+        st.markdown(f"**Hook:** {script.get('hook', '')}")
+        st.code(str(script.get("script", "")), language=None)
+        st.markdown(f"**CTA:** {script.get('cta', '')}")
+
     landing = campaign.get("landing_page_copy", {}) or {}
     if landing:
-        st.markdown("**Landing page copy**")
+        st.markdown("### Landing Page Copy")
         st.write(f"Headline: {landing.get('headline', '')}")
         st.write(f"Subheadline: {landing.get('subheadline', '')}")
         for item in landing.get("bullets", []) or []:
             st.write(f"- {item}")
         st.write(f"CTA: {landing.get('cta', '')}")
+
+    calendar = campaign.get("seven_day_content_calendar", []) or []
+    if calendar:
+        st.markdown("### 7-Day Calendar")
+        st.dataframe(pd.DataFrame(calendar), use_container_width=True, hide_index=True)
 
     st.markdown(f"**Lead magnet:** {campaign.get('lead_magnet', '')}")
     st.markdown(f"**Next action:** {campaign.get('next_action', '')}")
@@ -1943,19 +2177,33 @@ def render_marketing_ad_copy(campaign: Dict[str, Any]) -> None:
     st.markdown('<div class="section-title">Facebook/Instagram Ads</div>', unsafe_allow_html=True)
     for index, ad in enumerate(campaign.get("facebook_instagram_ads", []) or [], start=1):
         st.markdown(f"**Ad {index}**")
-        st.write(f"Primary text: {ad.get('primary_text', '')}")
-        st.write(f"Headline: {ad.get('headline', '')}")
-        st.write(f"Description: {ad.get('description', '')}")
-        st.write(f"CTA: {ad.get('cta', '')}")
+        st.code(
+            "\n".join(
+                [
+                    f"Primary text: {ad.get('primary_text', '')}",
+                    f"Headline: {ad.get('headline', '')}",
+                    f"Description: {ad.get('description', '')}",
+                    f"CTA: {ad.get('cta', '')}",
+                ]
+            ),
+            language=None,
+        )
         st.divider()
     st.markdown('<div class="section-title">Google Search Ads</div>', unsafe_allow_html=True)
     for index, ad in enumerate(campaign.get("google_search_ads", []) or [], start=1):
         st.markdown(f"**Search ad {index}**")
-        st.write(f"Headline 1: {ad.get('headline_1', '')}")
-        st.write(f"Headline 2: {ad.get('headline_2', '')}")
-        st.write(f"Headline 3: {ad.get('headline_3', '')}")
-        st.write(f"Description 1: {ad.get('description_1', '')}")
-        st.write(f"Description 2: {ad.get('description_2', '')}")
+        st.code(
+            "\n".join(
+                [
+                    f"Headline 1: {ad.get('headline_1', '')}",
+                    f"Headline 2: {ad.get('headline_2', '')}",
+                    f"Headline 3: {ad.get('headline_3', '')}",
+                    f"Description 1: {ad.get('description_1', '')}",
+                    f"Description 2: {ad.get('description_2', '')}",
+                ]
+            ),
+            language=None,
+        )
     st.markdown("</div></div>", unsafe_allow_html=True)
 
 
@@ -1993,8 +2241,11 @@ def render_campaign_generator_page() -> None:
     st.markdown('<div class="section-caption">Build a complete fallback campaign from any business or service idea.</div>', unsafe_allow_html=True)
     with st.form("marketing_campaign_idea_form"):
         business_idea = st.text_input("Business/service idea", value="", placeholder="e.g. immigration consultancy for Canada visas")
-        target_location = st.text_input("Target location", value="", placeholder="e.g. Dubai, UAE")
-        target_audience = st.text_input("Target audience", value="", placeholder="e.g. working professionals planning to move abroad")
+        col_location, col_audience = st.columns(2)
+        with col_location:
+            target_location = st.text_input("Target location", value="", placeholder="e.g. Dubai, UAE")
+        with col_audience:
+            target_audience = st.text_input("Target audience", value="", placeholder="e.g. working professionals planning to move abroad")
         campaign_goal = st.text_input("Campaign goal", value="", placeholder="e.g. book consultation calls")
         submitted = st.form_submit_button("Generate Campaign Kit", use_container_width=True)
     if submitted:
@@ -2058,9 +2309,10 @@ def current_mini_agency_plan() -> Dict[str, Any]:
 
 def render_mini_agency_plan_output(plan: Dict[str, Any]) -> None:
     if not plan:
-        st.info("Create a mini agency plan first. Your latest roadmap will appear here.")
+        render_empty_state("No mini agency plan yet", "Create a mini agency plan first. Your roadmap will appear here.", "Build Mini Agency Plan")
         return
     st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Mini Agency Strategy</div>', unsafe_allow_html=True)
     st.markdown(f"**Agency positioning**\n\n{plan.get('agency_positioning', '')}")
     niches = ", ".join(plan.get("best_niches", []) or [])
     st.markdown(f"**Best niches:** {niches}")
@@ -2076,24 +2328,32 @@ def render_mini_agency_plan_output(plan: Dict[str, Any]) -> None:
         st.markdown("**Lead search queries**")
         for query in queries:
             st.write(f"- {query}")
+    st.markdown(f"**Next action:** {plan.get('next_action', '')}")
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
     roadmap = plan.get("daily_roadmap", []) or []
     if roadmap:
-        rows = [
-            {
-                "day": item.get("day"),
-                "focus": item.get("focus"),
-                "tasks": "; ".join(item.get("tasks", []) or []),
-                "success_metric": item.get("success_metric"),
-            }
-            for item in roadmap
-        ]
-        st.markdown("**Daily roadmap**")
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        cards = []
+        for item in roadmap:
+            tasks = "".join(f"<li>{html.escape(str(task))}</li>" for task in item.get("tasks", []) or [])
+            cards.append(
+                "<div class=\"day-card\">"
+                f"<strong>Day {html.escape(str(item.get('day', '')))}: {html.escape(str(item.get('focus', '')))}</strong>"
+                f"<ul>{tasks}</ul>"
+                f"<p>Metric: {html.escape(str(item.get('success_metric', '')))}</p>"
+                "</div>"
+            )
+        st.markdown(
+            '<div class="page-section"><div class="section-title">14-Day Roadmap</div></div>'
+            f'<div class="mini-card-grid">{"".join(cards)}</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
     scripts = plan.get("outreach_scripts", {}) or {}
     if scripts:
         st.markdown("**Outreach scripts**")
-        for label, value in scripts.items():
-            st.write(f"- {label.title()}: {value}")
+        st.code("\n\n".join(f"{label.title()}: {value}" for label, value in scripts.items()), language=None)
     proposal = plan.get("proposal_template", {}) or {}
     if proposal:
         st.markdown("**Proposal template**")
@@ -2104,7 +2364,6 @@ def render_mini_agency_plan_output(plan: Dict[str, Any]) -> None:
         st.markdown("**Content plan**")
         for item in content:
             st.write(f"- {item.get('post', '')}: {item.get('caption', '')} CTA: {item.get('cta', '')}")
-    st.markdown(f"**Next action:** {plan.get('next_action', '')}")
     st.markdown("</div></div>", unsafe_allow_html=True)
 
 
@@ -2226,7 +2485,6 @@ def render_sidebar_navigation() -> Dict[str, str]:
         marketing_pages = [
             "Campaign Generator",
             "Generate from Lead",
-            "Generate from Business Idea",
             "Ad Copy",
             "Reels Script",
             "7-Day Content Calendar",
