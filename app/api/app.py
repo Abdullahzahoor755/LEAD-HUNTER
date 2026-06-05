@@ -23,6 +23,7 @@ from app.db.postgres import initialize_async_database, verify_async_database
 from app.db.session import AsyncDatabaseSession, DatabaseSession, get_async_db_session, reset_async_session_factory
 from app.services.auth_service import AuthService
 from app.services.admin_analytics_service import AdminAnalyticsService
+from app.services.agency_kit_service import AgencyKitLimitError, AgencyKitService
 from app.services.billing_service import BillingService
 from app.services.job_service import JobService
 from app.services.lead_service import LeadService
@@ -147,6 +148,10 @@ class JobRequest(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
+class AgencyKitBulkRequest(BaseModel):
+    lead_ids: list[str] = Field(default_factory=list)
+
+
 class RunOnceRequest(BaseModel):
     job_type: str = ""
 
@@ -159,9 +164,10 @@ class ApprovePaymentRequest(BaseModel):
     payment_reference_id: str
 
 
-def _serialize_lead(lead: Lead) -> Dict[str, Any]:
+def _serialize_lead(lead: Lead, include_agency_kit: bool = False) -> Dict[str, Any]:
     last_reply_at = lead.last_reply_at
-    return {
+    metadata = dict(lead.metadata or {})
+    payload = {
         "company_url": str(lead.company_url or "").strip(),
         "country": str(lead.country or "").strip(),
         "verified_email": str(lead.verified_email or "").strip().lower(),
@@ -173,6 +179,10 @@ def _serialize_lead(lead: Lead) -> Dict[str, Any]:
         "reply_status": str(lead.reply_status or "").strip().lower(),
         "last_reply_at": last_reply_at.isoformat() if hasattr(last_reply_at, "isoformat") else str(last_reply_at or ""),
     }
+    if include_agency_kit:
+        payload["id"] = lead.id
+        payload["agency_kit"] = metadata.get("agency_kit", {})
+    return payload
 
 
 def _serialize_job(job: Job) -> Dict[str, Any]:
@@ -273,13 +283,14 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
     @app.get("/leads")
     async def list_leads(
         request: Request,
+        include_agency_kit: bool = False,
         db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
     ) -> Dict[str, Any]:
         tenant = request.state.tenant
         items = await LeadService(db_session).list_leads(tenant)
         return {
             "tenant_id": tenant.tenant_id,
-            "items": [_serialize_lead(item) for item in items],
+            "items": [_serialize_lead(item, include_agency_kit=include_agency_kit) for item in items],
         }
 
     @app.get("/debug/leads/serialization")
@@ -330,6 +341,33 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         )
         saved = await LeadService(db_session).upsert_lead(tenant, lead)
         return asdict(saved)
+
+    @app.post("/leads/{lead_id}/agency-kit")
+    async def generate_agency_kit(
+        lead_id: str,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        try:
+            kit = await AgencyKitService(db_session).generate_for_lead(tenant, lead_id)
+        except AgencyKitLimitError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"tenant_id": tenant.tenant_id, "lead_id": lead_id, "agency_kit": kit}
+
+    @app.post("/leads/agency-kit/bulk")
+    async def generate_agency_kit_bulk(
+        payload: AgencyKitBulkRequest,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        try:
+            return await AgencyKitService(db_session).generate_bulk(tenant, payload.lead_ids)
+        except AgencyKitLimitError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
 
     @app.post("/jobs")
     async def enqueue_job(

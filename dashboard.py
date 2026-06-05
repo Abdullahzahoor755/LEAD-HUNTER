@@ -741,7 +741,7 @@ STANDARD_LEAD_EXPORT_COLUMNS = [
 
 
 def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
-    response = api_request("GET", "/leads")
+    response = api_request("GET", "/leads?include_agency_kit=true")
     payload = response.json()
     if not response.is_success:
         raise RuntimeError(str(payload.get("detail", "Could not load leads.")))
@@ -750,6 +750,7 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
     for item in items:
         rows.append(
             {
+                "id": str(item.get("id", "") or "").strip(),
                 "company_url": str(item.get("company_url", "") or "").strip(),
                 "country": str(item.get("country", "") or "").strip(),
                 "verified_email": str(item.get("verified_email", "") or "").strip().lower(),
@@ -760,17 +761,18 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
                 "followup_count": item.get("followup_count", 0),
                 "reply_status": str(item.get("reply_status", "") or "").strip().lower(),
                 "last_reply_at": str(item.get("last_reply_at", "") or "").strip(),
+                "agency_kit": item.get("agency_kit", {}) if isinstance(item.get("agency_kit", {}), dict) else {},
             }
         )
     if not rows:
-        return pd.DataFrame(columns=STANDARD_LEAD_EXPORT_COLUMNS)
+        return pd.DataFrame(columns=["id", *STANDARD_LEAD_EXPORT_COLUMNS, "agency_kit"])
     frame = pd.DataFrame(rows)
     frame["score"] = pd.to_numeric(frame.get("score", pd.Series(0, index=frame.index)), errors="coerce").fillna(0)
     frame["followup_count"] = pd.to_numeric(frame.get("followup_count", pd.Series(0, index=frame.index)), errors="coerce").fillna(0).astype(int)
     for column in STANDARD_LEAD_EXPORT_COLUMNS:
         if column not in frame.columns:
             frame[column] = ""
-    return frame[STANDARD_LEAD_EXPORT_COLUMNS]
+    return frame[[column for column in ["id", *STANDARD_LEAD_EXPORT_COLUMNS, "agency_kit"] if column in frame.columns]]
 
 
 def filtered_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -994,6 +996,83 @@ def render_table_page(frame: pd.DataFrame, columns: List[str]) -> None:
         mime="text/csv",
         use_container_width=True,
     )
+
+
+def render_agency_kit_details(kit: Dict[str, Any]) -> None:
+    if not kit:
+        st.info("No Agency Kit generated yet.")
+        return
+    col_service, col_channel, col_score = st.columns([2, 1, 1])
+    col_service.markdown(f"**Recommended service**\n\n{kit.get('recommended_service', '')}")
+    col_channel.markdown(f"**Channel**\n\n{kit.get('recommended_channel', '')}")
+    col_score.markdown(f"**Confidence**\n\n{kit.get('confidence_score', 0)}/100")
+    st.markdown(f"**Offer angle**\n\n{kit.get('offer_angle', '')}")
+    st.markdown("**Outreach email**")
+    st.code(str(kit.get("outreach_email", "")), language=None)
+    st.markdown("**WhatsApp / call script**")
+    st.code(str(kit.get("whatsapp_or_call_script", "")), language=None)
+
+    followups = kit.get("followup_sequence", []) or []
+    if followups:
+        st.markdown("**Follow-up sequence**")
+        for item in followups:
+            st.write(f"- {item}")
+
+    proposal = kit.get("proposal_outline", {}) or {}
+    if proposal:
+        st.markdown("**Proposal outline**")
+        st.write(f"Problem: {proposal.get('problem', '')}")
+        st.write(f"Solution: {proposal.get('solution', '')}")
+        st.write(f"Timeline: {proposal.get('timeline', '')}")
+        st.write(f"Pricing angle: {proposal.get('pricing_angle', '')}")
+        st.write(f"Next step: {proposal.get('next_step', '')}")
+
+    landing_copy = kit.get("landing_page_copy", {}) or {}
+    if landing_copy:
+        st.markdown("**Landing page copy**")
+        st.write(f"Headline: {landing_copy.get('headline', '')}")
+        st.write(f"Subheadline: {landing_copy.get('subheadline', '')}")
+        for item in landing_copy.get("bullets", []) or []:
+            st.write(f"- {item}")
+        st.write(f"CTA: {landing_copy.get('cta', '')}")
+
+    st.markdown(f"**Next action**\n\n{kit.get('next_action', '')}")
+
+
+def render_agency_kit_panel(frame: pd.DataFrame) -> None:
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">AI Agency Kit</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-caption">Rule-based fallback kits. Free: 3/month, Pro: 100/month, Agency: 1000/month.</div>',
+        unsafe_allow_html=True,
+    )
+    if frame.empty:
+        st.info("Generate leads first, then create Agency Kits from this page.")
+        st.markdown("</div></div>", unsafe_allow_html=True)
+        return
+
+    for index, row in frame.head(25).iterrows():
+        lead_id = str(row.get("id", "") or "").strip()
+        company = str(row.get("company_url", "") or row.get("verified_email", "") or "Lead").strip()
+        country = str(row.get("country", "") or "").strip()
+        agency_kit = row.get("agency_kit", {}) if isinstance(row.get("agency_kit", {}), dict) else {}
+        label_prefix = "View Agency Kit" if agency_kit else "Generate Agency Kit"
+        expander_label = f"{label_prefix}: {company[:80]}{f' - {country}' if country else ''}"
+        with st.expander(expander_label, expanded=False):
+            if not lead_id:
+                st.warning("This lead is missing an ID, so an Agency Kit cannot be saved yet.")
+                continue
+            button_label = "Regenerate Agency Kit" if agency_kit else "Generate Agency Kit"
+            if st.button(button_label, key=f"agency_kit_{lead_id}_{index}", use_container_width=True):
+                response = api_request("POST", f"/leads/{lead_id}/agency-kit", json={})
+                payload = parse_api_json(response)
+                if response.is_success:
+                    st.success("Agency Kit generated.")
+                    st.rerun()
+                else:
+                    st.error(str(payload.get("detail", "Could not generate Agency Kit.")))
+            render_agency_kit_details(agency_kit)
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
 def sanitize_csv_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1482,6 +1561,7 @@ def main() -> None:
     elif page == "Live Leads":
         frame = filtered_frame(load_dashboard_data(tenant))
         render_table_page(frame, STANDARD_LEAD_EXPORT_COLUMNS)
+        render_agency_kit_panel(frame)
     elif page == "Replies":
         frame = load_dashboard_data(tenant)
         render_table_page(frame, ["company_url", "verified_email", "country", "reply_status", "last_reply_at"])
