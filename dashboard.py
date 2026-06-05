@@ -30,7 +30,7 @@ PRODUCT_NAME = "Lead Hunter AI"
 PRODUCT_TAGLINE = "Find leads, create agency pitches, and launch marketing campaigns."
 LOCKED_FEATURE_MESSAGE = "This feature is available in Pro plan."
 
-st.set_page_config(page_title=PRODUCT_NAME, page_icon="🔎", layout="wide")
+st.set_page_config(page_title=PRODUCT_NAME, page_icon="🔎", layout="wide", initial_sidebar_state="expanded")
 
 API_BASE_URL = os.getenv("APP_API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 DEFAULT_PAYMENT_QR_PATH = "/home/mabdullah/Downloads/WhatsApp Image 2026-05-25 at 12.39.52 AM.jpeg"
@@ -142,8 +142,12 @@ def render_landing_styles() -> None:
         [data-testid="stToolbar"] {visibility: hidden; height: 0;}
         [data-testid="stDecoration"] {display: none;}
         [data-testid="stSidebar"] {
+            display: block !important;
+            visibility: visible !important;
+            transform: none !important;
             background: #070b15;
             border-right: 1px solid rgba(148, 163, 184, .12);
+            min-width: 18rem;
         }
         [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
             padding: 1.1rem .9rem;
@@ -2512,11 +2516,11 @@ def main() -> None:
         return
     render_landing_styles()
     st.markdown('<div class="app-shell">', unsafe_allow_html=True)
+    navigation = render_sidebar_navigation()
     if render_plan_onboarding():
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    navigation = render_sidebar_navigation()
     module = navigation["module"]
     page = navigation["page"]
 
