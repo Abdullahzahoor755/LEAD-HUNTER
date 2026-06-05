@@ -44,6 +44,11 @@ def bootstrap_dashboard_state() -> None:
     st.session_state.setdefault("lead_generation_busy", False)
     st.session_state.setdefault("marketing_campaign_kit", {})
     st.session_state.setdefault("marketing_campaign_source", "")
+    st.session_state.setdefault("offer_match", {})
+    st.session_state.setdefault("offer_match_source", "")
+    st.session_state.setdefault("whatsapp_sales_kit", {})
+    st.session_state.setdefault("whatsapp_sales_source", "")
+    st.session_state.setdefault("mini_agency_plan", {})
 
 
 PLAN_DETAILS: Dict[str, Dict[str, Any]] = {
@@ -805,17 +810,33 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
                 "reply_status": str(item.get("reply_status", "") or "").strip().lower(),
                 "last_reply_at": str(item.get("last_reply_at", "") or "").strip(),
                 "agency_kit": item.get("agency_kit", {}) if isinstance(item.get("agency_kit", {}), dict) else {},
+                "offer_match": item.get("offer_match", {}) if isinstance(item.get("offer_match", {}), dict) else {},
+                "whatsapp_sales_kit": item.get("whatsapp_sales_kit", {}) if isinstance(item.get("whatsapp_sales_kit", {}), dict) else {},
+                "marketing_campaign_kit": item.get("marketing_campaign_kit", {}) if isinstance(item.get("marketing_campaign_kit", {}), dict) else {},
             }
         )
     if not rows:
-        return pd.DataFrame(columns=["id", *STANDARD_LEAD_EXPORT_COLUMNS, "agency_kit"])
+        return pd.DataFrame(columns=["id", *STANDARD_LEAD_EXPORT_COLUMNS, "agency_kit", "offer_match", "whatsapp_sales_kit", "marketing_campaign_kit"])
     frame = pd.DataFrame(rows)
     frame["score"] = pd.to_numeric(frame.get("score", pd.Series(0, index=frame.index)), errors="coerce").fillna(0)
     frame["followup_count"] = pd.to_numeric(frame.get("followup_count", pd.Series(0, index=frame.index)), errors="coerce").fillna(0).astype(int)
     for column in STANDARD_LEAD_EXPORT_COLUMNS:
         if column not in frame.columns:
             frame[column] = ""
-    return frame[[column for column in ["id", *STANDARD_LEAD_EXPORT_COLUMNS, "agency_kit"] if column in frame.columns]]
+    return frame[
+        [
+            column
+            for column in [
+                "id",
+                *STANDARD_LEAD_EXPORT_COLUMNS,
+                "agency_kit",
+                "offer_match",
+                "whatsapp_sales_kit",
+                "marketing_campaign_kit",
+            ]
+            if column in frame.columns
+        ]
+    ]
 
 
 def filtered_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1572,8 +1593,159 @@ def render_pro_action_page(title: str, caption: str, button_label: str, agent_na
     if st.button(button_label, use_container_width=True):
         with st.spinner("Queueing automation job..."):
             enqueue_job(agent_name, payload or {})
-            st.success("Automation job queued.")
+        st.success("Automation job queued.")
     st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def lead_picker_options(frame: pd.DataFrame) -> Dict[str, str]:
+    labels: Dict[str, str] = {}
+    if frame.empty:
+        return labels
+    for _, row in frame.iterrows():
+        lead_id = str(row.get("id", "") or "").strip()
+        if not lead_id:
+            continue
+        primary = str(row.get("company_url") or row.get("verified_email") or "Lead").strip()
+        industry = str(row.get("industry") or "").strip()
+        country = str(row.get("country") or "").strip()
+        detail = " / ".join(item for item in [industry, country] if item)
+        labels[lead_id] = f"{primary[:70]}{' - ' + detail if detail else ''}"
+    return labels
+
+
+def current_offer_match() -> Dict[str, Any]:
+    match = st.session_state.get("offer_match", {}) or {}
+    return match if isinstance(match, dict) else {}
+
+
+def remember_offer_match(match: Dict[str, Any], source: str) -> None:
+    st.session_state["offer_match"] = dict(match or {})
+    st.session_state["offer_match_source"] = source
+
+
+def render_offer_match_output(match: Dict[str, Any]) -> None:
+    if not match:
+        st.info("Choose a lead and generate an offer match. The latest result will appear here.")
+        return
+    source = str(st.session_state.get("offer_match_source", "") or "").strip()
+    if source:
+        st.caption(f"Latest offer match: {source}")
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.markdown(f"**Recommended offer:** {match.get('recommended_offer', '')}")
+    cols = st.columns(3)
+    cols[0].metric("Category", str(match.get("offer_category", "") or "").replace("_", " ").title())
+    cols[1].metric("Best channel", str(match.get("best_channel", "") or "").replace("_", " ").title())
+    cols[2].metric("Confidence", f"{int(match.get('confidence_score', 0) or 0)}%")
+    st.markdown(f"**Why this offer**\n\n{match.get('why_this_offer', '')}")
+    pains = match.get("business_pain", []) or []
+    if pains:
+        st.markdown("**Business pain**")
+        for pain in pains:
+            st.write(f"- {pain}")
+    starter = match.get("starter_package", {}) or {}
+    pro = match.get("pro_package", {}) or {}
+    package_cols = st.columns(2)
+    with package_cols[0]:
+        st.markdown(f"**{starter.get('name', 'Starter package')}**")
+        st.caption(str(starter.get("price_range", "")))
+        for item in starter.get("deliverables", []) or []:
+            st.write(f"- {item}")
+    with package_cols[1]:
+        st.markdown(f"**{pro.get('name', 'Pro package')}**")
+        st.caption(str(pro.get("price_range", "")))
+        for item in pro.get("deliverables", []) or []:
+            st.write(f"- {item}")
+    st.markdown(f"**Pitch angle**\n\n{match.get('pitch_angle', '')}")
+    st.markdown(f"**Next step:** {match.get('next_step', '')}")
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def render_offer_matchmaker_page(tenant: TenantContext) -> None:
+    frame = load_dashboard_data(tenant)
+    labels = lead_picker_options(frame)
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Lead-to-Offer Matchmaker</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-caption">Pick a lead and get the clearest service offer to sell first.</div>', unsafe_allow_html=True)
+    if not labels:
+        st.info("No leads found yet. Generate or import leads first.")
+        st.markdown("</div></div>", unsafe_allow_html=True)
+        render_offer_match_output(current_offer_match())
+        return
+    selected_id = st.selectbox("Choose a lead", list(labels.keys()), key="offer_match_lead_id", format_func=lambda item: labels.get(item, item))
+    if st.button("Generate Offer Match", use_container_width=True):
+        response = api_request("POST", f"/leads/{selected_id}/offer-match", json={})
+        payload = parse_api_json(response)
+        if response.is_success:
+            match = payload.get("offer_match", {})
+            remember_offer_match(match, labels.get(selected_id, selected_id))
+            st.success("Offer match generated and saved to lead metadata.")
+        else:
+            st.error(str(payload.get("detail", "Could not generate offer match.")))
+    st.markdown("</div></div>", unsafe_allow_html=True)
+    render_offer_match_output(current_offer_match())
+
+
+def current_whatsapp_sales_kit() -> Dict[str, Any]:
+    kit = st.session_state.get("whatsapp_sales_kit", {}) or {}
+    return kit if isinstance(kit, dict) else {}
+
+
+def remember_whatsapp_sales_kit(kit: Dict[str, Any], source: str) -> None:
+    st.session_state["whatsapp_sales_kit"] = dict(kit or {})
+    st.session_state["whatsapp_sales_source"] = source
+
+
+def render_whatsapp_sales_output(kit: Dict[str, Any]) -> None:
+    if not kit:
+        st.info("Choose a lead and generate a sales script. The latest kit will appear here.")
+        return
+    source = str(st.session_state.get("whatsapp_sales_source", "") or "").strip()
+    if source:
+        st.caption(f"Latest sales kit: {source}")
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.metric("Recommended channel", str(kit.get("recommended_channel", "") or "").replace("_", " ").title())
+    st.markdown(f"**WhatsApp opener**\n\n{kit.get('whatsapp_opener', '')}")
+    st.markdown("**Follow-ups**")
+    for key in ["followup_1", "followup_2", "followup_3"]:
+        st.write(f"- {kit.get(key, '')}")
+    st.markdown(f"**Voice note script**\n\n{kit.get('voice_note_script', '')}")
+    call_script = kit.get("call_script", {}) or {}
+    if call_script:
+        st.markdown("**Call script**")
+        for label, value in call_script.items():
+            st.write(f"- {label.replace('_', ' ').title()}: {value}")
+    objections = kit.get("objection_replies", {}) or {}
+    if objections:
+        st.markdown("**Objection replies**")
+        for label, value in objections.items():
+            st.write(f"- {label.replace('_', ' ').title()}: {value}")
+    st.markdown(f"**Next step:** {kit.get('next_step', '')}")
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def render_whatsapp_sales_kit_page(tenant: TenantContext) -> None:
+    frame = load_dashboard_data(tenant)
+    labels = lead_picker_options(frame)
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">WhatsApp Sales Script Generator</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-caption">Generate a friendly opener, follow-ups, voice note, call script, and objection replies.</div>', unsafe_allow_html=True)
+    if not labels:
+        st.info("No leads found yet. Generate or import leads first.")
+        st.markdown("</div></div>", unsafe_allow_html=True)
+        render_whatsapp_sales_output(current_whatsapp_sales_kit())
+        return
+    selected_id = st.selectbox("Choose a lead", list(labels.keys()), key="whatsapp_sales_lead_id", format_func=lambda item: labels.get(item, item))
+    if st.button("Generate WhatsApp Sales Kit", use_container_width=True):
+        response = api_request("POST", f"/leads/{selected_id}/whatsapp-sales-kit", json={})
+        payload = parse_api_json(response)
+        if response.is_success:
+            kit = payload.get("whatsapp_sales_kit", {})
+            remember_whatsapp_sales_kit(kit, labels.get(selected_id, selected_id))
+            st.success("WhatsApp Sales Kit generated and saved to lead metadata.")
+        else:
+            st.error(str(payload.get("detail", "Could not generate WhatsApp Sales Kit.")))
+    st.markdown("</div></div>", unsafe_allow_html=True)
+    render_whatsapp_sales_output(current_whatsapp_sales_kit())
 
 
 def render_email_crm_page(tenant: TenantContext, page: str) -> None:
@@ -1600,6 +1772,12 @@ def render_email_crm_page(tenant: TenantContext, page: str) -> None:
     if normalized_page == "AI Agency Kit":
         frame = load_dashboard_data(tenant)
         render_agency_kit_panel(frame)
+        return
+    if normalized_page == "Offer Matchmaker":
+        render_offer_matchmaker_page(tenant)
+        return
+    if normalized_page == "WhatsApp Sales Kit":
+        render_whatsapp_sales_kit_page(tenant)
         return
     if normalized_page == "Outreach":
         render_pro_action_page(
@@ -1802,6 +1980,105 @@ def render_generate_from_lead_page(tenant: TenantContext) -> None:
     render_marketing_campaign_output(current_marketing_campaign())
 
 
+def current_mini_agency_plan() -> Dict[str, Any]:
+    plan = st.session_state.get("mini_agency_plan", {}) or {}
+    return plan if isinstance(plan, dict) else {}
+
+
+def render_mini_agency_plan_output(plan: Dict[str, Any]) -> None:
+    if not plan:
+        st.info("Create a mini agency plan first. Your latest roadmap will appear here.")
+        return
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.markdown(f"**Agency positioning**\n\n{plan.get('agency_positioning', '')}")
+    niches = ", ".join(plan.get("best_niches", []) or [])
+    st.markdown(f"**Best niches:** {niches}")
+    st.markdown(f"**Starter offer:** {plan.get('starter_offer', '')}")
+    pricing = plan.get("pricing_suggestion", {}) or {}
+    if pricing:
+        cols = st.columns(3)
+        cols[0].metric("Starter", str(pricing.get("starter", "")))
+        cols[1].metric("Pro", str(pricing.get("pro", "")))
+        cols[2].metric("Monthly", str(pricing.get("monthly", "")))
+    queries = plan.get("lead_search_queries", []) or []
+    if queries:
+        st.markdown("**Lead search queries**")
+        for query in queries:
+            st.write(f"- {query}")
+    roadmap = plan.get("daily_roadmap", []) or []
+    if roadmap:
+        rows = [
+            {
+                "day": item.get("day"),
+                "focus": item.get("focus"),
+                "tasks": "; ".join(item.get("tasks", []) or []),
+                "success_metric": item.get("success_metric"),
+            }
+            for item in roadmap
+        ]
+        st.markdown("**Daily roadmap**")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    scripts = plan.get("outreach_scripts", {}) or {}
+    if scripts:
+        st.markdown("**Outreach scripts**")
+        for label, value in scripts.items():
+            st.write(f"- {label.title()}: {value}")
+    proposal = plan.get("proposal_template", {}) or {}
+    if proposal:
+        st.markdown("**Proposal template**")
+        for label, value in proposal.items():
+            st.write(f"- {label.replace('_', ' ').title()}: {value}")
+    content = plan.get("content_plan", []) or []
+    if content:
+        st.markdown("**Content plan**")
+        for item in content:
+            st.write(f"- {item.get('post', '')}: {item.get('caption', '')} CTA: {item.get('cta', '')}")
+    st.markdown(f"**Next action:** {plan.get('next_action', '')}")
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def render_mini_agency_mode_page() -> None:
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Build My Mini Agency Mode</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-caption">Create a practical 14-day roadmap for landing your first agency clients.</div>', unsafe_allow_html=True)
+    with st.form("mini_agency_plan_form"):
+        cols = st.columns(2)
+        with cols[0]:
+            skill = st.selectbox(
+                "Skill",
+                ["web design", "seo", "social media", "automation", "lead generation", "marketing", "other"],
+                key="mini_agency_skill",
+            )
+            target_country = st.text_input("Target country", value="", placeholder="e.g. UAE")
+            daily_time = st.selectbox("Daily available time", ["30 minutes", "1 hour", "2 hours", "4 hours"], index=1)
+        with cols[1]:
+            target_city = st.text_input("Target city", value="", placeholder="e.g. Dubai")
+            goal = st.selectbox("Goal", ["first client", "5 clients", "build portfolio", "sell monthly service"])
+            preferred_niche = st.text_input("Preferred niche", value="", placeholder="Optional")
+        submitted = st.form_submit_button("Build Mini Agency Plan", use_container_width=True)
+    if submitted:
+        response = api_request(
+            "POST",
+            "/agency/mini-agency-plan",
+            json={
+                "skill": skill,
+                "target_country": target_country.strip(),
+                "target_city": target_city.strip(),
+                "daily_time": daily_time,
+                "goal": goal,
+                "preferred_niche": preferred_niche.strip(),
+            },
+        )
+        payload = parse_api_json(response)
+        if response.is_success:
+            st.session_state["mini_agency_plan"] = dict(payload.get("mini_agency_plan", {}) or {})
+            st.success("Mini agency plan generated.")
+        else:
+            st.error(str(payload.get("detail", "Could not generate mini agency plan.")))
+    st.markdown("</div></div>", unsafe_allow_html=True)
+    render_mini_agency_plan_output(current_mini_agency_plan())
+
+
 def render_marketing_campaign_page(tenant: TenantContext, page: str = "Campaign Generator") -> None:
     render_module_header(
         "AI Marketing Campaign Kit",
@@ -1822,6 +2099,9 @@ def render_marketing_campaign_page(tenant: TenantContext, page: str = "Campaign 
         return
     if normalized_page == "7-Day Content Calendar":
         render_marketing_content_calendar(current_marketing_campaign())
+        return
+    if normalized_page == "Mini Agency Mode":
+        render_mini_agency_mode_page()
         return
     render_campaign_generator_page()
 
@@ -1856,7 +2136,17 @@ def render_sidebar_navigation() -> Dict[str, str]:
 
     page = ""
     if module == "Email CRM":
-        crm_pages = ["Generate Leads", "Live Leads", "AI Agency Kit", "Outreach", "Replies", "Followups", "CSV Export"]
+        crm_pages = [
+            "Generate Leads",
+            "Live Leads",
+            "AI Agency Kit",
+            "Offer Matchmaker",
+            "WhatsApp Sales Kit",
+            "Outreach",
+            "Replies",
+            "Followups",
+            "CSV Export",
+        ]
         if st.session_state.get("email_crm_page") not in crm_pages:
             st.session_state["email_crm_page"] = "Generate Leads"
         st.sidebar.markdown("### Email CRM")
@@ -1869,6 +2159,7 @@ def render_sidebar_navigation() -> Dict[str, str]:
             "Ad Copy",
             "Reels Script",
             "7-Day Content Calendar",
+            "Mini Agency Mode",
         ]
         if st.session_state.get("marketing_kit_page") not in marketing_pages:
             st.session_state["marketing_kit_page"] = "Campaign Generator"

@@ -23,6 +23,7 @@ from app.db.postgres import initialize_async_database, verify_async_database
 from app.db.session import AsyncDatabaseSession, DatabaseSession, get_async_db_session, reset_async_session_factory
 from app.services.auth_service import AuthService
 from app.services.admin_analytics_service import AdminAnalyticsService
+from app.services.agency_growth_service import AgencyGrowthService
 from app.services.agency_kit_service import AgencyKitLimitError, AgencyKitService
 from app.services.billing_service import BillingService
 from app.services.job_service import JobService
@@ -162,6 +163,15 @@ class MarketingCampaignIdeaRequest(BaseModel):
     campaign_goal: str = ""
 
 
+class MiniAgencyPlanRequest(BaseModel):
+    skill: str = "other"
+    target_country: str = ""
+    target_city: str = ""
+    daily_time: str = "1 hour"
+    goal: str = "first client"
+    preferred_niche: str = ""
+
+
 class RunOnceRequest(BaseModel):
     job_type: str = ""
 
@@ -192,6 +202,9 @@ def _serialize_lead(lead: Lead, include_agency_kit: bool = False) -> Dict[str, A
     if include_agency_kit:
         payload["id"] = lead.id
         payload["agency_kit"] = metadata.get("agency_kit", {})
+        payload["offer_match"] = metadata.get("offer_match", {})
+        payload["whatsapp_sales_kit"] = metadata.get("whatsapp_sales_kit", {})
+        payload["marketing_campaign_kit"] = metadata.get("marketing_campaign_kit", {})
     return payload
 
 
@@ -417,6 +430,46 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         except ValueError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         return {"tenant_id": tenant.tenant_id, "lead_id": lead_id, "marketing_campaign_kit": campaign}
+
+    @app.post("/leads/{lead_id}/offer-match")
+    async def generate_offer_match(
+        lead_id: str,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        service = AgencyGrowthService(db_session)
+        try:
+            lead = await service.lead_for_tenant(tenant, lead_id)
+            offer_match = await service.generate_offer_match(lead, tenant)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"tenant_id": tenant.tenant_id, "lead_id": lead_id, "offer_match": offer_match}
+
+    @app.post("/leads/{lead_id}/whatsapp-sales-kit")
+    async def generate_whatsapp_sales_kit(
+        lead_id: str,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        service = AgencyGrowthService(db_session)
+        try:
+            lead = await service.lead_for_tenant(tenant, lead_id)
+            sales_kit = await service.generate_whatsapp_sales_kit(lead, tenant)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"tenant_id": tenant.tenant_id, "lead_id": lead_id, "whatsapp_sales_kit": sales_kit}
+
+    @app.post("/agency/mini-agency-plan")
+    async def generate_mini_agency_plan(
+        payload: MiniAgencyPlanRequest,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        plan = AgencyGrowthService(db_session).generate_mini_agency_plan(payload.model_dump(), tenant)
+        return {"tenant_id": tenant.tenant_id, "mini_agency_plan": plan}
 
     @app.post("/jobs")
     async def enqueue_job(
