@@ -18,6 +18,8 @@ class AuthResult:
     tenant_id: str
     user_id: str
     email: str
+    role: str
+    plan: str
     token: str
     subscription_plan: str
     usage_limits: Dict[str, int]
@@ -142,6 +144,8 @@ class AuthService:
             tenant_id=tenant.tenant_id,
             user_id=user.id,
             email=user.email,
+            role=str(user.role or "").strip().lower(),
+            plan=tenant.subscription_plan,
             token=token,
             subscription_plan=tenant.subscription_plan,
             usage_limits=get_plan_limits(tenant.subscription_plan),

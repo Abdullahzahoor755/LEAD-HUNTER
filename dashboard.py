@@ -102,7 +102,56 @@ def normalize_plan_label(plan: str) -> str:
 
 def current_plan() -> str:
     auth = st.session_state.get("auth", {}) or {}
-    return normalize_plan_label(str(auth.get("subscription_plan", "")))
+    return normalize_plan_label(str(auth.get("subscription_plan") or auth.get("plan") or ""))
+
+
+def normalize_auth_role(value: Any) -> str:
+    if isinstance(value, bool):
+        return "admin" if value else ""
+    return str(value or "").strip().lower()
+
+
+def extract_auth_role(auth: Dict[str, Any], include_token: bool = True) -> str:
+    if not isinstance(auth, dict):
+        return ""
+
+    for key in ("role", "user_role"):
+        role = normalize_auth_role(auth.get(key))
+        if role:
+            return role
+
+    user = auth.get("user")
+    if isinstance(user, dict):
+        role = normalize_auth_role(user.get("role"))
+        if role:
+            return role
+
+    is_admin = auth.get("is_admin")
+    if isinstance(is_admin, bool):
+        return "admin" if is_admin else ""
+    if str(is_admin or "").strip().lower() in {"1", "true", "yes", "admin"}:
+        return "admin"
+
+    if include_token:
+        token = str(auth.get("token", "") or "").strip()
+        if token:
+            try:
+                return extract_auth_role(decode_jwt_token(token), include_token=False)
+            except Exception:
+                return ""
+    return ""
+
+
+def normalize_auth_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    auth = dict(payload or {}) if isinstance(payload, dict) else {}
+    role = extract_auth_role(auth)
+    if role:
+        auth["role"] = role
+    plan = str(auth.get("plan") or auth.get("subscription_plan") or "").strip()
+    if plan:
+        auth.setdefault("plan", plan)
+        auth.setdefault("subscription_plan", plan)
+    return auth
 
 
 def render_landing_styles() -> None:
@@ -1096,14 +1145,8 @@ def api_request(method: str, path: str, **kwargs: Any) -> httpx.Response:
 
 
 def get_auth_role() -> str:
-    token = str(st.session_state.get("auth", {}).get("token", "")).strip()
-    if not token:
-        return ""
-    try:
-        payload = decode_jwt_token(token)
-    except Exception:
-        return ""
-    return str(payload.get("role", "")).strip().lower()
+    auth = st.session_state.get("auth", {}) or {}
+    return extract_auth_role(auth)
 
 
 def is_admin_user() -> bool:
@@ -1238,7 +1281,7 @@ def require_login() -> TenantContext | None:
                     if not response.is_success:
                         st.error(str(payload.get("detail", "Login failed.")))
                         return None
-                    st.session_state["auth"] = payload
+                    st.session_state["auth"] = normalize_auth_payload(payload)
                     st.session_state["latest_subscription"] = {}
                     st.session_state["plan_onboarding_seen"] = ""
                     st.rerun()
@@ -1276,7 +1319,7 @@ def require_login() -> TenantContext | None:
                     if not response.is_success:
                         st.error(str(payload.get("detail", "Signup failed.")))
                         return None
-                    st.session_state["auth"] = payload
+                    st.session_state["auth"] = normalize_auth_payload(payload)
                     st.session_state["latest_subscription"] = {}
                     st.session_state["plan_onboarding_seen"] = ""
                     st.rerun()

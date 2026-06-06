@@ -72,6 +72,45 @@ async def test_admin_analytics_endpoints_require_admin_role() -> None:
 
 
 @pytest.mark.anyio
+async def test_admin_login_response_includes_role_and_plan() -> None:
+    db = build_memory_session()
+    await AuthService(db).signup(
+        tenant_id="tenant-admin-login",
+        tenant_name="Tenant Admin Login",
+        tenant_slug="tenant-admin-login",
+        email="admin-login@test.local",
+        password="secret123",
+        full_name="Admin Login",
+        plan="Agency",
+        role="admin",
+    )
+
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/login",
+            json={
+                "tenant_id": "tenant-admin-login",
+                "email": "admin-login@test.local",
+                "password": "secret123",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["token"]
+    assert body["tenant_id"] == "tenant-admin-login"
+    assert body["email"] == "admin-login@test.local"
+    assert body["role"] == "admin"
+    assert body["plan"] == "Agency"
+    assert body["subscription_plan"] == "Agency"
+    assert decode_jwt_token(body["token"])["role"] == "admin"
+    assert "password" not in body
+    assert "password_hash" not in body
+
+
+@pytest.mark.anyio
 async def test_fix_admin_roles_keeps_only_selected_admin() -> None:
     db = build_memory_session()
     await AuthService(db).signup(
