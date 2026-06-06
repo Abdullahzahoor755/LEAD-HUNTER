@@ -215,6 +215,7 @@ def _serialize_lead(lead: Lead, include_agency_kit: bool = False) -> Dict[str, A
         "industry": str(lead.industry or "").strip(),
         "score": int(lead.score or 0),
         "outreach_status": str(lead.outreach_status or "").strip().lower(),
+        "outreach_error": str(metadata.get("outreach_error", "") or "").strip().lower(),
         "followup_count": int(lead.followup_count or 0),
         "reply_status": str(lead.reply_status or "").strip().lower(),
         "last_reply_at": last_reply_at.isoformat() if hasattr(last_reply_at, "isoformat") else str(last_reply_at or ""),

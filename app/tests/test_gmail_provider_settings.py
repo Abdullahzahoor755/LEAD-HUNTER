@@ -9,7 +9,7 @@ import pytest
 from app.agents.base import AgentRequest
 from app.agents.outreach import OutreachAgent
 from app.api.app import create_fastapi_app
-from app.core.models import TenantContext
+from app.core.models import Lead, TenantContext
 from app.db.session import build_memory_session
 
 
@@ -271,7 +271,7 @@ async def test_free_plan_cannot_open_or_disconnect_gmail_settings(monkeypatch: p
 
 
 @pytest.mark.anyio
-async def test_outreach_agent_missing_credentials_error_remains_clear() -> None:
+async def test_outreach_agent_missing_credentials_marks_lead_failed() -> None:
     db = build_memory_session()
     signup_app = create_fastapi_app(db=db)
     transport = httpx.ASGITransport(app=signup_app)
@@ -279,5 +279,23 @@ async def test_outreach_agent_missing_credentials_error_remains_clear() -> None:
         await _signup(client, tenant_id="tenant-no-gmail", plan="Pro")
 
     tenant = TenantContext(tenant_id="tenant-no-gmail", tenant_slug="tenant-no-gmail")
-    with pytest.raises(ValueError, match="Tenant Gmail credentials are not configured."):
-        await OutreachAgent().run(AgentRequest(tenant=tenant, payload={}), db)
+    lead = db.for_tenant(tenant).save(
+        "leads",
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company="No Gmail Co",
+            company_url="https://no-gmail.test",
+            verified_email="lead@no-gmail.test",
+            email="lead@no-gmail.test",
+            status="pending",
+            outreach_status="pending",
+        ),
+    )
+
+    result = await OutreachAgent().run(AgentRequest(tenant=tenant, payload={}), db)
+
+    saved = db.for_tenant(tenant).get("leads", lead.id)
+    assert result["failed_messages"] == 1
+    assert saved.status == "failed"
+    assert saved.outreach_status == "failed"
+    assert saved.metadata["outreach_error"] == "missing_gmail_credentials"

@@ -113,6 +113,7 @@ async def test_api_exports_only_standardized_lead_fields() -> None:
             "industry",
             "score",
             "outreach_status",
+            "outreach_error",
             "followup_count",
             "reply_status",
             "last_reply_at",

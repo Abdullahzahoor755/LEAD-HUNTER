@@ -168,8 +168,63 @@ async def test_failed_send_persists_failed_status_and_email_attempt(monkeypatch:
     assert result["failed_messages"] == 1
     assert saved.status == "failed"
     assert saved.outreach_status == "failed"
+    assert saved.metadata["outreach_error"] == "gmail_send_failed"
     assert len(emails) == 1
     assert emails[0].status == "failed"
+    assert emails[0].metadata["error"] == "gmail_send_failed"
+
+
+@pytest.mark.anyio
+async def test_missing_gmail_credentials_persists_failure_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-missing-gmail")
+    db.tenants.save(_tenant_record(tenant.tenant_id))
+    lead = await _save_pending_lead(db, tenant)
+
+    result = await OutreachAgent().run(AgentRequest(tenant=tenant, payload={}), db)
+
+    saved = db.for_tenant(tenant).get("leads", lead.id)
+    emails = db.for_tenant(tenant).list("emails")
+    assert result["sent_messages"] == 0
+    assert result["failed_messages"] == 1
+    assert saved.status == "failed"
+    assert saved.outreach_status == "failed"
+    assert saved.metadata["outreach_error"] == "missing_gmail_credentials"
+    assert len(emails) == 1
+    assert emails[0].metadata["error"] == "missing_gmail_credentials"
+
+
+@pytest.mark.anyio
+async def test_invalid_or_missing_email_persists_no_verified_email_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-no-email")
+    db.tenants.save(_tenant_record(tenant.tenant_id))
+    await _configure_gmail(db, tenant, monkeypatch)
+    lead = db.for_tenant(tenant).save(
+        "leads",
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company="No Email Co",
+            company_url="https://no-email.test",
+            status="pending",
+            outreach_status="pending",
+        ),
+    )
+    fake_provider = _FakeGmailProvider()
+    monkeypatch.setattr(outreach_module, "build_provider_registry", lambda: {"gmail": fake_provider})
+
+    result = await OutreachAgent().run(AgentRequest(tenant=tenant, payload={}), db)
+
+    saved = db.for_tenant(tenant).get("leads", lead.id)
+    emails = db.for_tenant(tenant).list("emails")
+    assert result["sent_messages"] == 0
+    assert result["failed_messages"] == 1
+    assert fake_provider.sent == []
+    assert saved.status == "failed"
+    assert saved.outreach_status == "failed"
+    assert saved.metadata["outreach_error"] == "no_verified_email"
+    assert len(emails) == 1
+    assert emails[0].metadata["error"] == "no_verified_email"
 
 
 @pytest.mark.anyio
@@ -263,3 +318,28 @@ async def test_production_audit_logs_do_not_include_full_body_or_recipient(
     assert "OUTREACH_AUDIT" not in caplog.text
     assert "lead@acme-logistics.test" not in caplog.text
     assert "Would it be worth a quick" not in caplog.text
+
+
+@pytest.mark.anyio
+async def test_production_failure_log_uses_safe_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DEBUG", "false")
+    caplog.set_level(logging.WARNING)
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-prod-failure-log")
+    db.tenants.save(_tenant_record(tenant.tenant_id))
+    await _configure_gmail(db, tenant, monkeypatch)
+    await _save_pending_lead(db, tenant)
+    monkeypatch.setattr(outreach_module, "build_provider_registry", lambda: {"gmail": _FailingGmailProvider()})
+
+    await OutreachAgent().run(AgentRequest(tenant=tenant, payload={}), db)
+
+    assert "tenant-prod-failure-log" in caplog.text
+    assert "error_type=gmail_send_failed" in caplog.text
+    assert "status=failed" in caplog.text
+    assert "lead@acme-logistics.test" not in caplog.text
+    assert "Would it be worth a quick" not in caplog.text
+    assert "gmail down" not in caplog.text

@@ -16,6 +16,15 @@ from app.services._async import maybe_await
 
 LOGGER = logging.getLogger(__name__)
 
+SAFE_OUTREACH_FAILURE_REASONS = {
+    "missing_gmail_credentials",
+    "gmail_send_failed",
+    "no_verified_email",
+    "plan_locked",
+    "oauth_token_error",
+    "provider_generation_failed",
+}
+
 
 class OutreachService:
     def __init__(self, db: DatabaseSession | AsyncDatabaseSession) -> None:
@@ -97,6 +106,17 @@ class OutreachService:
             and self._email_domain(lead.email) not in blocked_domains
         ]
 
+    async def list_outreach_attempt_leads(self, tenant: TenantContext, blocked_domains: set[str]) -> List[Lead]:
+        sendable_statuses = {"pending", "draft", "no_content_scraped", "blocked_site", "slow_site", "js_site"}
+        leads = await self.lead_service.list_leads(tenant)
+        return [
+            lead
+            for lead in leads
+            if lead.status.lower() in sendable_statuses
+            and lead.status.lower() != "unsubscribed"
+            and (not self.outreach_recipient(lead) or self._email_domain(self.outreach_recipient(lead)) not in blocked_domains)
+        ]
+
     async def mark_outreach_result(
         self,
         tenant: TenantContext,
@@ -108,6 +128,7 @@ class OutreachService:
         status: str,
         sent_at_iso: str,
         sent_at_dt: datetime,
+        error_reason: str = "",
     ) -> None:
         scoped = self.db.for_tenant(tenant)
         existing = await maybe_await(scoped.get("leads", lead.id))
@@ -121,6 +142,7 @@ class OutreachService:
                 lead.email,
             )
             return
+        safe_error = self.safe_failure_reason(error_reason)
         metadata = dict(existing.metadata or {})
         metadata.update(
             {
@@ -131,6 +153,10 @@ class OutreachService:
                 "LastContactedAt": sent_at_iso,
             }
         )
+        if status == "failed":
+            metadata["outreach_error"] = safe_error or "gmail_send_failed"
+        else:
+            metadata.pop("outreach_error", None)
         existing.status = status
         existing.outreach_status = status
         existing.metadata = metadata
@@ -157,7 +183,10 @@ class OutreachService:
             direction="outbound",
             status=status,
             sent_at=sent_at_dt,
-            metadata={"source": "legacy_outreach"},
+            metadata={
+                "source": "legacy_outreach",
+                **({"error": metadata["outreach_error"]} if status == "failed" and metadata.get("outreach_error") else {}),
+            },
         )
         saved_email = await maybe_await(scoped.save("emails", email_record))
         audit_log(
@@ -360,6 +389,25 @@ class OutreachService:
 
     def _email_domain(self, email: str) -> str:
         return str(email or "").strip().lower().split("@")[-1]
+
+    def outreach_recipient(self, lead: Lead) -> str:
+        email = str(lead.email or lead.verified_email or "").strip().lower()
+        if not email or "@" not in email:
+            return ""
+        local, _, domain = email.partition("@")
+        if not local.strip() or "." not in domain or domain.startswith(".") or domain.endswith("."):
+            return ""
+        return email
+
+    def safe_failure_reason(self, reason: str) -> str:
+        value = str(reason or "").strip().lower()
+        return value if value in SAFE_OUTREACH_FAILURE_REASONS else ""
+
+    def classify_send_failure(self, error: Exception) -> str:
+        text = f"{type(error).__name__} {error}".lower()
+        if any(marker in text for marker in ("oauth", "token", "refresh", "invalid_grant", "unauthorized", "401")):
+            return "oauth_token_error"
+        return "gmail_send_failed"
 
     def _ensure_unsubscribe_footer(self, body: str) -> str:
         footer = "If you prefer not to hear from us again, reply with unsubscribe."
