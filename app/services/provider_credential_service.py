@@ -12,6 +12,20 @@ from app.services._async import maybe_await
 from app.services.security_service import decrypt_secret, encrypt_secret
 
 
+def _settings_value(attribute: str, env_name: str, default: str = "") -> str:
+    import os
+
+    return str(getattr(settings, attribute, "") or os.getenv(env_name, default) or "").strip()
+
+
+def _google_oauth_client_id() -> str:
+    return _settings_value("google_oauth_client_id", "GOOGLE_OAUTH_CLIENT_ID")
+
+
+def _google_oauth_client_secret() -> str:
+    return _settings_value("google_oauth_client_secret", "GOOGLE_OAUTH_CLIENT_SECRET")
+
+
 class ProviderCredentialService:
     def __init__(self, db: DatabaseSession | AsyncDatabaseSession) -> None:
         self.db = db
@@ -25,7 +39,7 @@ class ProviderCredentialService:
             return {}
         decrypted: Dict[str, Any] = {
             "provider": "gmail",
-            "client_id": str(settings.google_oauth_client_id or provider_settings.get("client_id", "")).strip(),
+            "client_id": str(_google_oauth_client_id() or provider_settings.get("client_id", "")).strip(),
             "client_secret": "",
             "token_uri": str(provider_settings.get("token_uri", "https://oauth2.googleapis.com/token")),
             "scopes": list(provider_settings.get("scopes", [])),
@@ -36,8 +50,9 @@ class ProviderCredentialService:
             ).strip().lower(),
         }
         encrypted_secret = str(provider_settings.get("client_secret_encrypted", "")).strip()
-        if settings.google_oauth_client_secret:
-            decrypted["client_secret"] = str(settings.google_oauth_client_secret).strip()
+        google_client_secret = _google_oauth_client_secret()
+        if google_client_secret:
+            decrypted["client_secret"] = google_client_secret
         elif encrypted_secret:
             decrypted["client_secret"] = decrypt_secret(encrypted_secret)
         else:
@@ -87,7 +102,7 @@ class ProviderCredentialService:
         client_secret = str(credentials.get("client_secret", "") or "").strip()
         gmail_settings: Dict[str, Any] = {
             "provider": "gmail",
-            "client_id": str(credentials.get("client_id") or settings.google_oauth_client_id or "").strip(),
+            "client_id": str(credentials.get("client_id") or _google_oauth_client_id() or "").strip(),
             "token_uri": str(credentials.get("token_uri", "https://oauth2.googleapis.com/token")),
             "scopes": list(credentials.get("scopes", [])),
             "refresh_token_encrypted": encrypt_secret(refresh_token),
@@ -97,7 +112,7 @@ class ProviderCredentialService:
             "connected": True,
             "connected_at": datetime.now(timezone.utc).isoformat(),
         }
-        if client_secret and not settings.google_oauth_client_secret:
+        if client_secret and not _google_oauth_client_secret():
             gmail_settings["client_secret_encrypted"] = encrypt_secret(client_secret)
         provider_settings["gmail"] = gmail_settings
         settings_payload["providers"] = provider_settings

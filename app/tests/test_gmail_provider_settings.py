@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from urllib.parse import parse_qs, urlparse
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -44,11 +45,55 @@ def _configure_google_oauth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.configs.settings.settings.frontend_base_url", "http://frontend.test")
 
 
+def _clear_google_oauth(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "")
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
+    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_URI", "")
+    monkeypatch.setattr("app.configs.settings.settings.google_oauth_client_id", "")
+    monkeypatch.setattr("app.configs.settings.settings.google_oauth_client_secret", "")
+    monkeypatch.setattr("app.configs.settings.settings.google_oauth_redirect_uri", "")
+
+
 async def _oauth_state(client: httpx.AsyncClient, token: str) -> str:
     response = await client.get("/settings/providers/gmail/oauth/start", headers=_auth_headers(token))
     assert response.status_code == 200
     authorization_url = response.json()["authorization_url"]
     return parse_qs(urlparse(authorization_url).query)["state"][0]
+
+
+@pytest.mark.anyio
+async def test_gmail_oauth_start_missing_env_returns_safe_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_google_oauth(monkeypatch)
+    app = create_fastapi_app(db=build_memory_session())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        signup = await _signup(client, tenant_id="tenant-gmail-missing-env")
+        response = await client.get("/settings/providers/gmail/oauth/start", headers=_auth_headers(signup["token"]))
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload == {"detail": "Google OAuth is not configured."}
+    assert "GOOGLE_OAUTH_CLIENT_SECRET" not in str(payload)
+    assert "google-client-secret" not in str(payload)
+
+
+@pytest.mark.anyio
+async def test_gmail_oauth_start_missing_settings_attrs_returns_safe_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GOOGLE_OAUTH_CLIENT_ID", raising=False)
+    monkeypatch.delenv("GOOGLE_OAUTH_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("GOOGLE_OAUTH_REDIRECT_URI", raising=False)
+    monkeypatch.setattr(
+        "app.api.app.settings",
+        SimpleNamespace(frontend_base_url="", environment="development", database_backend="postgres"),
+    )
+    app = create_fastapi_app(db=build_memory_session())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        signup = await _signup(client, tenant_id="tenant-gmail-missing-attrs")
+        response = await client.get("/settings/providers/gmail/oauth/start", headers=_auth_headers(signup["token"]))
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Google OAuth is not configured."}
 
 
 @pytest.mark.anyio
@@ -71,6 +116,8 @@ async def test_gmail_oauth_start_returns_authorization_url(monkeypatch: pytest.M
     assert "https://www.googleapis.com/auth/gmail.send" in query["scope"][0]
     assert "https://www.googleapis.com/auth/gmail.readonly" in query["scope"][0]
     assert query["state"][0]
+    assert "google-client-secret" not in authorization_url
+    assert "GOOGLE_OAUTH_CLIENT_SECRET" not in str(payload)
 
 
 @pytest.mark.anyio

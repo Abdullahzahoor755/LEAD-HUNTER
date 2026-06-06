@@ -245,9 +245,25 @@ def _is_debug_endpoint_enabled() -> bool:
     return environment == "development" or debug_enabled
 
 
+def _settings_value(attribute: str, env_name: str, default: str = "") -> str:
+    return str(getattr(settings, attribute, "") or os.getenv(env_name, default) or "").strip()
+
+
+def _google_oauth_client_id() -> str:
+    return _settings_value("google_oauth_client_id", "GOOGLE_OAUTH_CLIENT_ID")
+
+
+def _google_oauth_client_secret() -> str:
+    return _settings_value("google_oauth_client_secret", "GOOGLE_OAUTH_CLIENT_SECRET")
+
+
+def _google_oauth_redirect_uri() -> str:
+    return _settings_value("google_oauth_redirect_uri", "GOOGLE_OAUTH_REDIRECT_URI")
+
+
 def _gmail_frontend_redirect_url(success: bool, message: str) -> str:
     status = "success" if success else "error"
-    base_url = str(settings.frontend_base_url or os.getenv("APP_FRONTEND_URL", "") or "").strip().rstrip("/")
+    base_url = _settings_value("frontend_base_url", "APP_FRONTEND_URL").rstrip("/")
     params = urlencode({"settings": "gmail", "gmail_oauth": status, "message": message})
     if base_url:
         return f"{base_url}/?{params}"
@@ -259,7 +275,7 @@ def _gmail_redirect_response(success: bool, message: str) -> RedirectResponse:
 
 
 def _gmail_oauth_redirect_uri(request: Request) -> str:
-    configured = str(settings.google_oauth_redirect_uri or "").strip()
+    configured = _google_oauth_redirect_uri()
     if configured:
         return configured
     return str(request.url_for("gmail_oauth_callback"))
@@ -267,7 +283,7 @@ def _gmail_oauth_redirect_uri(request: Request) -> str:
 
 def _build_gmail_authorization_url(redirect_uri: str, state: str) -> str:
     params = {
-        "client_id": str(settings.google_oauth_client_id or "").strip(),
+        "client_id": _google_oauth_client_id(),
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": " ".join(GMAIL_OAUTH_SCOPES),
@@ -285,8 +301,8 @@ async def exchange_gmail_oauth_code(code: str, redirect_uri: str) -> Dict[str, A
             GOOGLE_OAUTH_TOKEN_URL,
             data={
                 "code": code,
-                "client_id": str(settings.google_oauth_client_id or "").strip(),
-                "client_secret": str(settings.google_oauth_client_secret or "").strip(),
+                "client_id": _google_oauth_client_id(),
+                "client_secret": _google_oauth_client_secret(),
                 "redirect_uri": redirect_uri,
                 "grant_type": "authorization_code",
             },
@@ -632,8 +648,8 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
     ) -> Dict[str, Any]:
         tenant = request.state.tenant
         await require_pro_features(tenant, db_session, "Gmail automation is a Pro feature.")
-        if not settings.google_oauth_client_id or not settings.google_oauth_client_secret:
-            raise HTTPException(status_code=400, detail="Google OAuth is not configured on the backend.")
+        if not _google_oauth_client_id() or not _google_oauth_client_secret():
+            raise HTTPException(status_code=400, detail="Google OAuth is not configured.")
         state = create_jwt_token(
             {
                 "purpose": "gmail_oauth",
@@ -693,8 +709,8 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
             await ProviderCredentialService(db_session).save_gmail_oauth_credentials(
                 tenant,
                 {
-                    "client_id": str(settings.google_oauth_client_id or "").strip(),
-                    "client_secret": str(settings.google_oauth_client_secret or "").strip(),
+                    "client_id": _google_oauth_client_id(),
+                    "client_secret": _google_oauth_client_secret(),
                     "refresh_token": refresh_token,
                     "access_token": access_token,
                     "expiry": expiry,
