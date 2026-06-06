@@ -4,19 +4,22 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, Sequence
+from urllib.parse import urlencode
 
+import httpx
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from app.configs.settings import settings
 from app.middleware.auth import AuthTenantMiddleware
 from app.middleware.security import InMemoryRateLimitMiddleware, SecurityHeadersMiddleware
-from app.core.auth import get_plan_limits, is_plan_gated_agent, validate_production_jwt_secret
+from app.core.auth import create_jwt_token, decode_jwt_token, get_plan_limits, is_plan_gated_agent, validate_production_jwt_secret
 from app.core.models import Job, Lead, TenantContext
 from app.core.tenant import get_current_tenant, resolve_tenant_context
 from app.db.postgres import initialize_async_database, verify_async_database
@@ -36,6 +39,14 @@ from app.services.security_service import SecretEncryptionError
 from app.services._async import maybe_await
 
 LOGGER = logging.getLogger(__name__)
+
+GMAIL_OAUTH_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.readonly",
+]
+GOOGLE_OAUTH_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_GMAIL_PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
 
 
 @dataclass(slots=True)
@@ -232,6 +243,69 @@ def _is_debug_endpoint_enabled() -> bool:
     environment = str(os.getenv("APP_ENV") or os.getenv("ENV") or settings.environment or "development").strip().lower()
     debug_enabled = str(os.getenv("DEBUG", "")).strip().lower() in {"1", "true", "yes", "on"}
     return environment == "development" or debug_enabled
+
+
+def _gmail_frontend_redirect_url(success: bool, message: str) -> str:
+    status = "success" if success else "error"
+    base_url = str(settings.frontend_base_url or os.getenv("APP_FRONTEND_URL", "") or "").strip().rstrip("/")
+    params = urlencode({"settings": "gmail", "gmail_oauth": status, "message": message})
+    if base_url:
+        return f"{base_url}/?{params}"
+    return f"/?{params}"
+
+
+def _gmail_redirect_response(success: bool, message: str) -> RedirectResponse:
+    return RedirectResponse(_gmail_frontend_redirect_url(success, message), status_code=302)
+
+
+def _gmail_oauth_redirect_uri(request: Request) -> str:
+    configured = str(settings.google_oauth_redirect_uri or "").strip()
+    if configured:
+        return configured
+    return str(request.url_for("gmail_oauth_callback"))
+
+
+def _build_gmail_authorization_url(redirect_uri: str, state: str) -> str:
+    params = {
+        "client_id": str(settings.google_oauth_client_id or "").strip(),
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": " ".join(GMAIL_OAUTH_SCOPES),
+        "access_type": "offline",
+        "prompt": "consent",
+        "include_granted_scopes": "true",
+        "state": state,
+    }
+    return f"{GOOGLE_OAUTH_AUTH_URL}?{urlencode(params)}"
+
+
+async def exchange_gmail_oauth_code(code: str, redirect_uri: str) -> Dict[str, Any]:
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(
+            GOOGLE_OAUTH_TOKEN_URL,
+            data={
+                "code": code,
+                "client_id": str(settings.google_oauth_client_id or "").strip(),
+                "client_secret": str(settings.google_oauth_client_secret or "").strip(),
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        response.raise_for_status()
+        data = response.json()
+    return dict(data)
+
+
+async def fetch_gmail_profile_email(access_token: str) -> str:
+    if not access_token:
+        return ""
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(GOOGLE_GMAIL_PROFILE_URL, headers={"Authorization": f"Bearer {access_token}"})
+        if response.status_code >= 400:
+            return ""
+        data = response.json()
+    return str(data.get("emailAddress", "") or "").strip().lower()
 
 
 def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
@@ -551,6 +625,90 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
                 },
             )
 
+    @app.get("/settings/providers/gmail/oauth/start")
+    async def start_gmail_oauth(
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        await require_pro_features(tenant, db_session, "Gmail automation is a Pro feature.")
+        if not settings.google_oauth_client_id or not settings.google_oauth_client_secret:
+            raise HTTPException(status_code=400, detail="Google OAuth is not configured on the backend.")
+        state = create_jwt_token(
+            {
+                "purpose": "gmail_oauth",
+                "tenant_id": tenant.tenant_id,
+                "tenant_slug": tenant.tenant_slug,
+                "user_id": tenant.user_id,
+                "email": str(tenant.metadata.get("email", "") if tenant.metadata else ""),
+            },
+            expires_in_seconds=600,
+        )
+        redirect_uri = _gmail_oauth_redirect_uri(request)
+        return {"authorization_url": _build_gmail_authorization_url(redirect_uri, state)}
+
+    @app.get("/settings/providers/gmail/oauth/callback")
+    async def gmail_oauth_callback(
+        request: Request,
+        code: str = "",
+        state: str = "",
+        error: str = "",
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> RedirectResponse:
+        if error:
+            return _gmail_redirect_response(False, "Google authorization was cancelled.")
+        if not code or not state:
+            return _gmail_redirect_response(False, "Google authorization response was incomplete.")
+        try:
+            state_payload = decode_jwt_token(state)
+            if state_payload.get("purpose") != "gmail_oauth":
+                raise ValueError("Invalid OAuth state.")
+            tenant_id = str(state_payload.get("tenant_id", "") or "").strip()
+            user_id = str(state_payload.get("user_id", "") or "").strip()
+            if not tenant_id or not user_id:
+                raise ValueError("Invalid OAuth state.")
+        except ValueError:
+            return _gmail_redirect_response(False, "Google authorization state was invalid or expired.")
+
+        redirect_uri = _gmail_oauth_redirect_uri(request)
+        try:
+            token_data = await exchange_gmail_oauth_code(code, redirect_uri)
+            refresh_token = str(token_data.get("refresh_token", "") or "").strip()
+            access_token = str(token_data.get("access_token", "") or "").strip()
+            if not refresh_token:
+                return _gmail_redirect_response(False, "Google did not return offline access. Please reconnect Gmail.")
+            email_address = await fetch_gmail_profile_email(access_token)
+            if not email_address:
+                email_address = str(state_payload.get("email", "") or "").strip().lower()
+            expiry = ""
+            expires_in = int(token_data.get("expires_in", 0) or 0)
+            if expires_in:
+                expiry = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+            tenant = TenantContext(
+                tenant_id=tenant_id,
+                tenant_slug=str(state_payload.get("tenant_slug", "") or "").strip(),
+                user_id=user_id,
+                metadata={"email": str(state_payload.get("email", "") or "")},
+            )
+            await ProviderCredentialService(db_session).save_gmail_oauth_credentials(
+                tenant,
+                {
+                    "client_id": str(settings.google_oauth_client_id or "").strip(),
+                    "client_secret": str(settings.google_oauth_client_secret or "").strip(),
+                    "refresh_token": refresh_token,
+                    "access_token": access_token,
+                    "expiry": expiry,
+                    "email_address": email_address,
+                    "token_uri": GOOGLE_OAUTH_TOKEN_URL,
+                    "scopes": GMAIL_OAUTH_SCOPES,
+                },
+            )
+        except SecretEncryptionError:
+            return _gmail_redirect_response(False, "Secure Gmail storage is not configured.")
+        except Exception:
+            return _gmail_redirect_response(False, "Google authorization failed safely.")
+        return _gmail_redirect_response(True, "Gmail connected successfully.")
+
     @app.post("/settings/providers/gmail")
     async def save_gmail_provider_settings(
         payload: GmailProviderSettingsRequest,
@@ -564,7 +722,7 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
             "client_secret": payload.client_secret.strip(),
             "refresh_token": payload.refresh_token.strip(),
             "email_address": payload.sender_email.strip().lower(),
-            "scopes": ["https://www.googleapis.com/auth/gmail.send"],
+            "scopes": GMAIL_OAUTH_SCOPES,
         }
         try:
             await ProviderCredentialService(db_session).save_gmail_credentials(tenant, credentials)
@@ -572,6 +730,7 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(error)) from error
         return {
             "configured": True,
+            "connected": True,
             "sender_email": credentials["email_address"],
         }
 
@@ -582,12 +741,27 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
     ) -> Dict[str, Any]:
         tenant = request.state.tenant
         await require_pro_features(tenant, db_session, "Gmail automation is a Pro feature.")
-        credentials = await ProviderCredentialService(db_session).get_gmail_credentials(tenant)
+        try:
+            credentials = await ProviderCredentialService(db_session).get_gmail_credentials(tenant)
+        except SecretEncryptionError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
         sender_email = str(credentials.get("email_address", "")).strip().lower() if credentials else ""
+        connected = bool(credentials.get("refresh_token") or credentials.get("access_token")) if credentials else False
         return {
-            "configured": bool(credentials),
+            "configured": bool(credentials) and connected,
+            "connected": connected,
             "sender_email": sender_email,
         }
+
+    @app.post("/settings/providers/gmail/disconnect")
+    async def disconnect_gmail_provider(
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        await require_pro_features(tenant, db_session, "Gmail automation is a Pro feature.")
+        await ProviderCredentialService(db_session).disconnect_gmail(tenant)
+        return {"configured": False, "connected": False, "sender_email": ""}
 
     @app.post("/settings/providers/ai")
     async def save_ai_provider_settings(

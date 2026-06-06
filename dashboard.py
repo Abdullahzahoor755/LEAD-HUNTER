@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from datetime import datetime
 import html
-import json
 import mimetypes
 import os
 from pathlib import Path
@@ -1310,23 +1309,6 @@ def sanitize_csv_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return protected
 
 
-def load_uploaded_json(uploaded_file: Any) -> Dict[str, Any]:
-    if uploaded_file is None:
-        return {}
-    raw = uploaded_file.getvalue()
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8")
-    return json.loads(str(raw or "{}"))
-
-
-def extract_google_oauth_client(credentials_json: Dict[str, Any]) -> Dict[str, str]:
-    client_config = credentials_json.get("installed") or credentials_json.get("web") or credentials_json
-    return {
-        "client_id": str(client_config.get("client_id", "")).strip(),
-        "client_secret": str(client_config.get("client_secret", "")).strip(),
-    }
-
-
 def render_settings_page() -> None:
     render_ai_provider_settings()
     render_gmail_settings()
@@ -1415,7 +1397,7 @@ def render_gmail_settings() -> None:
             <div class="page-card">
                 <div class="page-card-inner">
                     <div class="section-title">Gmail Automation Setup</div>
-                    <div class="settings-note">Beta setup requires Google credentials.json and token.json. One-click Gmail connect is coming soon.</div>
+                    <div class="settings-note">Connect Gmail to send outreach and monitor replies. You can disconnect anytime.</div>
         """,
         unsafe_allow_html=True,
     )
@@ -1428,52 +1410,48 @@ def render_gmail_settings() -> None:
         status = parse_api_json(status_response)
     except Exception as error:
         st.error(f"Could not load Gmail status: {error}")
-        status = {"configured": False, "sender_email": ""}
+        status = {"configured": False, "connected": False, "sender_email": ""}
     configured = bool(status.get("configured"))
+    connected = bool(status.get("connected"))
     sender_email = str(status.get("sender_email", "") or "")
     st.markdown(
-        f'<span class="status-badge {"success" if configured else "warning"}">{"Connected" if configured else "Not connected"}</span>',
+        f'<span class="status-badge {"success" if connected else "warning"}">{"Connected" if connected else "Not connected"}</span>',
         unsafe_allow_html=True,
     )
-    if sender_email:
-        st.caption(f"Sender: {sender_email}")
+    if connected and sender_email:
+        st.caption(f"Connected as {sender_email}")
+    elif configured:
+        st.caption("Gmail is configured, but the sender email could not be loaded.")
+    else:
+        st.caption("Use Google OAuth to connect a sender account.")
 
-    with st.form("gmail_credentials_form"):
-        credentials_file = st.file_uploader("Upload credentials.json", type=["json"])
-        token_file = st.file_uploader("Upload token.json", type=["json"])
-        sender_email_input = st.text_input("Sender email", value=sender_email, placeholder="sales@company.com")
-        submitted = st.form_submit_button("Save Gmail Connection", use_container_width=True)
-    if submitted:
-        if credentials_file is None or token_file is None or not sender_email_input.strip():
-            st.error("credentials.json, token.json, and sender email are required.")
-            st.markdown("</div></div></div>", unsafe_allow_html=True)
-            return
-        try:
-            credentials_json = load_uploaded_json(credentials_file)
-            token_json = load_uploaded_json(token_file)
-            client = extract_google_oauth_client(credentials_json)
-            refresh_token = str(token_json.get("refresh_token", "")).strip()
-        except Exception as error:
-            st.error(f"Could not read Gmail setup files: {error}")
-            st.markdown("</div></div></div>", unsafe_allow_html=True)
-            return
-        if not client["client_id"] or not client["client_secret"] or not refresh_token:
-            st.error("Uploaded files are missing client_id, client_secret, or refresh_token.")
-            st.markdown("</div></div></div>", unsafe_allow_html=True)
-            return
-        payload = {
-            "client_id": client["client_id"],
-            "client_secret": client["client_secret"],
-            "refresh_token": refresh_token,
-            "sender_email": sender_email_input.strip(),
-        }
-        response = api_request("POST", "/settings/providers/gmail", json=payload)
+    connect_label = "Reconnect Gmail" if connected else "Connect Gmail"
+    if st.button(connect_label, use_container_width=True):
+        response = api_request("GET", "/settings/providers/gmail/oauth/start")
         body = parse_api_json(response)
         if response.is_success:
-            st.success("Gmail connection saved.")
+            st.session_state["gmail_oauth_url"] = str(body.get("authorization_url", "") or "")
+            st.success("Google authorization link is ready.")
+        else:
+            st.error(str(body.get("detail", "Could not start Gmail connection.")))
+
+    gmail_oauth_url = str(st.session_state.get("gmail_oauth_url", "") or "")
+    if gmail_oauth_url:
+        if hasattr(st, "link_button"):
+            st.link_button("Continue to Google", gmail_oauth_url, use_container_width=True)
+        else:
+            safe_url = html.escape(gmail_oauth_url, quote=True)
+            st.markdown(f'<a href="{safe_url}" target="_blank" rel="noopener">Continue to Google</a>', unsafe_allow_html=True)
+
+    if connected and st.button("Disconnect Gmail", use_container_width=True):
+        response = api_request("POST", "/settings/providers/gmail/disconnect", json={})
+        body = parse_api_json(response)
+        if response.is_success:
+            st.session_state.pop("gmail_oauth_url", None)
+            st.success("Gmail disconnected.")
             st.rerun()
         else:
-            st.error(str(body.get("detail", "Could not save Gmail connection.")))
+            st.error(str(body.get("detail", "Could not disconnect Gmail.")))
     st.markdown("</div></div></div>", unsafe_allow_html=True)
 
 

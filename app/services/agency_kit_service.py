@@ -11,6 +11,7 @@ from app.core.models import Lead, Tenant, TenantContext
 from app.db.session import AsyncDatabaseSession, DatabaseSession
 from app.services.ai_provider_service import AIProviderNotConfigured, AIProviderService
 from app.services._async import maybe_await
+from app.services.skill_prompt_service import SkillPromptService
 
 
 AGENCY_KIT_LIMITS = {
@@ -35,7 +36,12 @@ class AgencyKitService:
             raise ValueError("Lead not found.")
         await self._consume_usage(tenant)
         kit = self.build_fallback_kit(lead)
-        kit = await self._enhance_with_ai(tenant, kit, "AI Agency Kit")
+        kit = await self._enhance_with_ai(
+            tenant,
+            kit,
+            "agency_kit",
+            {"source": "lead", "lead": self._lead_context(lead)},
+        )
         metadata = dict(lead.metadata or {})
         metadata["agency_kit"] = kit
         lead.metadata = metadata
@@ -95,19 +101,32 @@ class AgencyKitService:
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    async def _enhance_with_ai(self, tenant: TenantContext, payload: Dict[str, Any], feature_name: str) -> Dict[str, Any]:
+    async def _enhance_with_ai(
+        self,
+        tenant: TenantContext,
+        payload: Dict[str, Any],
+        skill_name: str,
+        original_input: Dict[str, Any],
+    ) -> Dict[str, Any]:
         service = AIProviderService(self.db)
         try:
+            system_prompt = SkillPromptService().load_skill(skill_name)
+            user_prompt = json.dumps(
+                {
+                    "original_input": original_input,
+                    "rule_based_output": payload,
+                    "instruction": (
+                        "Improve the rule-based output, but preserve the existing JSON schema, required keys, "
+                        "types, tenant context, and safety constraints. Return valid JSON only."
+                    ),
+                },
+                ensure_ascii=True,
+                default=str,
+            )
             enhanced = await service.generate_text(
                 tenant,
-                system_prompt=(
-                    "You refine agency sales JSON for freelancers. Keep the same object shape, keep claims practical, "
-                    "avoid hype, and return only valid JSON."
-                ),
-                user_prompt=(
-                    f"Improve this {feature_name} while preserving all important fields and usefulness:\n"
-                    f"{json.dumps(payload, ensure_ascii=True)}"
-                ),
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
                 json_mode=True,
                 temperature=0.2,
                 max_tokens=1400,
@@ -120,17 +139,50 @@ class AgencyKitService:
             fallback["mode"] = "fallback"
             fallback["ai_error"] = "AI provider failed; fallback used"
             return fallback
-        if isinstance(enhanced, dict):
-            merged = dict(payload)
-            merged.update(enhanced)
+        if isinstance(enhanced, dict) and self._has_agency_kit_shape(enhanced):
+            merged = self._merge_ai_output(payload, enhanced)
             merged["mode"] = "ai_enhanced"
             merged["provider"] = status.get("provider", "")
+            merged["model"] = status.get("model", "")
             return merged
         merged = dict(payload)
         merged["mode"] = "ai_enhanced"
         merged["provider"] = status.get("provider", "")
+        merged["model"] = status.get("model", "")
         merged["ai_notes"] = str(enhanced)
         return merged
+
+    def _has_agency_kit_shape(self, enhanced: Dict[str, Any]) -> bool:
+        expected_keys = {
+            "business_snapshot",
+            "likely_pain_points",
+            "recommended_service",
+            "offer_angle",
+            "outreach_email",
+            "followup_sequence",
+            "proposal_outline",
+            "landing_page_copy",
+        }
+        return any(key in enhanced for key in expected_keys)
+
+    def _merge_ai_output(self, payload: Dict[str, Any], enhanced: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(payload)
+        for key in payload:
+            if key in enhanced:
+                merged[key] = enhanced[key]
+        return merged
+
+    def _lead_context(self, lead: Lead) -> Dict[str, Any]:
+        return {
+            "company_url": str(lead.company_url or lead.website or "").strip(),
+            "company": self._company_label(lead),
+            "industry": str(lead.industry or "").strip(),
+            "country": str(lead.country or lead.location or "").strip(),
+            "score": int(lead.score or lead.lead_score or 0),
+            "service_reason": str(lead.service_reason or lead.reason or "").strip(),
+            "has_verified_email": bool(str(lead.verified_email or lead.email or "").strip()),
+            "has_phone": bool(self._phone_from_lead(lead)),
+        }
 
     async def _consume_usage(self, tenant: TenantContext) -> None:
         tenant_record = await self._get_tenant(tenant.tenant_id)

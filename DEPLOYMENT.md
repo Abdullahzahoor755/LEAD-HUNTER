@@ -42,6 +42,9 @@ DATABASE_URL=${{Postgres.DATABASE_URL}}
 JWT_SECRET=<strong-random-secret>
 SECRET_ENCRYPTION_KEY=<strong-random-encryption-key>
 SERPER_API_KEY=<serper-api-key>
+GOOGLE_OAUTH_CLIENT_ID=<google-oauth-client-id>
+GOOGLE_OAUTH_CLIENT_SECRET=<google-oauth-client-secret>
+GOOGLE_OAUTH_REDIRECT_URI=https://<backend-service-domain>/settings/providers/gmail/oauth/callback
 ```
 
 Optional variables:
@@ -52,6 +55,7 @@ ANTHROPIC_MODEL=claude-sonnet-4-6
 JWT_EXPIRATION_SECONDS=86400
 DATABASE_ECHO=false
 JOB_QUEUE=default
+FRONTEND_BASE_URL=https://<frontend-service-domain>
 ```
 
 Lead generation can run in fallback mode when `ANTHROPIC_API_KEY` is missing or unavailable.
@@ -77,9 +81,29 @@ Required variables:
 ```env
 APP_ENV=production
 APP_API_BASE_URL=https://<backend-service-domain>
+FRONTEND_BASE_URL=https://<frontend-service-domain>
 ```
 
-## 4. Postgres
+## 4. Gmail OAuth Setup
+
+1. In Google Cloud, enable the Gmail API.
+2. Create an OAuth Client ID with application type `Web application`.
+3. Add the authorized redirect URI:
+
+```text
+https://<backend-service-domain>/settings/providers/gmail/oauth/callback
+```
+
+4. Add the Gmail scopes used by the app:
+
+```text
+https://www.googleapis.com/auth/gmail.send
+https://www.googleapis.com/auth/gmail.readonly
+```
+
+5. Add `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI`, and `FRONTEND_BASE_URL` to the backend Railway service variables.
+
+## 5. Postgres
 
 Railway provides the Postgres `DATABASE_URL`. Attach the Postgres database to the backend service and map it into `DATABASE_URL`.
 
@@ -89,7 +113,7 @@ The backend initializes the SQL schema on startup. Verify readiness after deploy
 curl https://<backend-service-domain>/readyz
 ```
 
-## 5. Smoke Checklist
+## 6. Smoke Checklist
 
 Backend:
 
@@ -102,10 +126,11 @@ Frontend:
 - Signup works and creates a Free account.
 - Generate Leads starts and completes or shows a clear queued/running status.
 - CSV export downloads leads.
+- Pro/Agency user can connect Gmail from Settings with Google OAuth.
 - Admin menu is hidden for normal users.
 - Admin endpoints return `403` for normal users.
 
-## 6. Production Checklist
+## 7. Production Checklist
 
 - `APP_ENV=production` is set on backend and frontend.
 - `JWT_SECRET` is strong and not the default value.
@@ -113,6 +138,7 @@ Frontend:
 - `DATABASE_URL` does not use a default local password.
 - `.env`, `token.json`, `credentials.json`, and exported CSV files are not committed.
 - Backend public URL is copied into frontend `APP_API_BASE_URL`.
+- Google OAuth redirect URI exactly matches `GOOGLE_OAUTH_REDIRECT_URI`.
 - Main admin role has been verified with:
 
 ```bash
@@ -122,6 +148,6 @@ python scripts/fix_admin_roles.py --dry-run --admin-identifier mian755
 - Free user cannot access outreach, Gmail settings, reply checking, followups, or admin.
 - Pro/Agency users can access paid automation features after plan activation.
 
-## 7. Notes For Beta
+## 8. Notes For Beta
 
 For the beta deployment, lead generation is triggered by the dashboard request path. A separate long-running worker service can be added later if request duration becomes a Railway timeout issue.

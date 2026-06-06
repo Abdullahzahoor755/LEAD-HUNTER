@@ -13,6 +13,7 @@ from app.core.tenant import TenantIsolationError, assert_same_tenant
 from app.db.session import AsyncDatabaseSession, DatabaseSession
 from app.services.ai_provider_service import AIProviderNotConfigured, AIProviderService
 from app.services._async import maybe_await
+from app.services.skill_prompt_service import SkillPromptService
 
 
 class AgencyGrowthService:
@@ -28,20 +29,30 @@ class AgencyGrowthService:
     async def generate_offer_match(self, lead: Lead, tenant: TenantContext) -> Dict[str, Any]:
         self._assert_lead_tenant(lead, tenant)
         offer_match = self.build_offer_match(lead)
-        offer_match = await self._enhance_with_ai(tenant, offer_match, "Lead-to-Offer Matchmaker")
+        offer_match = await self._enhance_with_ai(
+            tenant,
+            offer_match,
+            "offer_matchmaker",
+            {"source": "lead", "lead": self._lead_context(lead)},
+        )
         await self._save_metadata(tenant, lead, "offer_match", offer_match)
         return offer_match
 
     async def generate_whatsapp_sales_kit(self, lead: Lead, tenant: TenantContext) -> Dict[str, Any]:
         self._assert_lead_tenant(lead, tenant)
         sales_kit = self.build_whatsapp_sales_kit(lead)
-        sales_kit = await self._enhance_with_ai(tenant, sales_kit, "WhatsApp Sales Script Generator")
+        sales_kit = await self._enhance_with_ai(
+            tenant,
+            sales_kit,
+            "whatsapp_sales",
+            {"source": "lead", "lead": self._lead_context(lead)},
+        )
         await self._save_metadata(tenant, lead, "whatsapp_sales_kit", sales_kit)
         return sales_kit
 
     async def generate_mini_agency_plan(self, payload: Dict[str, Any], tenant: TenantContext) -> Dict[str, Any]:
         plan = self.build_mini_agency_plan(payload)
-        return await self._enhance_with_ai(tenant, plan, "Build My Mini Agency Mode")
+        return await self._enhance_with_ai(tenant, plan, "mini_agency", {"source": "user_input", "input": payload})
 
     def build_mini_agency_plan(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         skill = str(payload.get("skill") or "other").strip().lower()
@@ -68,19 +79,32 @@ class AgencyGrowthService:
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    async def _enhance_with_ai(self, tenant: TenantContext, payload: Dict[str, Any], feature_name: str) -> Dict[str, Any]:
+    async def _enhance_with_ai(
+        self,
+        tenant: TenantContext,
+        payload: Dict[str, Any],
+        skill_name: str,
+        original_input: Dict[str, Any],
+    ) -> Dict[str, Any]:
         service = AIProviderService(self.db)
         try:
+            system_prompt = SkillPromptService().load_skill(skill_name)
+            user_prompt = json.dumps(
+                {
+                    "original_input": original_input,
+                    "rule_based_output": payload,
+                    "instruction": (
+                        "Improve the rule-based output, but preserve the existing JSON schema, required keys, "
+                        "types, tenant context, and safety constraints. Return valid JSON only."
+                    ),
+                },
+                ensure_ascii=True,
+                default=str,
+            )
             enhanced = await service.generate_text(
                 tenant,
-                system_prompt=(
-                    "You refine agency operating system JSON for freelancers. Keep the same object shape, "
-                    "make it concise and practical, avoid spammy language, and return only valid JSON."
-                ),
-                user_prompt=(
-                    f"Improve this {feature_name} output while preserving required fields:\n"
-                    f"{json.dumps(payload, ensure_ascii=True)}"
-                ),
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
                 json_mode=True,
                 temperature=0.25,
                 max_tokens=1800,
@@ -93,17 +117,40 @@ class AgencyGrowthService:
             fallback["mode"] = "fallback"
             fallback["ai_error"] = "AI provider failed; fallback used"
             return fallback
-        if isinstance(enhanced, dict):
-            merged = dict(payload)
-            merged.update(enhanced)
+        if isinstance(enhanced, dict) and self._has_expected_shape(payload, enhanced):
+            merged = self._merge_ai_output(payload, enhanced)
             merged["mode"] = "ai_enhanced"
             merged["provider"] = status.get("provider", "")
+            merged["model"] = status.get("model", "")
             return merged
         merged = dict(payload)
         merged["mode"] = "ai_enhanced"
         merged["provider"] = status.get("provider", "")
+        merged["model"] = status.get("model", "")
         merged["ai_notes"] = str(enhanced)
         return merged
+
+    def _has_expected_shape(self, payload: Dict[str, Any], enhanced: Dict[str, Any]) -> bool:
+        return any(key in enhanced for key in payload if key not in {"mode", "provider", "model", "ai_error"})
+
+    def _merge_ai_output(self, payload: Dict[str, Any], enhanced: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(payload)
+        for key in payload:
+            if key in enhanced:
+                merged[key] = enhanced[key]
+        return merged
+
+    def _lead_context(self, lead: Lead) -> Dict[str, Any]:
+        return {
+            "company_url": str(lead.company_url or lead.website or "").strip(),
+            "company": self._company_label(lead),
+            "industry": str(lead.industry or "").strip(),
+            "country": str(lead.country or lead.location or "").strip(),
+            "score": int(lead.score or lead.lead_score or 0),
+            "service_reason": str(lead.service_reason or lead.reason or "").strip(),
+            "has_verified_email": bool(str(lead.verified_email or lead.email or "").strip()),
+            "has_phone": bool(self._phone_from_lead(lead)),
+        }
 
     def build_offer_match(self, lead: Lead) -> Dict[str, Any]:
         profile = self._offer_profile(lead)

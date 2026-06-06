@@ -10,6 +10,7 @@ from app.core.models import Lead, Tenant, TenantContext
 from app.db.session import build_memory_session
 from app.services.agency_kit_service import AgencyKitService
 from app.services.marketing_campaign_service import MarketingCampaignService
+from app.services.skill_prompt_service import SkillPromptService
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -41,6 +42,16 @@ def _tenant(db, tenant_id: str = "tenant-ai-service", plan: str = "Agency") -> T
 def _lead(db, tenant: TenantContext, **kwargs) -> Lead:
     lead = Lead(tenant_id=tenant.tenant_id, **kwargs)
     return db.for_tenant(tenant).save("leads", lead)
+
+
+def test_skill_prompt_service_loads_known_skills_and_rejects_paths() -> None:
+    service = SkillPromptService()
+
+    prompt = service.load_skill("campaign_generator")
+
+    assert "Campaign Generator" in prompt
+    with pytest.raises(ValueError, match="Unsupported AI skill"):
+        service.load_skill("../secrets")
 
 
 @pytest.mark.anyio
