@@ -111,22 +111,24 @@ def render_landing_styles() -> None:
         <style>
         :root {
             --page-max-width: 1160px;
-            --surface: rgba(15, 23, 42, .82);
-            --surface-strong: rgba(2, 6, 23, .9);
-            --surface-soft: rgba(15, 23, 42, .62);
-            --line: rgba(148, 163, 184, .16);
-            --line-strong: rgba(125, 211, 252, .2);
-            --text: #e2e8f0;
-            --text-strong: #f8fafc;
-            --muted: #94a3b8;
+            --surface: #ffffff;
+            --surface-strong: #ffffff;
+            --surface-soft: #f8fafc;
+            --line: #d6eef7;
+            --line-strong: #bdebf7;
+            --text: #16324f;
+            --text-strong: #0b2545;
+            --muted: #64748b;
             --accent: #22d3ee;
-            --accent-2: #8b5cf6;
+            --accent-2: #ef4b5f;
+            --card-gradient: linear-gradient(145deg, #eefaff 0%, #ffffff 72%);
+            --soft-shadow: 0 18px 45px rgba(34, 211, 238, .13), 0 8px 22px rgba(11, 37, 69, .05);
         }
         .stApp {
             color: var(--text);
             background:
-                linear-gradient(180deg, rgba(14, 165, 233, .08), transparent 260px),
-                linear-gradient(135deg, #060814 0%, #0b1020 54%, #080b13 100%);
+                linear-gradient(180deg, rgba(238, 250, 255, .85), rgba(255, 255, 255, 0) 260px),
+                #ffffff;
         }
         .block-container {
             max-width: var(--page-max-width);
@@ -144,8 +146,8 @@ def render_landing_styles() -> None:
             display: block !important;
             visibility: visible !important;
             transform: none !important;
-            background: #070b15;
-            border-right: 1px solid rgba(148, 163, 184, .12);
+            background: #f8fafc;
+            border-right: 1px solid #e6f4f8;
             min-width: 18rem;
         }
         [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
@@ -682,6 +684,290 @@ def render_landing_styles() -> None:
             border-radius: 8px;
             border: 1px solid rgba(148, 163, 184, .16);
             background: rgba(15, 23, 42, .46);
+        }
+        /* Global light SaaS theme overrides */
+        .stApp,
+        .main,
+        section.main,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stVerticalBlock"] {
+            color: var(--text);
+        }
+        h1, h2, h3, h4, h5, h6,
+        p, label, span, li,
+        [data-testid="stMarkdownContainer"] {
+            color: var(--text);
+        }
+        [data-testid="stHeader"] {
+            background: rgba(255, 255, 255, .86);
+            backdrop-filter: blur(14px);
+            border-bottom: 1px solid rgba(214, 238, 247, .72);
+        }
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%) !important;
+            border-right: 1px solid #dceff6 !important;
+            box-shadow: 14px 0 34px rgba(11, 37, 69, .035);
+        }
+        [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+            background: transparent;
+        }
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] p,
+        [data-testid="stSidebar"] span,
+        [data-testid="stSidebar"] div,
+        [data-testid="stSidebar"] .stMarkdown {
+            color: var(--text) !important;
+        }
+        [data-testid="stSidebar"] h1,
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3 {
+            color: var(--text-strong) !important;
+        }
+        [data-testid="stSidebar"] .stRadio [role="radio"] {
+            border-radius: 16px;
+            border: 1px solid transparent;
+            background: transparent;
+            color: var(--text);
+        }
+        [data-testid="stSidebar"] .stRadio [role="radio"][aria-checked="true"] {
+            background: linear-gradient(135deg, #eefaff 0%, #ffffff 100%);
+            border-color: var(--line);
+            box-shadow: 0 10px 24px rgba(34, 211, 238, .12);
+        }
+        [data-testid="stSidebar"] .stRadio [role="radio"][aria-checked="true"] p,
+        [data-testid="stSidebar"] .stRadio [role="radio"][aria-checked="true"] span {
+            color: #0f7490 !important;
+            font-weight: 750;
+        }
+        .sidebar-brand {
+            border-bottom: 1px solid #dceff6;
+        }
+        .sidebar-brand-title {
+            color: var(--text-strong);
+        }
+        .sidebar-brand-subtitle {
+            color: var(--muted);
+        }
+        .page-card,
+        .metric-card,
+        .soft-card,
+        .panel-card,
+        .marketing-card,
+        .day-card,
+        .top-hero,
+        .landing-shell,
+        .feature-card,
+        .auth-card,
+        .plan-card,
+        .empty-state,
+        div[data-testid="stMetric"] {
+            border: 1px solid var(--line) !important;
+            border-radius: 20px !important;
+            background: var(--card-gradient) !important;
+            box-shadow: var(--soft-shadow) !important;
+            color: var(--text) !important;
+        }
+        .page-card-inner {
+            color: var(--text);
+        }
+        .top-hero {
+            box-shadow: 0 20px 48px rgba(34, 211, 238, .12), 0 8px 22px rgba(11, 37, 69, .05) !important;
+        }
+        .landing-shell:before {
+            background: linear-gradient(110deg, rgba(34, 211, 238, .16), transparent 48%, rgba(239, 75, 95, .10));
+            filter: blur(30px);
+        }
+        .hero-panel,
+        .hero-stack {
+            background: transparent !important;
+            box-shadow: none !important;
+        }
+        .page-title,
+        .hero-title,
+        .admin-title,
+        .main-title,
+        .section-title,
+        .metric-value,
+        .hero-metric .value,
+        .panel-card h3,
+        .panel-card h4,
+        .soft-card h4,
+        .marketing-card h4,
+        .empty-state h4,
+        .feature-card h3,
+        .auth-card h2,
+        .plan-price,
+        .price-chip strong {
+            color: var(--text-strong) !important;
+            letter-spacing: 0 !important;
+        }
+        .page-subtitle,
+        .hero-note,
+        .main-subtitle,
+        .section-caption,
+        .settings-note,
+        .metric-label,
+        .metric-help,
+        .hero-metric .label,
+        .hero-metric .hint,
+        .summary-stack,
+        .soft-card p,
+        .marketing-card p,
+        .feature-card p,
+        .auth-card p,
+        .empty-state p,
+        .day-card p {
+            color: var(--muted) !important;
+        }
+        .hero-headline {
+            background: linear-gradient(92deg, #0b2545 0%, #0891b2 52%, #ef4b5f 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .landing-title,
+        .hero-kicker {
+            color: #0f7490 !important;
+        }
+        .hero-kicker,
+        .plan-badge,
+        .status-badge {
+            border-color: var(--line-strong) !important;
+            background: linear-gradient(135deg, #eefaff 0%, #ffffff 100%) !important;
+            color: #0f7490 !important;
+            box-shadow: 0 8px 20px rgba(34, 211, 238, .10);
+        }
+        .status-badge.success {
+            border-color: rgba(34, 211, 238, .35) !important;
+            color: #0f7490 !important;
+            background: #ecfeff !important;
+        }
+        .status-badge.warning,
+        .premium-badge {
+            border-color: rgba(239, 75, 95, .24) !important;
+            color: #b4233b !important;
+            background: #fff1f3 !important;
+        }
+        .script-block {
+            border: 1px solid var(--line);
+            border-radius: 18px;
+            background: linear-gradient(145deg, #f8fdff 0%, #ffffff 100%);
+            color: var(--text);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, .85);
+        }
+        .cta-pill,
+        .price-chip {
+            border-color: var(--line);
+            color: var(--text);
+            background: #ffffff;
+            box-shadow: 0 10px 22px rgba(11, 37, 69, .04);
+        }
+        .cta-pill.primary,
+        .dashboard-actions .stButton > button,
+        .auth-card .stButton > button,
+        .auth-card [data-testid="stFormSubmitButton"] button {
+            color: #06313e !important;
+            background: linear-gradient(90deg, #22d3ee, #a7f3ff) !important;
+            border: 1px solid rgba(34, 211, 238, .38) !important;
+            box-shadow: 0 14px 32px rgba(34, 211, 238, .20) !important;
+        }
+        .stButton > button,
+        [data-testid="stFormSubmitButton"] button,
+        .stDownloadButton button,
+        .stLinkButton a {
+            border-radius: 16px !important;
+            border: 1px solid #b9dce7 !important;
+            background: #ffffff !important;
+            color: var(--text-strong) !important;
+            box-shadow: 0 8px 18px rgba(11, 37, 69, .045) !important;
+        }
+        .stButton > button:hover,
+        [data-testid="stFormSubmitButton"] button:hover,
+        .stDownloadButton button:hover,
+        .stLinkButton a:hover {
+            border-color: #22d3ee !important;
+            color: #0f7490 !important;
+            box-shadow: 0 12px 28px rgba(34, 211, 238, .16) !important;
+        }
+        .stButton > button:disabled,
+        [data-testid="stFormSubmitButton"] button:disabled,
+        .stDownloadButton button:disabled {
+            opacity: .72;
+            border-color: #dbeaf0 !important;
+            background: #f8fafc !important;
+            color: #94a3b8 !important;
+            box-shadow: none !important;
+        }
+        .dashboard-actions .premium-action {
+            border-color: rgba(239, 75, 95, .22);
+            background: #fff1f3;
+            color: #b4233b;
+        }
+        input,
+        textarea,
+        [data-baseweb="input"],
+        [data-baseweb="textarea"],
+        [data-baseweb="select"] > div,
+        [data-testid="stTextInput"] input,
+        [data-testid="stTextArea"] textarea,
+        [data-testid="stNumberInput"] input,
+        .dashboard-input input,
+        .auth-card input {
+            color: var(--text-strong) !important;
+            background: #ffffff !important;
+            border-color: #cfe8f1 !important;
+            border-radius: 16px !important;
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, .9), 0 8px 20px rgba(11, 37, 69, .035) !important;
+        }
+        input::placeholder,
+        textarea::placeholder {
+            color: #8aa1b5 !important;
+        }
+        [data-baseweb="select"] svg,
+        [data-testid="stSelectbox"] svg,
+        [data-testid="stMultiSelect"] svg {
+            color: var(--text-strong) !important;
+        }
+        .stSlider [data-baseweb="slider"] div {
+            color: #ef4b5f !important;
+        }
+        .stSlider [role="slider"] {
+            background: #ef4b5f !important;
+            border-color: #ef4b5f !important;
+            box-shadow: 0 0 0 4px rgba(239, 75, 95, .12) !important;
+        }
+        [data-testid="stDataFrame"] {
+            border: 1px solid var(--line);
+            border-radius: 20px;
+            overflow: hidden;
+            background: #ffffff;
+            box-shadow: 0 14px 34px rgba(11, 37, 69, .055);
+        }
+        .stTabs [data-baseweb="tab-list"] {
+            gap: .4rem;
+            border-bottom-color: #e6f4f8;
+        }
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 16px;
+            border: 1px solid var(--line);
+            background: #ffffff;
+            color: var(--text);
+        }
+        .stTabs [aria-selected="true"] {
+            background: linear-gradient(135deg, #eefaff 0%, #ffffff 100%) !important;
+            color: #0f7490 !important;
+            border-color: var(--line-strong) !important;
+        }
+        .stAlert {
+            border-radius: 18px !important;
+            border-color: var(--line) !important;
+            box-shadow: 0 10px 24px rgba(11, 37, 69, .04);
+        }
+        .locked-action,
+        .day-card li,
+        .panel-card p,
+        .panel-card li,
+        .panel-card caption {
+            color: var(--text) !important;
         }
         @media (max-width: 980px) {
             .block-container {padding-left: 1rem; padding-right: 1rem; padding-top: 1.4rem;}
