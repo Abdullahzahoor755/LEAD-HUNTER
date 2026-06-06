@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import re
 from typing import Sequence
 
 from app.core.auth import hash_password
@@ -14,7 +15,6 @@ from app.services._async import maybe_await
 
 DEFAULT_ADMIN_TENANT_ID = "mian755"
 DEFAULT_ADMIN_TENANT_NAME = "Lead Hunter AI Admin"
-DEFAULT_ADMIN_TENANT_SLUG = "admin"
 DEFAULT_ADMIN_FULL_NAME = "Admin User"
 
 
@@ -24,7 +24,6 @@ class AdminBootstrapConfig:
     password: str
     tenant_id: str = DEFAULT_ADMIN_TENANT_ID
     tenant_name: str = DEFAULT_ADMIN_TENANT_NAME
-    tenant_slug: str = DEFAULT_ADMIN_TENANT_SLUG
     full_name: str = DEFAULT_ADMIN_FULL_NAME
 
 
@@ -32,6 +31,7 @@ class AdminBootstrapConfig:
 class AdminBootstrapResult:
     email: str
     tenant_id: str
+    slug: str
     role: str
     is_active: bool
 
@@ -47,14 +47,12 @@ def admin_bootstrap_config_from_env() -> AdminBootstrapConfig:
         raise ValueError("ADMIN_EMAIL and ADMIN_PASSWORD are required to bootstrap admin.")
     tenant_id = os.getenv("ADMIN_TENANT_ID", DEFAULT_ADMIN_TENANT_ID).strip() or DEFAULT_ADMIN_TENANT_ID
     tenant_name = os.getenv("ADMIN_TENANT_NAME", DEFAULT_ADMIN_TENANT_NAME).strip() or DEFAULT_ADMIN_TENANT_NAME
-    tenant_slug = os.getenv("ADMIN_TENANT_SLUG", DEFAULT_ADMIN_TENANT_SLUG).strip() or DEFAULT_ADMIN_TENANT_SLUG
     full_name = os.getenv("ADMIN_FULL_NAME", DEFAULT_ADMIN_FULL_NAME).strip() or DEFAULT_ADMIN_FULL_NAME
     return AdminBootstrapConfig(
         email=email,
         password=password,
         tenant_id=tenant_id,
         tenant_name=tenant_name,
-        tenant_slug=tenant_slug,
         full_name=full_name,
     )
 
@@ -90,6 +88,7 @@ async def ensure_admin(
     return AdminBootstrapResult(
         email=user.email,
         tenant_id=user.tenant_id,
+        slug=tenant.slug,
         role=user.role,
         is_active=user.status.lower() == "active",
     )
@@ -101,8 +100,10 @@ async def _ensure_admin_tenant(
 ) -> Tenant:
     records = await maybe_await(db.tenants.list(config.tenant_id))
     tenant = records[0] if records else Tenant(tenant_id=config.tenant_id)
+    if not records:
+        tenant.slug = await _unique_tenant_slug(db, config.tenant_id)
     tenant.name = config.tenant_name
-    tenant.slug = config.tenant_slug
+    tenant.slug = tenant.slug or await _unique_tenant_slug(db, config.tenant_id)
     tenant.status = "active"
     tenant.is_active = True
     tenant.subscription_plan = "Agency"
@@ -126,3 +127,21 @@ async def _admin_user_for_email(
             return user, user.tenant_id
     user = matches[0]
     return user, user.tenant_id
+
+
+def slugify(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower())
+    normalized = normalized.strip("-")
+    return normalized or DEFAULT_ADMIN_TENANT_ID
+
+
+async def _unique_tenant_slug(db: DatabaseSession | AsyncDatabaseSession, tenant_id: str) -> str:
+    base_slug = slugify(tenant_id)
+    tenants: Sequence[Tenant] = await maybe_await(db.tenants.list_all())
+    used_slugs = {str(tenant.slug or "").strip().lower() for tenant in tenants if tenant.tenant_id != tenant_id}
+    if base_slug not in used_slugs:
+        return base_slug
+    suffix = 1
+    while f"{base_slug}-{suffix}" in used_slugs:
+        suffix += 1
+    return f"{base_slug}-{suffix}"

@@ -10,11 +10,11 @@ async def main():
     async with get_async_db_session() as db:
         result = await ensure_admin_from_env(db)
         print(
-            "Admin ensured: "
-            f"email={result.email}, "
-            f"tenant_id={result.tenant_id}, "
-            f"role={result.role}, "
-            f"is_active={result.is_active}"
+            "Admin ensured:\n"
+            f"  tenant_id={result.tenant_id}\n"
+            f"  slug={result.slug}\n"
+            f"  email={result.email}\n"
+            f"  role={result.role}"
         )
 
 
