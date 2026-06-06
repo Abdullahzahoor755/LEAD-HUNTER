@@ -36,7 +36,7 @@ class OutreachAgent(BaseAgent):
         email_service = OutreachEmailService(db)
         sent = 0
         failed = 0
-        pending_leads = await service.list_outreach_attempt_leads(request.tenant, blocked_domains)
+        pending_leads = await service.list_pending_outreach_leads(request.tenant, blocked_domains)
         try:
             await require_pro_plan(db, request.tenant)
         except PlanGateError:
@@ -91,21 +91,12 @@ class OutreachAgent(BaseAgent):
             body = ""
             recipient = service.outreach_recipient(lead)
             if not recipient:
-                failed += 1
-                await self._mark_failed(
-                    service=service,
-                    tenant=request.tenant,
-                    lead=lead,
-                    subject=subject,
-                    body=body,
-                    reason="no_verified_email",
-                )
-                production_error_log(
+                audit_log(
                     LOGGER,
-                    "Outreach failed tenant_id=%s lead_id=%s error_type=%s status=failed",
+                    logging.INFO,
+                    "OUTREACH_AUDIT outreach.skipped tenant_id=%s lead_id=%s reason=no_verified_email",
                     request.tenant.tenant_id,
                     lead.id,
-                    "no_verified_email",
                 )
                 continue
             try:

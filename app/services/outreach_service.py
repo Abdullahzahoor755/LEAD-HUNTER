@@ -39,13 +39,14 @@ class OutreachService:
         provider = build_provider_registry()["gmail"]
         sendable_statuses = {"pending", "draft", "no_content_scraped", "blocked_site", "slow_site", "js_site"}
         for lead in await maybe_await(scoped_db.list("leads")):
-            if lead.status.lower() not in sendable_statuses or not lead.email:
+            recipient = self.outreach_recipient(lead)
+            if lead.status.lower() not in sendable_statuses or not recipient:
                 continue
             try:
                 generated = await email_service.generate_outreach_email(tenant, lead)
                 subject = str(generated.get("subject", "") or "").strip()
                 body = email_service.ensure_unsubscribe_footer(str(generated.get("body", "") or "").strip())
-                result = await provider.send(account, ProviderSendRequest(to=lead.email, subject=subject, body=body))
+                result = await provider.send(account, ProviderSendRequest(to=recipient, subject=subject, body=body))
                 gmail_message_id = str(result.message_id or "")
                 gmail_thread_id = str(result.thread_id or "")
                 sent_at = datetime.now(timezone.utc)
@@ -97,22 +98,14 @@ class OutreachService:
         return [
             lead
             for lead in leads
-            if lead.email
-            and lead.status.lower() in sendable_statuses
+            if lead.status.lower() in sendable_statuses
             and lead.status.lower() != "unsubscribed"
-            and self._email_domain(lead.email) not in blocked_domains
+            and self.outreach_recipient(lead)
+            and self._email_domain(self.outreach_recipient(lead)) not in blocked_domains
         ]
 
     async def list_outreach_attempt_leads(self, tenant: TenantContext, blocked_domains: set[str]) -> List[Lead]:
-        sendable_statuses = {"pending", "draft", "no_content_scraped", "blocked_site", "slow_site", "js_site"}
-        leads = await self.lead_service.list_leads(tenant)
-        return [
-            lead
-            for lead in leads
-            if lead.status.lower() in sendable_statuses
-            and lead.status.lower() != "unsubscribed"
-            and (not self.outreach_recipient(lead) or self._email_domain(self.outreach_recipient(lead)) not in blocked_domains)
-        ]
+        return await self.list_pending_outreach_leads(tenant, blocked_domains)
 
     async def mark_outreach_result(
         self,
@@ -390,7 +383,7 @@ class OutreachService:
         return str(email or "").strip().lower().split("@")[-1]
 
     def outreach_recipient(self, lead: Lead) -> str:
-        email = str(lead.email or lead.verified_email or "").strip().lower()
+        email = str(lead.verified_email or "").strip().lower()
         if not email or "@" not in email:
             return ""
         local, _, domain = email.partition("@")

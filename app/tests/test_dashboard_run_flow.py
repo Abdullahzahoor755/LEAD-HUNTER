@@ -187,3 +187,12 @@ def test_outreach_error_helper_maps_unknown_failure() -> None:
         dashboard.format_outreach_error("unknown_outreach_failure")
         == "This failed before detailed diagnostics were enabled. Re-run outreach to get the exact reason."
     )
+
+
+def test_contact_readiness_helper_distinguishes_email_phone_and_no_contact() -> None:
+    import dashboard
+
+    assert dashboard.contact_readiness_label("lead@example.test", "") == "Email-ready"
+    assert dashboard.contact_readiness_label("", "+923000000000") == "Phone-only"
+    assert dashboard.contact_readiness_label("", "") == "No contact"
+    assert dashboard.contact_next_action("", "+923000000000") == "Generate WhatsApp Sales Kit"

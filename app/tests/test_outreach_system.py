@@ -204,17 +204,18 @@ async def test_missing_gmail_credentials_persists_failure_reason(monkeypatch: py
 
 
 @pytest.mark.anyio
-async def test_invalid_or_missing_email_persists_no_verified_email_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_phone_only_lead_is_not_marked_failed_by_email_outreach(monkeypatch: pytest.MonkeyPatch) -> None:
     db = build_memory_session()
-    tenant = TenantContext(tenant_id="tenant-no-email")
+    tenant = TenantContext(tenant_id="tenant-phone-only")
     db.tenants.save(_tenant_record(tenant.tenant_id))
     await _configure_gmail(db, tenant, monkeypatch)
     lead = db.for_tenant(tenant).save(
         "leads",
         Lead(
             tenant_id=tenant.tenant_id,
-            company="No Email Co",
-            company_url="https://no-email.test",
+            company="Phone Only Co",
+            company_url="https://phone-only.test",
+            phone="+923000000000",
             status="pending",
             outreach_status="pending",
         ),
@@ -227,14 +228,12 @@ async def test_invalid_or_missing_email_persists_no_verified_email_reason(monkey
     saved = db.for_tenant(tenant).get("leads", lead.id)
     emails = db.for_tenant(tenant).list("emails")
     assert result["sent_messages"] == 0
-    assert result["failed_messages"] == 1
+    assert result["failed_messages"] == 0
     assert fake_provider.sent == []
-    assert saved.status == "failed"
-    assert saved.outreach_status == "failed"
-    assert saved.metadata["outreach_error"] == "no_verified_email"
-    assert saved.metadata["outreach_error_at"]
-    assert len(emails) == 1
-    assert emails[0].metadata["error"] == "no_verified_email"
+    assert saved.status == "pending"
+    assert saved.outreach_status == "pending"
+    assert "outreach_error" not in saved.metadata
+    assert emails == []
 
 
 @pytest.mark.anyio
@@ -316,6 +315,86 @@ async def test_outreach_preflight_counts_sendable_no_email_and_unknown_failures(
     assert payload["no_email_count"] == 1
     assert payload["failed_without_reason_count"] == 1
     assert payload["sample_errors"][0]["outreach_error"] == "unknown_outreach_failure"
+
+
+@pytest.mark.anyio
+async def test_outreach_preflight_with_zero_verified_email_leads() -> None:
+    db = build_memory_session()
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        signup = await client.post(
+            "/signup",
+            json={
+                "tenant_id": "tenant-preflight-zero-email",
+                "tenant_name": "Tenant Preflight Zero Email",
+                "tenant_slug": "tenant-preflight-zero-email",
+                "email": "owner@preflight-zero.test",
+                "password": "secret123",
+                "full_name": "Owner",
+                "plan": "Pro",
+            },
+        )
+        token = signup.json()["token"]
+        tenant = TenantContext(tenant_id="tenant-preflight-zero-email")
+        db.for_tenant(tenant).save(
+            "leads",
+            Lead(
+                tenant_id=tenant.tenant_id,
+                company="Phone Only",
+                company_url="https://phone-only.test",
+                phone="+923000000000",
+                status="pending",
+                outreach_status="pending",
+            ),
+        )
+        response = await client.get("/outreach/preflight", headers=_auth_headers(token))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["sendable_count"] == 0
+    assert payload["no_email_count"] == 1
+    assert payload["gmail_connected"] is False
+
+
+@pytest.mark.anyio
+async def test_outreach_preflight_with_one_verified_email_lead() -> None:
+    db = build_memory_session()
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        signup = await client.post(
+            "/signup",
+            json={
+                "tenant_id": "tenant-preflight-one-email",
+                "tenant_name": "Tenant Preflight One Email",
+                "tenant_slug": "tenant-preflight-one-email",
+                "email": "owner@preflight-one.test",
+                "password": "secret123",
+                "full_name": "Owner",
+                "plan": "Pro",
+            },
+        )
+        token = signup.json()["token"]
+        tenant = TenantContext(tenant_id="tenant-preflight-one-email")
+        db.for_tenant(tenant).save(
+            "leads",
+            Lead(
+                tenant_id=tenant.tenant_id,
+                company="Email Ready",
+                company_url="https://email-ready.test",
+                verified_email="lead@email-ready.test",
+                email="lead@email-ready.test",
+                status="pending",
+                outreach_status="pending",
+            ),
+        )
+        response = await client.get("/outreach/preflight", headers=_auth_headers(token))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["sendable_count"] == 1
+    assert payload["no_email_count"] == 0
 
 
 @pytest.mark.anyio

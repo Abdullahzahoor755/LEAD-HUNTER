@@ -29,6 +29,7 @@ PRODUCT_NAME = "Lead Hunter AI"
 PRODUCT_TAGLINE = "Find leads, create agency pitches, and launch marketing campaigns."
 LOCKED_FEATURE_MESSAGE = "This feature is available in Pro plan."
 UNKNOWN_OUTREACH_FAILURE_MESSAGE = "This failed before detailed diagnostics were enabled. Re-run outreach to get the exact reason."
+NO_VERIFIED_EMAIL_LEADS_MESSAGE = "No verified email leads found. Email outreach needs verified_email. Use WhatsApp Sales Kit for phone leads, or add a verified email."
 
 st.set_page_config(page_title=PRODUCT_NAME, page_icon="🔎", layout="wide", initial_sidebar_state="expanded")
 
@@ -1364,10 +1365,37 @@ def format_outreach_error(error_code: str) -> str:
     return value
 
 
+def contact_readiness_label(verified_email: str, phone: str) -> str:
+    if str(verified_email or "").strip():
+        return "Email-ready"
+    if str(phone or "").strip():
+        return "Phone-only"
+    return "No contact"
+
+
+def contact_next_action(verified_email: str, phone: str) -> str:
+    if contact_readiness_label(verified_email, phone) == "Phone-only":
+        return "Generate WhatsApp Sales Kit"
+    return ""
+
+
+def is_development_mode() -> bool:
+    environment = str(os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or os.getenv("ENV") or "").strip().lower()
+    debug_enabled = str(os.getenv("DEBUG", "") or "").strip().lower() in {"1", "true", "yes", "on"}
+    return debug_enabled or environment in {"development", "dev", "local", "test"}
+
+
+def can_show_test_lead_tool() -> bool:
+    return is_admin_user() or is_development_mode()
+
+
 STANDARD_LEAD_EXPORT_COLUMNS = [
     "company_url",
     "country",
     "verified_email",
+    "phone",
+    "contact_readiness",
+    "next_contact_action",
     "service_reason",
     "industry",
     "score",
@@ -1393,6 +1421,7 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
                 "company_url": str(item.get("company_url", "") or "").strip(),
                 "country": str(item.get("country", "") or "").strip(),
                 "verified_email": str(item.get("verified_email", "") or "").strip().lower(),
+                "phone": str(item.get("phone", "") or "").strip(),
                 "service_reason": str(item.get("service_reason", "") or "").strip(),
                 "industry": str(item.get("industry", "") or "").strip(),
                 "score": item.get("score", 0),
@@ -1407,6 +1436,8 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
                 "marketing_campaign_kit": item.get("marketing_campaign_kit", {}) if isinstance(item.get("marketing_campaign_kit", {}), dict) else {},
             }
         )
+        rows[-1]["contact_readiness"] = contact_readiness_label(rows[-1]["verified_email"], rows[-1]["phone"])
+        rows[-1]["next_contact_action"] = contact_next_action(rows[-1]["verified_email"], rows[-1]["phone"])
     if not rows:
         return pd.DataFrame(columns=["id", *STANDARD_LEAD_EXPORT_COLUMNS, "agency_kit", "offer_match", "whatsapp_sales_kit", "marketing_campaign_kit"])
     frame = pd.DataFrame(rows)
@@ -1519,6 +1550,65 @@ def load_outreach_preflight() -> Dict[str, Any]:
     return body
 
 
+def render_outreach_preflight_summary(preflight: Dict[str, Any]) -> None:
+    sendable_count = int(preflight.get("sendable_count", 0) or 0)
+    no_email_count = int(preflight.get("no_email_count", 0) or 0)
+    gmail_connected = bool(preflight.get("gmail_connected"))
+    st.caption(
+        "Sendable email leads: "
+        f"{sendable_count} | "
+        f"Leads without verified email: {no_email_count} | "
+        f"Gmail connected: {str(gmail_connected).lower()}"
+    )
+
+
+def render_add_test_lead_form() -> None:
+    if not can_show_test_lead_tool():
+        return
+    with st.expander("Add test lead", expanded=False):
+        st.caption("Admin/development test utility for safe email outreach checks. Use a verified email on the same domain as the company URL.")
+        with st.form("manual_test_lead_form"):
+            cols = st.columns(2)
+            with cols[0]:
+                company_url = st.text_input("Company URL", value="", placeholder="https://example.com")
+                industry = st.text_input("Industry", value="", placeholder="e.g. software")
+            with cols[1]:
+                verified_email = st.text_input("Verified email", value="", placeholder="you@example.com")
+                country = st.text_input("Country", value="", placeholder="e.g. Pakistan")
+            submitted = st.form_submit_button("Add test lead", use_container_width=True)
+        if submitted:
+            clean_url = company_url.strip()
+            clean_email = verified_email.strip().lower()
+            if not clean_url or not clean_email:
+                st.error("Company URL and verified email are required for a test email lead.")
+                return
+            if "@" not in clean_email or "." not in clean_email.rsplit("@", 1)[-1]:
+                st.error("Enter a valid verified email before testing outreach.")
+                return
+            response = api_request(
+                "POST",
+                "/leads",
+                json={
+                    "company_url": clean_url,
+                    "website": clean_url,
+                    "verified_email": clean_email,
+                    "email": clean_email,
+                    "industry": industry.strip(),
+                    "country": country.strip(),
+                    "status": "pending",
+                    "outreach_status": "pending",
+                    "service_reason": "Manual test lead for verified email outreach.",
+                    "metadata": {"source": "manual_test_lead", "created_from": "dashboard_test_lead_tool"},
+                },
+            )
+            payload = parse_api_json(response)
+            if response.is_success:
+                st.success("Test lead added with verified_email and pending outreach status.")
+                st.rerun()
+            else:
+                st.error(str(payload.get("detail", "Could not add test lead.")))
+
+
 def render_actions(tenant: TenantContext) -> None:
     pro_enabled = has_pro_features()
     st.markdown(
@@ -1562,15 +1652,11 @@ def render_actions(tenant: TenantContext) -> None:
     if pro_enabled:
         try:
             outreach_preflight = load_outreach_preflight()
-            gmail_status = "connected" if bool(outreach_preflight.get("gmail_connected")) else "not connected"
-            st.caption(
-                "Outreach preflight: "
-                f"{int(outreach_preflight.get('sendable_count', 0) or 0)} sendable leads | "
-                f"{int(outreach_preflight.get('no_email_count', 0) or 0)} missing verified email | "
-                f"Gmail {gmail_status}"
-            )
+            render_outreach_preflight_summary(outreach_preflight)
         except Exception:
             outreach_preflight = {}
+
+    render_add_test_lead_form()
 
     action_cols = st.columns(3)
     with action_cols[0]:
@@ -1578,7 +1664,7 @@ def render_actions(tenant: TenantContext) -> None:
             if not outreach_preflight:
                 outreach_preflight = load_outreach_preflight()
             if int(outreach_preflight.get("sendable_count", 0) or 0) <= 0:
-                st.warning("No sendable leads found. Generate or verify leads with email first.")
+                st.warning(NO_VERIFIED_EMAIL_LEADS_MESSAGE)
                 st.markdown("</div></div>", unsafe_allow_html=True)
                 return
             with st.spinner("Queueing outreach..."):
@@ -2304,7 +2390,19 @@ def render_pro_action_page(title: str, caption: str, button_label: str, agent_na
         st.button(button_label, use_container_width=True, disabled=True)
         st.markdown("</div></div>", unsafe_allow_html=True)
         return
+    outreach_preflight: Dict[str, Any] = {}
+    if agent_name == "outreach":
+        outreach_preflight = load_outreach_preflight()
+        render_outreach_preflight_summary(outreach_preflight)
+        render_add_test_lead_form()
     if st.button(button_label, use_container_width=True):
+        if agent_name == "outreach":
+            if not outreach_preflight:
+                outreach_preflight = load_outreach_preflight()
+            if int(outreach_preflight.get("sendable_count", 0) or 0) <= 0:
+                st.warning(NO_VERIFIED_EMAIL_LEADS_MESSAGE)
+                st.markdown("</div></div>", unsafe_allow_html=True)
+                return
         with st.spinner("Queueing automation job..."):
             enqueue_job(agent_name, payload or {})
         st.success("Automation job queued.")

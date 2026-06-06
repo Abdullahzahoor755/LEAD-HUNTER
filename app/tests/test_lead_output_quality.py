@@ -109,6 +109,7 @@ async def test_api_exports_only_standardized_lead_fields() -> None:
             "company_url",
             "country",
             "verified_email",
+            "phone",
             "service_reason",
             "industry",
             "score",
@@ -121,6 +122,7 @@ async def test_api_exports_only_standardized_lead_fields() -> None:
         assert row["company_url"] == "https://acme.test"
         assert row["country"] == ""
         assert row["verified_email"] == "info@acme.test"
+        assert row["phone"] == ""
         assert row["service_reason"] == "Strong business fit"
 
 
@@ -672,6 +674,7 @@ async def test_outreach_agent_uses_tenant_gmail_provider(monkeypatch: pytest.Mon
             tenant_id=tenant.tenant_id,
             company="Acme",
             website="https://acme.test",
+            verified_email="info@acme.test",
             email="info@acme.test",
             reason="Good fit",
             score=80,

@@ -209,11 +209,14 @@ class ApprovePaymentRequest(BaseModel):
 def _serialize_lead(lead: Lead, include_agency_kit: bool = False) -> Dict[str, Any]:
     last_reply_at = lead.last_reply_at
     metadata = dict(lead.metadata or {})
+    contact = metadata.get("contact", {}) if isinstance(metadata.get("contact", {}), dict) else {}
+    phone = str(lead.phone or metadata.get("phone", "") or metadata.get("Phone", "") or contact.get("phone", "") or "").strip()
     outreach_status = str(lead.outreach_status or "").strip().lower()
     payload = {
         "company_url": str(lead.company_url or "").strip(),
         "country": str(lead.country or "").strip(),
         "verified_email": str(lead.verified_email or "").strip().lower(),
+        "phone": phone,
         "service_reason": str(lead.service_reason or "").strip(),
         "industry": str(lead.industry or "").strip(),
         "score": int(lead.score or 0),
