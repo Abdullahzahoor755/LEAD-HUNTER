@@ -90,6 +90,9 @@ class _AsyncRepositoryProxy:
     async def list(self, tenant_id: str):
         return await self._run(lambda repository: repository.list(tenant_id))
 
+    async def list_all(self):
+        return await self._run(lambda repository: repository.list_all())
+
     async def get(self, tenant_id: str, item_id: str):
         return await self._run(lambda repository: repository.get(tenant_id, item_id))
 

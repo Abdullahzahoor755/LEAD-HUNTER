@@ -24,6 +24,7 @@ from app.core.models import Job, Lead, TenantContext
 from app.core.tenant import get_current_tenant, resolve_tenant_context
 from app.db.postgres import initialize_async_database, verify_async_database
 from app.db.session import AsyncDatabaseSession, DatabaseSession, get_async_db_session, reset_async_session_factory
+from app.services.admin_bootstrap_service import ensure_admin_from_env, has_admin_bootstrap_env
 from app.services.auth_service import AuthService
 from app.services.admin_analytics_service import AdminAnalyticsService
 from app.services.agency_growth_service import AgencyGrowthService
@@ -324,6 +325,23 @@ async def fetch_gmail_profile_email(access_token: str) -> str:
     return str(data.get("emailAddress", "") or "").strip().lower()
 
 
+async def _ensure_admin_on_startup_if_configured() -> None:
+    if not has_admin_bootstrap_env():
+        return
+    try:
+        async with get_async_db_session() as db:
+            result = await ensure_admin_from_env(db)
+            LOGGER.info(
+                "Admin ensured: email=%s, tenant_id=%s, role=%s, is_active=%s",
+                result.email,
+                result.tenant_id,
+                result.role,
+                result.is_active,
+            )
+    except Exception:
+        LOGGER.exception("Admin bootstrap failed safely.")
+
+
 def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
     validate_production_jwt_secret()
 
@@ -331,6 +349,7 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
     async def lifespan(_: FastAPI):
         if shared_db is None and settings.database_backend == "postgres":
             await initialize_async_database()
+            await _ensure_admin_on_startup_if_configured()
         yield
         if shared_db is None and settings.database_backend == "postgres":
             await reset_async_session_factory()
