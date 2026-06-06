@@ -121,6 +121,10 @@ def render_landing_styles() -> None:
             --muted: #64748b;
             --accent: #22d3ee;
             --accent-2: #ef4b5f;
+            --text-primary: #0b1220;
+            --text-secondary: #334155;
+            --text-muted: #475569;
+            --heading: #071a2f;
             --card-gradient: linear-gradient(145deg, #eefaff 0%, #ffffff 72%);
             --soft-shadow: 0 18px 45px rgba(34, 211, 238, .13), 0 8px 22px rgba(11, 37, 69, .05);
         }
@@ -968,6 +972,91 @@ def render_landing_styles() -> None:
         .panel-card li,
         .panel-card caption {
             color: var(--text) !important;
+        }
+        /* Login/home contrast pass: keep light theme and layout, make typography readable. */
+        .landing-shell,
+        .auth-card,
+        .feature-card,
+        .price-chip,
+        .plan-card {
+            color: var(--text-primary) !important;
+            opacity: 1 !important;
+        }
+        .hero-headline {
+            color: var(--heading) !important;
+            background: none !important;
+            -webkit-background-clip: initial !important;
+            background-clip: initial !important;
+            -webkit-text-fill-color: var(--heading) !important;
+            text-shadow: none !important;
+            opacity: 1 !important;
+        }
+        .landing-title,
+        .auth-card h2,
+        .feature-card h3,
+        .price-chip strong,
+        .plan-card strong,
+        .plan-price {
+            color: var(--heading) !important;
+            -webkit-text-fill-color: var(--heading) !important;
+            opacity: 1 !important;
+        }
+        .landing-tagline,
+        .landing-shell p,
+        .landing-shell li,
+        .feature-card p,
+        .price-chip,
+        .plan-card,
+        .plan-card p,
+        .auth-card p,
+        .auth-card + div,
+        .auth-card ~ div {
+            color: var(--text-secondary) !important;
+            opacity: 1 !important;
+        }
+        .hero-kicker,
+        .cta-pill,
+        .auth-card label,
+        .auth-card [data-testid="stTextInput"] label,
+        .auth-card [data-testid="stTextInput"] label p,
+        .auth-card [data-testid="stTextInput"] label span,
+        .auth-card [data-testid="stForm"] label,
+        .auth-card [data-testid="stForm"] label p,
+        .auth-card [data-testid="stForm"] label span,
+        .auth-card .stTabs [data-baseweb="tab"],
+        .auth-card .stTabs [data-baseweb="tab"] p,
+        .auth-card .stTabs [data-baseweb="tab"] span {
+            color: var(--text-primary) !important;
+            -webkit-text-fill-color: var(--text-primary) !important;
+            opacity: 1 !important;
+        }
+        .auth-card .stTabs [aria-selected="true"],
+        .auth-card .stTabs [aria-selected="true"] p,
+        .auth-card .stTabs [aria-selected="true"] span {
+            color: var(--heading) !important;
+            -webkit-text-fill-color: var(--heading) !important;
+            font-weight: 800;
+        }
+        .auth-card input,
+        .auth-card textarea,
+        .auth-card [data-testid="stTextInput"] input,
+        .auth-card [data-testid="stTextArea"] textarea,
+        .auth-card [data-testid="stForm"] input,
+        .auth-card [data-testid="stForm"] textarea {
+            color: var(--text-primary) !important;
+            -webkit-text-fill-color: var(--text-primary) !important;
+            opacity: 1 !important;
+        }
+        .auth-card input::placeholder,
+        .auth-card textarea::placeholder {
+            color: #94a3b8 !important;
+            -webkit-text-fill-color: #94a3b8 !important;
+            opacity: 1 !important;
+        }
+        .auth-card [data-testid="stMarkdownContainer"],
+        .landing-shell [data-testid="stMarkdownContainer"] {
+            color: var(--text-secondary) !important;
+            opacity: 1 !important;
         }
         @media (max-width: 980px) {
             .block-container {padding-left: 1rem; padding-right: 1rem; padding-top: 1.4rem;}
