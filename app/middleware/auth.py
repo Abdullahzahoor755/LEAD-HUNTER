@@ -15,7 +15,14 @@ from app.core.tenant import reset_current_tenant, set_current_tenant
 
 class AuthTenantMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
-        if request.url.path in {"/healthz", "/readyz", "/signup", "/login"}:
+        public_paths = {
+            "/healthz",
+            "/readyz",
+            "/signup",
+            "/login",
+            "/settings/providers/gmail/oauth/callback",
+        }
+        if request.url.path in public_paths:
             return await call_next(request)
 
         raw_header = request.headers.get("authorization", "")
