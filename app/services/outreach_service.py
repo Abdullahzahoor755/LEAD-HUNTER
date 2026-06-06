@@ -10,20 +10,12 @@ from app.core.models import Email, Followup, Lead, Reply, TenantContext
 from app.db.session import AsyncDatabaseSession, DatabaseSession
 from app.services.outreach_audit import audit_log
 from app.services.outreach_email_service import OutreachEmailService
+from app.services.outreach_errors import normalized_outreach_error, safe_outreach_error
 from app.services.lead_service import LeadService
 from app.services._async import maybe_await
 
 
 LOGGER = logging.getLogger(__name__)
-
-SAFE_OUTREACH_FAILURE_REASONS = {
-    "missing_gmail_credentials",
-    "gmail_send_failed",
-    "no_verified_email",
-    "plan_locked",
-    "oauth_token_error",
-    "provider_generation_failed",
-}
 
 
 class OutreachService:
@@ -87,6 +79,11 @@ class OutreachService:
                 await self.lead_service.upsert_lead(tenant, lead)
                 sent += 1
             except Exception:
+                failed_at = datetime.now(timezone.utc).isoformat()
+                metadata = dict(lead.metadata or {})
+                metadata["outreach_error"] = "unknown_outreach_failure"
+                metadata["outreach_error_at"] = failed_at
+                lead.metadata = metadata
                 lead.status = "failed"
                 lead.outreach_status = "failed"
                 await self.lead_service.upsert_lead(tenant, lead)
@@ -142,7 +139,7 @@ class OutreachService:
                 lead.email,
             )
             return
-        safe_error = self.safe_failure_reason(error_reason)
+        safe_error = normalized_outreach_error(error_reason, status=status)
         metadata = dict(existing.metadata or {})
         metadata.update(
             {
@@ -155,8 +152,10 @@ class OutreachService:
         )
         if status == "failed":
             metadata["outreach_error"] = safe_error or "gmail_send_failed"
+            metadata["outreach_error_at"] = sent_at_iso
         else:
             metadata.pop("outreach_error", None)
+            metadata.pop("outreach_error_at", None)
         existing.status = status
         existing.outreach_status = status
         existing.metadata = metadata
@@ -400,8 +399,7 @@ class OutreachService:
         return email
 
     def safe_failure_reason(self, reason: str) -> str:
-        value = str(reason or "").strip().lower()
-        return value if value in SAFE_OUTREACH_FAILURE_REASONS else ""
+        return safe_outreach_error(reason)
 
     def classify_send_failure(self, error: Exception) -> str:
         text = f"{type(error).__name__} {error}".lower()

@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from typing import Any, Dict
 
 from app.configs.settings import settings
 from app.core.models import Tenant, TenantContext
 from app.db.session import AsyncDatabaseSession, DatabaseSession
 from app.services._async import maybe_await
+from app.services.outreach_audit import audit_log
 from app.services.security_service import decrypt_secret, encrypt_secret
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _settings_value(attribute: str, env_name: str, default: str = "") -> str:
@@ -34,8 +39,10 @@ class ProviderCredentialService:
         tenant_record = await self._get_tenant(tenant.tenant_id)
         provider_settings = dict((tenant_record.settings or {}).get("providers", {}).get("gmail", {}))
         if not provider_settings:
+            audit_log(LOGGER, logging.INFO, "OUTREACH_AUDIT gmail.credentials_missing tenant_id=%s reason=no_provider_settings", tenant.tenant_id)
             return {}
         if provider_settings.get("connected") is False:
+            audit_log(LOGGER, logging.INFO, "OUTREACH_AUDIT gmail.credentials_missing tenant_id=%s reason=disconnected", tenant.tenant_id)
             return {}
         decrypted: Dict[str, Any] = {
             "provider": "gmail",
@@ -64,6 +71,18 @@ class ProviderCredentialService:
             decrypted["refresh_token"] = str(provider_settings.get("refresh_token") or "")
         else:
             decrypted["refresh_token"] = ""
+        audit_log(
+            LOGGER,
+            logging.INFO,
+            "OUTREACH_AUDIT gmail.credentials_loaded tenant_id=%s sender_email=%s has_client_id=%s has_client_secret=%s has_refresh_token=%s has_access_token=%s connected=%s",
+            tenant.tenant_id,
+            decrypted["email_address"],
+            bool(decrypted["client_id"]),
+            bool(decrypted["client_secret"]),
+            bool(decrypted["refresh_token"]),
+            bool(decrypted["access_token"]),
+            provider_settings.get("connected", True),
+        )
         return decrypted
 
     async def save_gmail_credentials(self, tenant: TenantContext, credentials: Dict[str, Any]) -> Tenant:

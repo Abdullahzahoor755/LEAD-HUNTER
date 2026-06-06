@@ -5,6 +5,7 @@ from __future__ import annotations
 from email.mime.text import MIMEText
 import asyncio
 import base64
+import logging
 from typing import List
 
 try:
@@ -19,6 +20,10 @@ except Exception:  # pragma: no cover - optional dependency path
 import leads as legacy_leads
 
 from app.providers.base import MessageProvider, ProviderAccount, ProviderReply, ProviderSendRequest, ProviderSendResult
+from app.services.outreach_audit import audit_log
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class GmailProvider(MessageProvider):
@@ -43,6 +48,14 @@ class GmailProvider(MessageProvider):
         return build("gmail", "v1", credentials=self._credentials(account), cache_discovery=False)
 
     async def send(self, account: ProviderAccount, request: ProviderSendRequest) -> ProviderSendResult:
+        audit_log(
+            LOGGER,
+            logging.INFO,
+            "OUTREACH_AUDIT gmail.send_start tenant_id=%s status=started thread_id_present=%s body_length=%s",
+            account.tenant_id,
+            bool(request.thread_id),
+            len(str(request.body or "")),
+        )
         service = self._build_service(account)
         message = MIMEText(request.body, "plain", "utf-8")
         message["To"] = request.to
@@ -53,6 +66,15 @@ class GmailProvider(MessageProvider):
         raw = await asyncio.to_thread(
             lambda: service.users().messages().send(userId="me", body=payload).execute()
         )
+        audit_log(
+            LOGGER,
+            logging.INFO,
+            "OUTREACH_AUDIT gmail.send_result tenant_id=%s status=sent message_id=%s thread_id=%s raw_keys=%s",
+            account.tenant_id,
+            str(raw.get("id", "")),
+            str(raw.get("threadId", "")),
+            sorted(dict(raw).keys()),
+        )
         return ProviderSendResult(
             message_id=str(raw.get("id", "")),
             thread_id=str(raw.get("threadId", "")),
@@ -61,7 +83,9 @@ class GmailProvider(MessageProvider):
 
     async def fetch_replies(self, account: ProviderAccount, cursor: str = "") -> List[ProviderReply]:
         if not cursor:
+            audit_log(LOGGER, logging.INFO, "OUTREACH_AUDIT gmail.fetch_replies_skipped tenant_id=%s reason=empty_thread_id", account.tenant_id)
             return []
+        audit_log(LOGGER, logging.INFO, "OUTREACH_AUDIT gmail.fetch_replies_start tenant_id=%s thread_id=%s", account.tenant_id, cursor)
         service = self._build_service(account)
         thread = await asyncio.to_thread(
             lambda: service.users().threads().get(userId="me", id=cursor, format="full").execute()
@@ -83,4 +107,12 @@ class GmailProvider(MessageProvider):
                     },
                 )
             )
+        audit_log(
+            LOGGER,
+            logging.INFO,
+            "OUTREACH_AUDIT gmail.fetch_replies_result tenant_id=%s thread_id=%s fetched_count=%s",
+            account.tenant_id,
+            cursor,
+            len(replies),
+        )
         return replies

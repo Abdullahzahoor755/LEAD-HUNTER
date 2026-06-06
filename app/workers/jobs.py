@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import logging
 from typing import Any, Dict
 from uuid import uuid4
 
@@ -14,7 +15,11 @@ from app.core.auth import is_plan_gated_agent
 from app.core.models import Job, TenantContext
 from app.db.session import AsyncDatabaseSession, DatabaseSession, get_async_db_session
 from app.services._async import maybe_await
+from app.services.outreach_audit import audit_log
 from app.services.plan_gate import require_pro_plan
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class AsyncJobQueue:
@@ -63,16 +68,50 @@ class AsyncJobQueue:
                             job = candidate
                             break
                 if job is None:
+                    audit_log(
+                        LOGGER,
+                        logging.INFO,
+                        "OUTREACH_AUDIT job.empty tenant_id=%s requested_job_type=%s",
+                        tenant.tenant_id,
+                        normalized_job_type,
+                    )
                     return {"status": "empty", "tenant_id": tenant.tenant_id}
                 scoped_db = db.for_tenant(tenant)
                 persisted_job = await maybe_await(scoped_db.get("jobs", job.id))
                 if persisted_job is None:
+                    audit_log(
+                        LOGGER,
+                        logging.WARNING,
+                        "OUTREACH_AUDIT job.missing tenant_id=%s job_id=%s requested_job_type=%s",
+                        tenant.tenant_id,
+                        job.id,
+                        normalized_job_type,
+                    )
                     return {"status": "missing_job", "job_id": job.id, "tenant_id": tenant.tenant_id}
+                audit_log(
+                    LOGGER,
+                    logging.INFO,
+                    "OUTREACH_AUDIT job.claimed tenant_id=%s job_id=%s agent_name=%s requested_job_type=%s attempt_count=%s",
+                    tenant.tenant_id,
+                    persisted_job.id,
+                    persisted_job.name,
+                    normalized_job_type,
+                    persisted_job.attempt_count,
+                )
                 try:
                     if is_plan_gated_agent(persisted_job.name):
                         await require_pro_plan(db, tenant)
                     agent = self.agents.get(persisted_job.name)
                     request = AgentRequest(tenant=tenant, payload=persisted_job.payload)
+                    audit_log(
+                        LOGGER,
+                        logging.INFO,
+                        "OUTREACH_AUDIT job.dispatch tenant_id=%s job_id=%s agent_name=%s payload=%s",
+                        tenant.tenant_id,
+                        persisted_job.id,
+                        persisted_job.name,
+                        persisted_job.payload,
+                    )
                     result = await agent.run(request, db)
                     persisted_job.result = result
                     persisted_job.status = "completed"
@@ -80,6 +119,15 @@ class AsyncJobQueue:
                     persisted_job.locked_by = ""
                     persisted_job.locked_at = None
                     persisted_job.completed_at = datetime.now(timezone.utc)
+                    audit_log(
+                        LOGGER,
+                        logging.INFO,
+                        "OUTREACH_AUDIT job.completed tenant_id=%s job_id=%s agent_name=%s result=%s",
+                        tenant.tenant_id,
+                        persisted_job.id,
+                        persisted_job.name,
+                        result,
+                    )
                 except Exception as error:
                     should_retry = not isinstance(error, ValueError)
                     persisted_job.status = (
@@ -91,6 +139,17 @@ class AsyncJobQueue:
                     persisted_job.locked_by = ""
                     persisted_job.locked_at = None
                     persisted_job.completed_at = datetime.now(timezone.utc)
+                    audit_log(
+                        LOGGER,
+                        logging.ERROR,
+                        "OUTREACH_AUDIT job.failed tenant_id=%s job_id=%s agent_name=%s status=%s error=%s",
+                        tenant.tenant_id,
+                        persisted_job.id,
+                        persisted_job.name,
+                        persisted_job.status,
+                        error,
+                        exc_info=True,
+                    )
                 await maybe_await(scoped_db.save("jobs", persisted_job))
             return {
                 "status": persisted_job.status,

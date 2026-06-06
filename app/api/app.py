@@ -34,6 +34,8 @@ from app.services.billing_service import BillingService
 from app.services.job_service import JobService
 from app.services.lead_service import LeadService
 from app.services.marketing_campaign_service import MarketingCampaignLimitError, MarketingCampaignService
+from app.services.outreach_errors import normalized_outreach_error
+from app.services.outreach_service import OutreachService
 from app.services.plan_gate import PlanGateError, require_pro_plan
 from app.services.provider_credential_service import ProviderCredentialService
 from app.services.security_service import SecretEncryptionError
@@ -207,6 +209,7 @@ class ApprovePaymentRequest(BaseModel):
 def _serialize_lead(lead: Lead, include_agency_kit: bool = False) -> Dict[str, Any]:
     last_reply_at = lead.last_reply_at
     metadata = dict(lead.metadata or {})
+    outreach_status = str(lead.outreach_status or "").strip().lower()
     payload = {
         "company_url": str(lead.company_url or "").strip(),
         "country": str(lead.country or "").strip(),
@@ -214,8 +217,12 @@ def _serialize_lead(lead: Lead, include_agency_kit: bool = False) -> Dict[str, A
         "service_reason": str(lead.service_reason or "").strip(),
         "industry": str(lead.industry or "").strip(),
         "score": int(lead.score or 0),
-        "outreach_status": str(lead.outreach_status or "").strip().lower(),
-        "outreach_error": str(metadata.get("outreach_error", "") or "").strip().lower(),
+        "outreach_status": outreach_status,
+        "outreach_error": normalized_outreach_error(
+            str(metadata.get("outreach_error", "") or ""),
+            status=str(lead.status or ""),
+            outreach_status=outreach_status,
+        ),
         "followup_count": int(lead.followup_count or 0),
         "reply_status": str(lead.reply_status or "").strip().lower(),
         "last_reply_at": last_reply_at.isoformat() if hasattr(last_reply_at, "isoformat") else str(last_reply_at or ""),
@@ -601,6 +608,53 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         job = await JobService(db_session).enqueue(tenant, name=payload.agent_name, payload=payload.payload)
         await app.state.queue.register(job.id)
         return {"job_id": job.id, "tenant_id": tenant.tenant_id, "agent_name": payload.agent_name}
+
+    @app.get("/outreach/preflight")
+    async def outreach_preflight(
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        service = OutreachService(db_session)
+        blocked_domains = {
+            item.strip().lower()
+            for item in os.getenv("EMAIL_OPTOUT_DOMAINS", "").split(",")
+            if item.strip()
+        }
+        leads = await LeadService(db_session).list_leads(tenant)
+        sendable_statuses = {"pending", "draft", "no_content_scraped", "blocked_site", "slow_site", "js_site"}
+        sendable_count = 0
+        no_email_count = 0
+        failed_without_reason_count = 0
+        sample_errors: list[Dict[str, str]] = []
+        for lead in leads:
+            status = str(lead.status or lead.outreach_status or "").strip().lower()
+            outreach_status = str(lead.outreach_status or "").strip().lower()
+            metadata = dict(lead.metadata or {})
+            recipient = service.outreach_recipient(lead)
+            if status in sendable_statuses:
+                if not recipient:
+                    no_email_count += 1
+                elif service._email_domain(recipient) not in blocked_domains:
+                    sendable_count += 1
+            raw_error = str(metadata.get("outreach_error", "") or "").strip()
+            if (status == "failed" or outreach_status == "failed") and not raw_error:
+                failed_without_reason_count += 1
+                if len(sample_errors) < 5:
+                    sample_errors.append({"lead_id": lead.id, "outreach_error": "unknown_outreach_failure"})
+
+        try:
+            credentials = await ProviderCredentialService(db_session).get_gmail_credentials(tenant)
+        except Exception:
+            credentials = {}
+        gmail_connected = bool(credentials.get("refresh_token") or credentials.get("access_token")) if credentials else False
+        return {
+            "gmail_connected": gmail_connected,
+            "sendable_count": sendable_count,
+            "no_email_count": no_email_count,
+            "failed_without_reason_count": failed_without_reason_count,
+            "sample_errors": sample_errors,
+        }
 
     @app.get("/jobs/recent")
     async def recent_jobs(

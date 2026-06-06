@@ -3,11 +3,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 
 import app.agents.outreach as outreach_module
 from app.agents.base import AgentRequest
 from app.agents.outreach import OutreachAgent
+from app.api.app import create_fastapi_app
 from app.core.models import Email, Lead, Tenant, TenantContext
 from app.db.session import build_memory_session
 from app.providers.base import ProviderSendResult
@@ -16,6 +18,7 @@ from app.services.lead_service import LeadService
 from app.services.outreach_email_service import OutreachEmailService
 from app.services.outreach_service import OutreachService
 from app.services.provider_credential_service import ProviderCredentialService
+from scripts.backfill_outreach_errors import backfill_outreach_errors
 
 
 class _FakeGmailProvider:
@@ -80,6 +83,10 @@ async def _save_pending_lead(db, tenant: TenantContext) -> Lead:
             },
         ),
     )
+
+
+def _auth_headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.mark.anyio
@@ -169,6 +176,7 @@ async def test_failed_send_persists_failed_status_and_email_attempt(monkeypatch:
     assert saved.status == "failed"
     assert saved.outreach_status == "failed"
     assert saved.metadata["outreach_error"] == "gmail_send_failed"
+    assert saved.metadata["outreach_error_at"]
     assert len(emails) == 1
     assert emails[0].status == "failed"
     assert emails[0].metadata["error"] == "gmail_send_failed"
@@ -190,6 +198,7 @@ async def test_missing_gmail_credentials_persists_failure_reason(monkeypatch: py
     assert saved.status == "failed"
     assert saved.outreach_status == "failed"
     assert saved.metadata["outreach_error"] == "missing_gmail_credentials"
+    assert saved.metadata["outreach_error_at"]
     assert len(emails) == 1
     assert emails[0].metadata["error"] == "missing_gmail_credentials"
 
@@ -223,8 +232,123 @@ async def test_invalid_or_missing_email_persists_no_verified_email_reason(monkey
     assert saved.status == "failed"
     assert saved.outreach_status == "failed"
     assert saved.metadata["outreach_error"] == "no_verified_email"
+    assert saved.metadata["outreach_error_at"]
     assert len(emails) == 1
     assert emails[0].metadata["error"] == "no_verified_email"
+
+
+@pytest.mark.anyio
+async def test_leads_returns_unknown_for_failed_blank_outreach_error() -> None:
+    db = build_memory_session()
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        signup = await client.post(
+            "/signup",
+            json={
+                "tenant_id": "tenant-failed-blank",
+                "tenant_name": "Tenant Failed Blank",
+                "tenant_slug": "tenant-failed-blank",
+                "email": "owner@failed-blank.test",
+                "password": "secret123",
+                "full_name": "Owner",
+            },
+        )
+        token = signup.json()["token"]
+        tenant = TenantContext(tenant_id="tenant-failed-blank")
+        db.for_tenant(tenant).save(
+            "leads",
+            Lead(
+                tenant_id=tenant.tenant_id,
+                company="Old Failed Co",
+                company_url="https://old-failed.test",
+                verified_email="lead@old-failed.test",
+                email="lead@old-failed.test",
+                status="failed",
+                outreach_status="failed",
+                metadata={},
+            ),
+        )
+        response = await client.get("/leads", headers=_auth_headers(token))
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["outreach_error"] == "unknown_outreach_failure"
+
+
+@pytest.mark.anyio
+async def test_outreach_preflight_counts_sendable_no_email_and_unknown_failures() -> None:
+    db = build_memory_session()
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        signup = await client.post(
+            "/signup",
+            json={
+                "tenant_id": "tenant-preflight",
+                "tenant_name": "Tenant Preflight",
+                "tenant_slug": "tenant-preflight",
+                "email": "owner@preflight.test",
+                "password": "secret123",
+                "full_name": "Owner",
+                "plan": "Pro",
+            },
+        )
+        token = signup.json()["token"]
+        tenant = TenantContext(tenant_id="tenant-preflight")
+        db.for_tenant(tenant).save(
+            "leads",
+            Lead(tenant_id=tenant.tenant_id, company="Good", email="lead@good.test", verified_email="lead@good.test", status="pending", outreach_status="pending"),
+        )
+        db.for_tenant(tenant).save(
+            "leads",
+            Lead(tenant_id=tenant.tenant_id, company="No Email", status="pending", outreach_status="pending"),
+        )
+        db.for_tenant(tenant).save(
+            "leads",
+            Lead(tenant_id=tenant.tenant_id, company="Failed", status="failed", outreach_status="failed", metadata={}),
+        )
+        response = await client.get("/outreach/preflight", headers=_auth_headers(token))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["gmail_connected"] is False
+    assert payload["sendable_count"] == 1
+    assert payload["no_email_count"] == 1
+    assert payload["failed_without_reason_count"] == 1
+    assert payload["sample_errors"][0]["outreach_error"] == "unknown_outreach_failure"
+
+
+@pytest.mark.anyio
+async def test_backfill_outreach_errors_dry_run_and_apply() -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-backfill")
+    db.tenants.save(_tenant_record(tenant.tenant_id))
+    lead = db.for_tenant(tenant).save(
+        "leads",
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company="Backfill Co",
+            company_url="https://backfill.test",
+            status="failed",
+            outreach_status="failed",
+            metadata={"preserve": "yes"},
+        ),
+    )
+
+    dry_run = await backfill_outreach_errors(db, tenant.tenant_id)
+    dry_saved = db.for_tenant(tenant).get("leads", lead.id)
+    applied = await backfill_outreach_errors(db, tenant.tenant_id, apply=True)
+    saved = db.for_tenant(tenant).get("leads", lead.id)
+
+    assert dry_run["dry_run"] is True
+    assert dry_run["matched_count"] == 1
+    assert dry_run["updated_count"] == 0
+    assert "outreach_error" not in dry_saved.metadata
+    assert applied["dry_run"] is False
+    assert applied["updated_count"] == 1
+    assert saved.metadata["preserve"] == "yes"
+    assert saved.metadata["outreach_error"] == "unknown_outreach_failure"
+    assert saved.metadata["outreach_error_at"]
 
 
 @pytest.mark.anyio

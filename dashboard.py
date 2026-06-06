@@ -28,6 +28,7 @@ except ImportError:
 PRODUCT_NAME = "Lead Hunter AI"
 PRODUCT_TAGLINE = "Find leads, create agency pitches, and launch marketing campaigns."
 LOCKED_FEATURE_MESSAGE = "This feature is available in Pro plan."
+UNKNOWN_OUTREACH_FAILURE_MESSAGE = "This failed before detailed diagnostics were enabled. Re-run outreach to get the exact reason."
 
 st.set_page_config(page_title=PRODUCT_NAME, page_icon="🔎", layout="wide", initial_sidebar_state="expanded")
 
@@ -1356,6 +1357,13 @@ def classify_pipeline_stage(row: pd.Series) -> str:
     return "New Lead"
 
 
+def format_outreach_error(error_code: str) -> str:
+    value = str(error_code or "").strip().lower()
+    if value == "unknown_outreach_failure":
+        return UNKNOWN_OUTREACH_FAILURE_MESSAGE
+    return value
+
+
 STANDARD_LEAD_EXPORT_COLUMNS = [
     "company_url",
     "country",
@@ -1389,7 +1397,7 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
                 "industry": str(item.get("industry", "") or "").strip(),
                 "score": item.get("score", 0),
                 "outreach_status": str(item.get("outreach_status", "") or "").strip().lower(),
-                "outreach_error": str(item.get("outreach_error", "") or "").strip().lower(),
+                "outreach_error": format_outreach_error(str(item.get("outreach_error", "") or "").strip().lower()),
                 "followup_count": item.get("followup_count", 0),
                 "reply_status": str(item.get("reply_status", "") or "").strip().lower(),
                 "last_reply_at": str(item.get("last_reply_at", "") or "").strip(),
@@ -1497,6 +1505,20 @@ def enqueue_job(agent_name: str, payload: Dict[str, Any] | None = None, *, run_n
             return
 
 
+def load_outreach_preflight() -> Dict[str, Any]:
+    response = api_request("GET", "/outreach/preflight")
+    body = parse_api_json(response)
+    if not response.is_success:
+        return {
+            "gmail_connected": False,
+            "sendable_count": 0,
+            "no_email_count": 0,
+            "failed_without_reason_count": 0,
+            "sample_errors": [],
+        }
+    return body
+
+
 def render_actions(tenant: TenantContext) -> None:
     pro_enabled = has_pro_features()
     st.markdown(
@@ -1536,9 +1558,29 @@ def render_actions(tenant: TenantContext) -> None:
             finally:
                 st.session_state["lead_generation_busy"] = False
 
+    outreach_preflight: Dict[str, Any] = {}
+    if pro_enabled:
+        try:
+            outreach_preflight = load_outreach_preflight()
+            gmail_status = "connected" if bool(outreach_preflight.get("gmail_connected")) else "not connected"
+            st.caption(
+                "Outreach preflight: "
+                f"{int(outreach_preflight.get('sendable_count', 0) or 0)} sendable leads | "
+                f"{int(outreach_preflight.get('no_email_count', 0) or 0)} missing verified email | "
+                f"Gmail {gmail_status}"
+            )
+        except Exception:
+            outreach_preflight = {}
+
     action_cols = st.columns(3)
     with action_cols[0]:
         if st.button("Send Outreach - Pro", use_container_width=True, disabled=not pro_enabled):
+            if not outreach_preflight:
+                outreach_preflight = load_outreach_preflight()
+            if int(outreach_preflight.get("sendable_count", 0) or 0) <= 0:
+                st.warning("No sendable leads found. Generate or verify leads with email first.")
+                st.markdown("</div></div>", unsafe_allow_html=True)
+                return
             with st.spinner("Queueing outreach..."):
                 enqueue_job("outreach")
                 st.success("Outreach job queued.")

@@ -178,3 +178,12 @@ def test_auth_role_supports_common_response_shapes(monkeypatch) -> None:
     ):
         fake_st.session_state["auth"] = payload
         assert dashboard.is_admin_user() is True
+
+
+def test_outreach_error_helper_maps_unknown_failure() -> None:
+    import dashboard
+
+    assert (
+        dashboard.format_outreach_error("unknown_outreach_failure")
+        == "This failed before detailed diagnostics were enabled. Re-run outreach to get the exact reason."
+    )
