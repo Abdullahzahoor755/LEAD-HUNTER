@@ -679,11 +679,11 @@ async def test_outreach_agent_uses_tenant_gmail_provider(monkeypatch: pytest.Mon
     )
     fake_provider = _FakeProvider()
     monkeypatch.setattr(outreach_module, "build_provider_registry", lambda: {"gmail": fake_provider})
-    monkeypatch.setattr(outreach_module.legacy_leads, "generate_cold_email", lambda lead: ("Hello", "Quick note"))
 
     result = await OutreachAgent().run(AgentRequest(tenant=tenant, payload={}), db)
 
     assert result["sent_messages"] == 1
     assert fake_provider.sent[0][0] == tenant.tenant_id
     assert fake_provider.sent[0][1] == "info@acme.test"
+    assert fake_provider.sent[0][2]
     assert "unsubscribe" in fake_provider.sent[0][3].lower()

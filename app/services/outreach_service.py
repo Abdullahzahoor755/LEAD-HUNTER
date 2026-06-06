@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
 from typing import Any, Dict, List
 
 from app.core.models import Email, Followup, Lead, Reply, TenantContext
 from app.db.session import AsyncDatabaseSession, DatabaseSession
+from app.services.outreach_audit import audit_log
+from app.services.outreach_email_service import OutreachEmailService
 from app.services.lead_service import LeadService
 from app.services._async import maybe_await
-import leads as legacy_leads
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class OutreachService:
@@ -18,24 +23,30 @@ class OutreachService:
         self.lead_service = LeadService(db)
 
     async def send_pending_outreach(self, tenant: TenantContext) -> Dict[str, object]:
+        from app.providers.base import ProviderAccount, ProviderSendRequest
+        from app.providers.registry import build_provider_registry
+        from app.services.provider_credential_service import ProviderCredentialService
+
         sent = 0
         failed = 0
         scoped_db = self.db.for_tenant(tenant)
+        email_service = OutreachEmailService(self.db)
+        credentials = await ProviderCredentialService(self.db).get_gmail_credentials(tenant)
+        if not credentials:
+            raise ValueError("Tenant Gmail credentials are not configured.")
+        account = ProviderAccount(tenant_id=tenant.tenant_id, **credentials)
+        provider = build_provider_registry()["gmail"]
         sendable_statuses = {"pending", "draft", "no_content_scraped", "blocked_site", "slow_site", "js_site"}
         for lead in await maybe_await(scoped_db.list("leads")):
             if lead.status.lower() not in sendable_statuses or not lead.email:
                 continue
             try:
-                lead_dict = {
-                    "Company": lead.company or lead.company_name or "",
-                    "Website": lead.website or "",
-                    "Reason": lead.reason or "",
-                }
-                subject, body = legacy_leads.generate_cold_email(lead_dict)
-                body = legacy_leads.append_unsubscribe_footer(body)
-                result = legacy_leads.send_email_gmail(lead.email, subject, body)
-                gmail_message_id = str(result.get("id", ""))
-                gmail_thread_id = str(result.get("threadId", ""))
+                generated = await email_service.generate_outreach_email(tenant, lead)
+                subject = str(generated.get("subject", "") or "").strip()
+                body = email_service.ensure_unsubscribe_footer(str(generated.get("body", "") or "").strip())
+                result = await provider.send(account, ProviderSendRequest(to=lead.email, subject=subject, body=body))
+                gmail_message_id = str(result.message_id or "")
+                gmail_thread_id = str(result.thread_id or "")
                 sent_at = datetime.now(timezone.utc)
                 sent_at_iso = sent_at.isoformat()
                 message = Email(
@@ -63,10 +74,12 @@ class OutreachService:
                 })
                 lead.metadata = metadata
                 lead.status = "sent"
+                lead.outreach_status = "sent"
                 await self.lead_service.upsert_lead(tenant, lead)
                 sent += 1
             except Exception:
                 lead.status = "failed"
+                lead.outreach_status = "failed"
                 await self.lead_service.upsert_lead(tenant, lead)
                 failed += 1
                 continue
@@ -99,6 +112,14 @@ class OutreachService:
         scoped = self.db.for_tenant(tenant)
         existing = await maybe_await(scoped.get("leads", lead.id))
         if existing is None:
+            audit_log(
+                LOGGER,
+                logging.WARNING,
+                "OUTREACH_AUDIT outreach.db_result tenant_id=%s lead_id=%s email=%s skipped=lead_not_found",
+                tenant.tenant_id,
+                lead.id,
+                lead.email,
+            )
             return
         metadata = dict(existing.metadata or {})
         metadata.update(
@@ -111,8 +132,19 @@ class OutreachService:
             }
         )
         existing.status = status
+        existing.outreach_status = status
         existing.metadata = metadata
         await self.lead_service.upsert_lead(tenant, existing)
+        audit_log(
+            LOGGER,
+            logging.INFO,
+            "OUTREACH_AUDIT outreach.lead_persisted tenant_id=%s lead_id=%s email=%s status=%s thread_id=%s",
+            tenant.tenant_id,
+            existing.id,
+            existing.email,
+            status,
+            thread_id,
+        )
         email_record = Email(
             tenant_id=tenant.tenant_id,
             campaign_id=lead.campaign_id,
@@ -127,7 +159,18 @@ class OutreachService:
             sent_at=sent_at_dt,
             metadata={"source": "legacy_outreach"},
         )
-        await maybe_await(scoped.save("emails", email_record))
+        saved_email = await maybe_await(scoped.save("emails", email_record))
+        audit_log(
+            LOGGER,
+            logging.INFO,
+            "OUTREACH_AUDIT outreach.email_persisted tenant_id=%s lead_id=%s email_record_id=%s status=%s message_id=%s thread_id=%s",
+            tenant.tenant_id,
+            lead.id,
+            getattr(saved_email, "id", email_record.id),
+            status,
+            message_id,
+            thread_id,
+        )
 
     async def list_followup_candidates(self, tenant: TenantContext, blocked_domains: set[str], now_value: datetime, parse_datetime) -> List[Dict[str, Any]]:
         scoped = self.db.for_tenant(tenant)
@@ -174,6 +217,14 @@ class OutreachService:
         scoped = self.db.for_tenant(tenant)
         existing = await maybe_await(scoped.get("leads", lead.id))
         if existing is None:
+            audit_log(
+                LOGGER,
+                logging.WARNING,
+                "OUTREACH_AUDIT followup.db_result tenant_id=%s lead_id=%s email=%s skipped=lead_not_found",
+                tenant.tenant_id,
+                lead.id,
+                lead.email,
+            )
             return
         metadata = dict(existing.metadata or {})
         metadata.update(
@@ -189,6 +240,16 @@ class OutreachService:
         )
         existing.metadata = metadata
         await self.lead_service.upsert_lead(tenant, existing)
+        audit_log(
+            LOGGER,
+            logging.INFO,
+            "OUTREACH_AUDIT followup.lead_persisted tenant_id=%s lead_id=%s email=%s followup_number=%s thread_id=%s",
+            tenant.tenant_id,
+            existing.id,
+            existing.email,
+            followup_number,
+            thread_id,
+        )
         followup = Followup(
             tenant_id=tenant.tenant_id,
             campaign_id=lead.campaign_id,
@@ -199,7 +260,18 @@ class OutreachService:
             sent_at=now_dt,
             metadata={"thread_id": thread_id},
         )
-        await maybe_await(scoped.save("followups", followup))
+        saved_followup = await maybe_await(scoped.save("followups", followup))
+        audit_log(
+            LOGGER,
+            logging.INFO,
+            "OUTREACH_AUDIT followup.created tenant_id=%s lead_id=%s followup_id=%s email_id=%s status=%s sequence_step=%s",
+            tenant.tenant_id,
+            lead.id,
+            getattr(saved_followup, "id", followup.id),
+            last_email_id,
+            followup.status,
+            followup_number,
+        )
 
     async def list_reply_candidates(self, tenant: TenantContext) -> List[Dict[str, Any]]:
         scoped = self.db.for_tenant(tenant)
@@ -230,11 +302,29 @@ class OutreachService:
         scoped = self.db.for_tenant(tenant)
         existing = await maybe_await(scoped.get("leads", lead.id))
         if existing is None:
+            audit_log(
+                LOGGER,
+                logging.WARNING,
+                "OUTREACH_AUDIT reply.db_result tenant_id=%s lead_id=%s email=%s skipped=lead_not_found",
+                tenant.tenant_id,
+                lead.id,
+                lead.email,
+            )
             return
         metadata = dict(existing.metadata or {})
         metadata.update(updates)
         existing.metadata = metadata
         await self.lead_service.upsert_lead(tenant, existing)
+        audit_log(
+            LOGGER,
+            logging.INFO,
+            "OUTREACH_AUDIT reply.lead_persisted tenant_id=%s lead_id=%s email=%s reply_status=%s from=%s",
+            tenant.tenant_id,
+            existing.id,
+            existing.email,
+            updates.get("ReplyStatus", ""),
+            updates.get("LastReplyFrom", ""),
+        )
         reply = Reply(
             tenant_id=tenant.tenant_id,
             campaign_id=lead.campaign_id,
@@ -255,7 +345,18 @@ class OutreachService:
                 "NextActionSuggestion": str(updates.get("NextActionSuggestion", "")),
             },
         )
-        await maybe_await(scoped.save("replies", reply))
+        saved_reply = await maybe_await(scoped.save("replies", reply))
+        audit_log(
+            LOGGER,
+            logging.INFO,
+            "OUTREACH_AUDIT reply.persisted tenant_id=%s lead_id=%s reply_id=%s email_id=%s provider_message_id=%s classification=%s",
+            tenant.tenant_id,
+            lead.id,
+            getattr(saved_reply, "id", reply.id),
+            email_id,
+            reply.provider_message_id,
+            reply.classification,
+        )
 
     def _email_domain(self, email: str) -> str:
         return str(email or "").strip().lower().split("@")[-1]

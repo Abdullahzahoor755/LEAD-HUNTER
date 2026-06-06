@@ -150,7 +150,7 @@ class LeadService:
         )
         normalized.verified_email = email_result["verified_email"]
         normalized.service_reason = self._normalize_service_reason(normalized.service_reason)
-        normalized.outreach_status = self._normalize_outreach_status(normalized.outreach_status or normalized.status)
+        normalized.outreach_status = self._resolve_outreach_status(normalized.status, normalized.outreach_status)
         normalized.reply_status = self._normalize_reply_status(normalized.reply_status, normalized.metadata)
         normalized.followup_count = self._normalize_followup_count(normalized.followup_count, normalized.metadata)
         normalized.last_reply_at = self._normalize_last_reply_at(normalized.last_reply_at, normalized.metadata)
@@ -340,6 +340,13 @@ class LeadService:
     def _normalize_outreach_status(self, value: str) -> str:
         candidate = str(value or "").strip().lower()
         return candidate if candidate in {"pending", "sent", "failed", "blocked"} else "pending"
+
+    def _resolve_outreach_status(self, status: str, outreach_status: str) -> str:
+        normalized_status = self._normalize_outreach_status(status)
+        normalized_outreach = self._normalize_outreach_status(outreach_status)
+        if normalized_status in {"sent", "failed", "blocked"} and normalized_outreach == "pending":
+            return normalized_status
+        return normalized_outreach or normalized_status
 
     def _normalize_reply_status(self, value: str, metadata: dict[str, Any]) -> str:
         candidate = str(value or metadata.get("ReplyStatus", "")).strip().lower()

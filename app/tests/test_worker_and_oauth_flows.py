@@ -91,7 +91,6 @@ async def test_followup_worker_uses_tenant_scoped_provider(monkeypatch: pytest.M
     )
     fake_provider = _FakeGmailProvider()
     monkeypatch.setattr(followup_module, "build_provider_registry", lambda: {"gmail": fake_provider})
-    monkeypatch.setattr(followup_module.legacy_leads, "generate_followup_email", lambda row, n: ("Follow up", "Checking in"))
 
     result = await FollowupAgent().run(AgentRequest(tenant=tenant, payload={}), db)
 
