@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -34,6 +36,10 @@ def _lead(db, tenant_id: str, **kwargs) -> Lead:
     return db.for_tenant(TenantContext(tenant_id=tenant_id)).save("leads", lead)
 
 
+def _campaign_text(campaign: dict) -> str:
+    return json.dumps(campaign, ensure_ascii=True).lower()
+
+
 @pytest.mark.anyio
 async def test_campaign_from_idea_works_without_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -62,6 +68,66 @@ async def test_campaign_from_idea_works_without_api_key(monkeypatch: pytest.Monk
     assert campaign["facebook_instagram_ads"]
     assert campaign["google_search_ads"]
     assert campaign["seven_day_content_calendar"]
+
+
+@pytest.mark.anyio
+async def test_study_permit_canada_campaign_markets_student_consultancy_without_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    db = build_memory_session()
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        signup = await _signup(client, "tenant-study-permit")
+        response = await client.post(
+            "/marketing/campaign/from-idea",
+            headers=_auth_headers(signup["token"]),
+            json={
+                "business_idea": "study permit canada",
+                "target_audience": "student",
+                "target_location": "Pakistan",
+                "campaign_goal": "book calls",
+            },
+        )
+
+    assert response.status_code == 200
+    campaign = response.json()["marketing_campaign_kit"]
+    text = _campaign_text(campaign)
+    assert campaign["mode"] == "fallback"
+    assert "canada" in text
+    assert "study permit" in text or "study visa" in text
+    assert "pakistani students" in text
+    assert "consultation" in text
+    assert "admission" in text
+    assert "document checklist" in text
+    assert "lead capture campaign" not in text
+    assert "landing page package" not in text
+
+    facebook_text = _campaign_text({"facebook_instagram_ads": campaign["facebook_instagram_ads"]})
+    assert "student" in facebook_text
+    assert "parents" in facebook_text
+    assert "business owner" not in facebook_text
+
+    google_text = _campaign_text({"google_search_ads": campaign["google_search_ads"]})
+    assert "canada study visa consultant" in google_text
+    assert "study in canada from pakistan" in google_text
+    assert "student visa help" in google_text
+
+    reels_text = _campaign_text(campaign["reels_tiktok_script"])
+    assert "documents" in reels_text
+    assert "refusal" in reels_text
+    assert "program" in reels_text
+
+    landing_text = _campaign_text(campaign["landing_page_copy"])
+    assert "free canada study permit eligibility check" in landing_text
+    assert "book a consultation" in landing_text
+
+    calendar_text = _campaign_text({"calendar": campaign["seven_day_content_calendar"]})
+    assert "eligibility" in calendar_text
+    assert "ielts" in calendar_text
+    assert "admission" in calendar_text
 
 
 @pytest.mark.anyio
@@ -114,7 +180,8 @@ async def test_unknown_category_gets_useful_default_campaign() -> None:
 
     assert response.status_code == 200
     campaign = response.json()["marketing_campaign_kit"]
-    assert campaign["lead_magnet"] == "Free growth checklist"
+    assert campaign["lead_magnet"] == "Free buyer guide or checklist"
+    assert "lead capture campaign" not in _campaign_text(campaign)
     assert campaign["landing_page_copy"]["headline"]
     assert campaign["next_action"]
 
