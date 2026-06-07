@@ -194,5 +194,6 @@ def test_contact_readiness_helper_distinguishes_email_phone_and_no_contact() -> 
 
     assert dashboard.contact_readiness_label("lead@example.test", "") == "Email-ready"
     assert dashboard.contact_readiness_label("", "+923000000000") == "Phone-only"
+    assert dashboard.contact_readiness_label("", "", "info@example.test") == "Likely email"
     assert dashboard.contact_readiness_label("", "") == "No contact"
     assert dashboard.contact_next_action("", "+923000000000") == "Generate WhatsApp Sales Kit"

@@ -162,6 +162,12 @@ class LeadService:
         normalized.metadata["email_status"] = self._classify_email(normalized.email or normalized.verified_email)
         normalized.metadata["email_quality"] = email_result["email_quality"]
         normalized.metadata["email_confidence"] = email_result["email_confidence"]
+        normalized.metadata["likely_email"] = email_result["likely_email"]
+        normalized.metadata["lead_readiness_score"] = self.lead_readiness_score(
+            verified_email=normalized.verified_email,
+            likely_email=email_result["likely_email"],
+            phone=normalized.phone or self.phone_from_metadata(normalized.metadata),
+        )
         normalized.metadata["rejected_emails"] = email_result["rejected_emails"]
         return normalized
 
@@ -218,7 +224,32 @@ class LeadService:
                 normalized = self._normalize_email(str(value or ""))
                 if normalized and normalized not in candidates:
                     candidates.append(normalized)
+        raw_candidates = metadata.get("email_candidates", [])
+        if isinstance(raw_candidates, list):
+            for item in raw_candidates:
+                if isinstance(item, dict):
+                    value = item.get("email", "")
+                else:
+                    value = item
+                normalized = self._normalize_email(str(value or ""))
+                if normalized and normalized not in candidates:
+                    candidates.append(normalized)
         return candidates
+
+    def _likely_email(self, metadata: dict[str, Any]) -> str:
+        for value in (metadata.get("likely_email", ""), metadata.get("likely_verified_email", "")):
+            normalized = self._normalize_email(str(value or ""))
+            if normalized:
+                return normalized
+        raw_values = metadata.get("likely_emails", [])
+        if isinstance(raw_values, str):
+            raw_values = [raw_values]
+        if isinstance(raw_values, list):
+            for value in raw_values:
+                normalized = self._normalize_email(str(value or ""))
+                if normalized:
+                    return normalized
+        return ""
 
     def _select_verified_email(self, company_url: str, primary_email: str, metadata: dict[str, Any]) -> dict[str, Any]:
         company_domain = self._domain_from_url(company_url)
@@ -238,10 +269,12 @@ class LeadService:
             accepted.append((rank, email, quality, confidence))
 
         if not accepted:
+            likely_email = self._likely_email(metadata)
             return {
                 "verified_email": "",
-                "email_quality": "missing",
-                "email_confidence": "none",
+                "likely_email": likely_email,
+                "email_quality": "likely" if likely_email else "missing",
+                "email_confidence": "likely_email" if likely_email else "unknown",
                 "rejected_emails": rejected,
             }
         accepted.sort(key=lambda item: item[0])
@@ -250,8 +283,9 @@ class LeadService:
             rejected.append({"email": rejected_email, "reason": "lower_ranked_same_domain_candidate"})
         return {
             "verified_email": email,
+            "likely_email": "",
             "email_quality": quality,
-            "email_confidence": confidence,
+            "email_confidence": "verified_email",
             "rejected_emails": rejected,
         }
 
@@ -379,15 +413,91 @@ class LeadService:
         except ValueError:
             return None
 
+    @classmethod
+    def phone_from_metadata(cls, metadata: dict[str, Any]) -> str:
+        for key in ("phone", "Phone", "phone_number", "contact_phone", "mobile", "whatsapp", "whatsapp_number"):
+            value = str(metadata.get(key, "") or "").strip()
+            if value:
+                return value
+        contact = metadata.get("contact", {}) if isinstance(metadata.get("contact", {}), dict) else {}
+        for key in ("phone", "mobile", "whatsapp", "whatsapp_number"):
+            value = str(contact.get(key, "") or "").strip()
+            if value:
+                return value
+        return ""
+
+    @classmethod
+    def likely_email_from_metadata(cls, metadata: dict[str, Any]) -> str:
+        value = str(metadata.get("likely_email", "") or "").strip().lower()
+        if value:
+            return value
+        raw_values = metadata.get("likely_emails", [])
+        if isinstance(raw_values, str):
+            raw_values = [raw_values]
+        if isinstance(raw_values, list):
+            for raw_value in raw_values:
+                value = str(raw_value or "").strip().lower()
+                if value:
+                    return value
+        return ""
+
+    @classmethod
+    def lead_readiness_score(cls, verified_email: str, likely_email: str, phone: str) -> int:
+        if str(verified_email or "").strip():
+            return 100
+        if str(likely_email or "").strip():
+            return 70
+        if str(phone or "").strip():
+            return 40
+        return 0
+
     async def dashboard_snapshot(self, tenant: TenantContext) -> dict[str, int | str]:
         scoped = self.db.for_tenant(tenant)
         leads = await maybe_await(scoped.list("leads"))
         jobs = await maybe_await(scoped.list("jobs"))
         replies = await maybe_await(scoped.list("replies"))
+        total_leads = len(leads)
+        leads_with_website = 0
+        leads_with_phone = 0
+        leads_with_email = 0
+        leads_with_verified_email = 0
+        likely_email_leads = 0
+        phone_only_leads = 0
+        no_contact_leads = 0
+        for lead in leads:
+            metadata = dict(lead.metadata or {})
+            likely_email = self.likely_email_from_metadata(metadata)
+            phone = str(lead.phone or "").strip() or self.phone_from_metadata(metadata)
+            has_verified_email = bool(str(lead.verified_email or "").strip())
+            has_any_email = has_verified_email or bool(str(lead.email or "").strip()) or bool(metadata.get("email")) or bool(metadata.get("candidate_emails")) or bool(metadata.get("email_candidates"))
+            if str(lead.company_url or lead.website or "").strip():
+                leads_with_website += 1
+            if phone:
+                leads_with_phone += 1
+            if has_any_email:
+                leads_with_email += 1
+            if has_verified_email:
+                leads_with_verified_email += 1
+            elif likely_email:
+                likely_email_leads += 1
+            elif phone:
+                phone_only_leads += 1
+            else:
+                no_contact_leads += 1
+        verified_email_rate = round((leads_with_verified_email / total_leads) * 100, 1) if total_leads else 0.0
         return {
             "tenant_id": tenant.tenant_id,
-            "lead_count": len(leads),
+            "lead_count": total_leads,
             "sent_count": len([lead for lead in leads if lead.status.lower() == "sent"]),
             "reply_count": len(replies),
             "job_count": len(jobs),
+            "leads_with_website": leads_with_website,
+            "leads_with_phone": leads_with_phone,
+            "leads_with_email": leads_with_email,
+            "leads_with_verified_email": leads_with_verified_email,
+            "verified_email_rate": verified_email_rate,
+            "email_ready_leads": leads_with_verified_email,
+            "likely_email_leads": likely_email_leads,
+            "phone_only_leads": phone_only_leads,
+            "no_contact_leads": no_contact_leads,
         }

@@ -125,6 +125,12 @@ class CleaningAgent(JsonAgent):
             "phone": str(contact_info.get("phone", "")).strip(),
             "address": str(contact_info.get("address", "")).strip(),
             "contact_page": str(contact_info.get("contact_page", "")).strip(),
+            "email_candidates": list(contact_info.get("email_candidates", []) or []),
+            "candidate_emails": list(contact_info.get("candidate_emails", []) or []),
+            "likely_email": str(contact_info.get("likely_email", "")).strip().lower(),
+            "likely_emails": list(contact_info.get("likely_emails", []) or []),
+            "email_confidence": str(contact_info.get("email_confidence", "")).strip(),
+            "lead_readiness_score": int(contact_info.get("lead_readiness_score", 0) or 0),
             "website_text": cleaned_text,
             "website_text_length": len(cleaned_text),
             "lead_status": str(input_json.get("lead_status", "")).strip() or "Pending",
@@ -162,6 +168,12 @@ class ScoringAgent(JsonAgent):
             "phone": str(input_json.get("phone", "")).strip(),
             "address": str(input_json.get("address", "")).strip(),
             "contact_page": str(input_json.get("contact_page", "")).strip(),
+            "email_candidates": list(input_json.get("email_candidates", []) or []),
+            "candidate_emails": list(input_json.get("candidate_emails", []) or []),
+            "likely_email": str(input_json.get("likely_email", "")).strip().lower(),
+            "likely_emails": list(input_json.get("likely_emails", []) or []),
+            "email_confidence": str(input_json.get("email_confidence", "")).strip(),
+            "lead_readiness_score": int(input_json.get("lead_readiness_score", 0) or 0),
         }
         query = str(input_json.get("query", "")).strip()
         forced_ai_mode = str(input_json.get("ai_mode", "")).strip().lower()
@@ -177,6 +189,11 @@ class ScoringAgent(JsonAgent):
         extracted_email = str(analysis.get("extracted_email", "")).strip().lower()
         if not contact_info["email"] and extracted_email and legacy.is_valid_email(extracted_email):
             contact_info["email"] = extracted_email
+        if extracted_email and legacy.is_valid_email(extracted_email) and extracted_email not in contact_info["candidate_emails"]:
+            contact_info["candidate_emails"].append(extracted_email)
+            contact_info["email_candidates"].append(
+                {"email": extracted_email, "source": "ai_extracted", "page_url": website, "confidence": "verified_email"}
+            )
         scored = legacy.score_lead(
             website=website,
             contact_info=contact_info,
@@ -206,6 +223,12 @@ class ScoringAgent(JsonAgent):
             "phone": contact_info["phone"],
             "address": contact_info["address"],
             "contact_page": contact_info["contact_page"],
+            "email_candidates": contact_info["email_candidates"],
+            "candidate_emails": contact_info["candidate_emails"],
+            "likely_email": contact_info["likely_email"],
+            "likely_emails": contact_info["likely_emails"],
+            "email_confidence": contact_info["email_confidence"],
+            "lead_readiness_score": contact_info["lead_readiness_score"],
             "industry": str(analysis.get("industry", "")).strip(),
             "company_summary": str(analysis.get("company_summary", "")).strip(),
             "needs_it_services": bool(analysis.get("needs_it_services", False)),

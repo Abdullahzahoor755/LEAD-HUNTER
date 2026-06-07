@@ -59,7 +59,7 @@ REQUEST_CONNECT_TIMEOUT = 5
 REQUEST_READ_TIMEOUT = 5
 SEARCH_TIMEOUT = 8
 MAX_RETRIES_PER_REQUEST = 2
-MAX_PAGES_PER_DOMAIN = 5
+MAX_PAGES_PER_DOMAIN = 8
 MAX_WORKERS = 4
 MAX_HTML_BYTES = 250_000
 FIT_SCORE_EMAIL = 40
@@ -158,7 +158,22 @@ ENV_FILE = BASE_DIR / ".env"
 CREDENTIALS_FILE = BASE_DIR / "credentials.json"
 TOKEN_FILE = BASE_DIR / "token.json"
 
-CONTACT_PATH_KEYWORDS = ("contact", "about", "company", "locations", "reach-us")
+CONTACT_PATH_KEYWORDS = (
+    "contact",
+    "about",
+    "company",
+    "team",
+    "staff",
+    "people",
+    "careers",
+    "career",
+    "jobs",
+    "support",
+    "customer-service",
+    "locations",
+    "reach-us",
+    "get-in-touch",
+)
 EMAIL_PATTERN = re.compile(r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[A-Za-z]{2,}\b")
 PHONE_PATTERN = re.compile(r"(?:(?:\+|00)\d{1,3}[\s().-]*)?(?:\d[\s().-]*){7,}\d")
 ADDRESS_HINTS = ("street", "road", "avenue", "tower", "building", "office", "dubai", "riyadh", "london")
@@ -171,10 +186,17 @@ COMMON_CONTACT_PATHS = (
     "/about",
     "/about-us",
     "/team",
+    "/our-team",
     "/company",
+    "/careers",
+    "/career",
+    "/jobs",
+    "/support",
+    "/customer-service",
     "/reach-us",
     "/get-in-touch",
 )
+COMMON_BUSINESS_EMAIL_PREFIXES = ("info", "sales", "contact", "hello", "support")
 EMAIL_BAD_SUBSTRINGS = (
     "example.com",
     "email.com",
@@ -938,73 +960,214 @@ def is_valid_email(email: str) -> bool:
     return bool(EMAIL_PATTERN.fullmatch(email))
 
 
-def extract_emails_from_html(html: str) -> List[str]:
+def _root_domain_from_domain(domain: str) -> str:
+    cleaned = str(domain or "").lower().strip().strip(".")
+    if cleaned.startswith("www."):
+        cleaned = cleaned[4:]
+    parts = [part for part in cleaned.split(".") if part]
+    if len(parts) < 2:
+        return ""
+    compound_suffixes = {
+        "com.au", "com.sa", "co.uk", "com.pk", "com.br", "com.tr", "com.sg", "co.in", "co.za", "com.my"
+    }
+    suffix = ".".join(parts[-2:])
+    if suffix in compound_suffixes and len(parts) >= 3:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
+def _email_domain(email: str) -> str:
+    return str(email or "").lower().split("@", 1)[-1].strip()
+
+
+def _append_email_candidate(candidates: List[Dict[str, str]], seen: Set[str], email: str, source: str, page_url: str = "") -> None:
+    normalized = str(email or "").lower().strip(" .,:;()[]<>")
+    if not is_valid_email(normalized) or normalized in seen:
+        return
+    seen.add(normalized)
+    candidates.append(
+        {
+            "email": normalized,
+            "source": str(source or "page_text"),
+            "page_url": str(page_url or ""),
+            "confidence": "verified_email",
+        }
+    )
+
+
+def _structured_values(payload: Any, parent_key: str = "") -> Tuple[List[str], List[str]]:
+    emails: List[str] = []
+    phones: List[str] = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            lowered_key = str(key or "").lower()
+            nested_emails, nested_phones = _structured_values(value, lowered_key)
+            emails.extend(nested_emails)
+            phones.extend(nested_phones)
+    elif isinstance(payload, list):
+        for item in payload:
+            nested_emails, nested_phones = _structured_values(item, parent_key)
+            emails.extend(nested_emails)
+            phones.extend(nested_phones)
+    elif isinstance(payload, str):
+        if "email" in parent_key:
+            emails.extend(EMAIL_PATTERN.findall(deobfuscate_emails(payload)))
+        if parent_key in {"telephone", "phone", "contactphone", "faxnumber"}:
+            phones.append(payload)
+    return emails, phones
+
+
+def extract_structured_contact_info(html: str) -> Dict[str, List[str]]:
     soup = BeautifulSoup(html, "html.parser")
-    candidates = []
+    emails: List[str] = []
+    phones: List[str] = []
+    seen_emails: Set[str] = set()
+    seen_phones: Set[str] = set()
+
+    for script in soup.find_all("script", attrs={"type": re.compile("ld\\+json", re.IGNORECASE)}):
+        raw = script.string or script.get_text(" ", strip=True)
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        structured_emails, structured_phones = _structured_values(parsed)
+        for email in structured_emails:
+            normalized = str(email or "").lower().strip(" .,:;()[]<>")
+            if is_valid_email(normalized) and normalized not in seen_emails:
+                seen_emails.add(normalized)
+                emails.append(normalized)
+        for phone in structured_phones:
+            normalized_phone = normalize_phone(phone)
+            if normalized_phone and normalized_phone not in seen_phones:
+                seen_phones.add(normalized_phone)
+                phones.append(normalized_phone)
+
+    for node in soup.select("[itemprop='email'], [property='email']"):
+        for value in (node.get("content", ""), node.get("href", ""), node.get_text(" ", strip=True)):
+            for email in EMAIL_PATTERN.findall(deobfuscate_emails(str(value or ""))):
+                normalized = email.lower().strip(" .,:;()[]<>")
+                if is_valid_email(normalized) and normalized not in seen_emails:
+                    seen_emails.add(normalized)
+                    emails.append(normalized)
+
+    for node in soup.select("[itemprop='telephone'], [property='telephone'], [itemprop='phone'], [property='phone']"):
+        for value in (node.get("content", ""), node.get("href", ""), node.get_text(" ", strip=True)):
+            normalized_phone = normalize_phone(str(value or ""))
+            if normalized_phone and normalized_phone not in seen_phones:
+                seen_phones.add(normalized_phone)
+                phones.append(normalized_phone)
+
+    return {"emails": emails, "phones": phones}
+
+
+def extract_email_candidates_from_page(page_url: str, html: str) -> List[Dict[str, str]]:
+    soup = BeautifulSoup(html, "html.parser")
+    candidates: List[Dict[str, str]] = []
+    seen: Set[str] = set()
 
     for anchor in soup.find_all("a", href=True):
         href = (anchor.get("href") or "").strip()
         if href.lower().startswith("mailto:"):
             email = unquote(href.split(":", 1)[1].split("?", 1)[0]).strip(" .,:;()[]<>")
-            if email:
-                candidates.append(email)
+            _append_email_candidate(candidates, seen, email, "mailto", page_url)
+
+    structured = extract_structured_contact_info(html)
+    for email in structured.get("emails", []):
+        _append_email_candidate(candidates, seen, email, "structured_data", page_url)
 
     footer_texts = []
     for selector in ("footer", ".footer", "#footer", "[class*='footer']", "[id*='footer']"):
         for node in soup.select(selector):
             footer_texts.append(node.get_text(" ", strip=True))
+    for candidate in EMAIL_PATTERN.findall(deobfuscate_emails(" ".join(footer_texts))):
+        _append_email_candidate(candidates, seen, candidate, "footer", page_url)
+
     searchable_text = " ".join(
         [
             clean_visible_text(html),
             deobfuscate_emails(soup.get_text(" ", strip=True)),
-            deobfuscate_emails(" ".join(footer_texts)),
             deobfuscate_emails(html),
         ]
     )
-    candidates.extend(EMAIL_PATTERN.findall(searchable_text))
+    for candidate in EMAIL_PATTERN.findall(searchable_text):
+        _append_email_candidate(candidates, seen, candidate, "page_text", page_url)
+    return candidates
 
-    emails = []
-    seen = set()
-    for candidate in candidates:
-        email = candidate.strip(" .,:;()[]<>").lower()
-        if is_valid_email(email) and email not in seen:
+
+def extract_email_candidates_from_html_pages(html_pages: List[Tuple[str, str]]) -> List[Dict[str, str]]:
+    candidates: List[Dict[str, str]] = []
+    seen: Set[str] = set()
+    for page_url, html in html_pages:
+        for candidate in extract_email_candidates_from_page(page_url, html):
+            email = candidate["email"]
+            if email in seen:
+                continue
             seen.add(email)
-            emails.append(email)
-    return emails
+            candidates.append(candidate)
+    return candidates
+
+
+def extract_emails_from_html(html: str) -> List[str]:
+    return [candidate["email"] for candidate in extract_email_candidates_from_page("", html)]
 
 
 def extract_emails_from_page_html(html: str) -> List[str]:
-    soup = BeautifulSoup(html, "html.parser")
-    searchable_chunks = [html, soup.get_text(" ", strip=True)]
-    for selector in ("footer", ".footer", "#footer", "[class*='footer']", "[id*='footer']", "a[href^='mailto:']"):
-        for node in soup.select(selector):
-            searchable_chunks.append(node.get_text(" ", strip=True))
-            href = node.get("href", "")
-            if isinstance(href, str):
-                searchable_chunks.append(href)
-    merged = " ".join(searchable_chunks)
-    emails = extract_emails_from_html(html)
-    for candidate in EMAIL_PATTERN.findall(deobfuscate_emails(merged)):
-        normalized = candidate.lower().strip(" .,:;()[]<>")
-        if is_valid_email(normalized) and normalized not in emails:
-            emails.append(normalized)
-    return emails
+    return extract_emails_from_html(html)
+
+
+def choose_best_email_candidate(html_pages: List[Tuple[str, str]], candidates: List[Dict[str, str]]) -> str:
+    role_priority = ("sales@", "hello@", "info@", "contact@", "support@", "enquiry@", "inquiry@")
+    source_priority = {"mailto": 0, "structured_data": 1, "footer": 2, "page_text": 3}
+    page_roots = {
+        _root_domain_from_domain(urlparse(page_url).netloc)
+        for page_url, _ in html_pages
+        if _root_domain_from_domain(urlparse(page_url).netloc)
+    }
+
+    def rank(candidate: Dict[str, str]) -> Tuple[int, int, int, str]:
+        email = candidate["email"]
+        same_domain = _root_domain_from_domain(_email_domain(email)) in page_roots
+        role_index = next((index for index, prefix in enumerate(role_priority) if email.startswith(prefix)), len(role_priority))
+        role_score = 0 if role_index < len(role_priority) else 1
+        domain_score = 0 if same_domain else 2
+        source_score = source_priority.get(str(candidate.get("source", "")), 9)
+        return (domain_score, role_score, role_index, f"{source_score}:{email}")
+
+    return sorted(candidates, key=rank)[0]["email"] if candidates else ""
 
 
 def extract_first_email_from_html_pages(html_pages: List[Tuple[str, str]]) -> str:
-    role_priority = ("sales@", "hello@", "info@", "contact@", "enquiry@", "inquiry@")
-    emails = []
-    seen = set()
-    for _, html in html_pages:
-        for email in extract_emails_from_page_html(html):
-            if email not in seen:
-                seen.add(email)
-                emails.append(email)
-    for prefix in role_priority:
-        for email in emails:
-            if email.startswith(prefix):
-                return email
-    return emails[0] if emails else ""
+    candidates = extract_email_candidates_from_html_pages(html_pages)
+    return choose_best_email_candidate(html_pages, candidates)
+
+
+def build_likely_business_emails(website: str, observed_email: str) -> List[str]:
+    if observed_email:
+        return []
+    parsed = urlparse(website if "://" in website else f"https://{website}")
+    domain = parsed.netloc.lower().strip()
+    if domain.startswith("www."):
+        domain = domain[4:]
+    if not domain or "." not in domain or any(excluded in domain for excluded in EXCLUDED_DOMAINS):
+        return []
+    return [f"{prefix}@{domain}" for prefix in COMMON_BUSINESS_EMAIL_PREFIXES]
+
+
+def build_likely_business_email(website: str, observed_email: str) -> str:
+    likely_emails = build_likely_business_emails(website, observed_email)
+    return likely_emails[0] if likely_emails else ""
+
+
+def contact_readiness_score(verified_email: str, likely_email: str, phone: str) -> int:
+    if str(verified_email or "").strip():
+        return 100
+    if str(likely_email or "").strip():
+        return 70
+    if str(phone or "").strip():
+        return 40
+    return 0
 
 
 def extract_first_email(text: str) -> str:
@@ -1074,6 +1237,11 @@ def extract_contact_info(website: str, context: Optional[CrawlContext] = None) -
         "/about",
         "/about-us",
         "/team",
+        "/our-team",
+        "/careers",
+        "/career",
+        "/jobs",
+        "/support",
         "/company",
     ]
     contact_links = list(dict.fromkeys(contact_links + [urljoin(website.rstrip("/") + "/", path.lstrip("/")) for path in extra_paths]))
@@ -1106,7 +1274,14 @@ def extract_contact_info(website: str, context: Optional[CrawlContext] = None) -
             contact_page = page_url
 
     combined_text = " ".join(combined_text_parts)
-    email = extract_first_email_from_html_pages(html_pages) or extract_first_email(combined_text)
+    email_candidates = extract_email_candidates_from_html_pages(html_pages)
+    email = choose_best_email_candidate(html_pages, email_candidates) or extract_first_email(combined_text)
+    structured_phones: List[str] = []
+    for _, html in html_pages:
+        structured_phones.extend(extract_structured_contact_info(html).get("phones", []))
+    phone = structured_phones[0] if structured_phones else extract_first_phone(combined_text)
+    likely_emails = build_likely_business_emails(website, email)
+    likely_email = likely_emails[0] if likely_emails else ""
     failure_reason = "FAILED_NO_EMAIL" if not email else ""
     if context is not None and not email:
         context.last_status = "no_email"
@@ -1115,10 +1290,16 @@ def extract_contact_info(website: str, context: Optional[CrawlContext] = None) -
     return {
         "company_name": extract_company_name(homepage_html, website),
         "email": email,
-        "phone": extract_first_phone(combined_text),
+        "phone": phone,
         "address": extract_address(combined_text),
         "contact_page": contact_page,
         "failure_reason": failure_reason,
+        "email_confidence": "verified_email" if email else ("likely_email" if likely_email else "unknown"),
+        "email_candidates": email_candidates,
+        "candidate_emails": [candidate["email"] for candidate in email_candidates],
+        "likely_email": likely_email,
+        "likely_emails": likely_emails,
+        "lead_readiness_score": contact_readiness_score(email, likely_email, phone),
     }
 
 

@@ -69,6 +69,81 @@ def test_scoring_agent_falls_back_when_claude_key_is_missing(monkeypatch: pytest
     assert "retail" in lead["analysis_reason"].lower()
 
 
+def test_contact_extraction_reads_mailto_footer_structured_and_careers(monkeypatch: pytest.MonkeyPatch) -> None:
+    pages = {
+        "https://acme.test": {
+            "status": "SUCCESS",
+            "content": """
+                <html>
+                  <head>
+                    <script type="application/ld+json">
+                      {"@type": "Organization", "email": "support@acme.test", "telephone": "+1 555 123 4567"}
+                    </script>
+                  </head>
+                  <body>
+                    <a href="/careers">Careers</a>
+                    <footer>Footer contact: info@acme.test</footer>
+                  </body>
+                </html>
+            """,
+            "method_used": "fake",
+        },
+        "https://acme.test/careers": {
+            "status": "SUCCESS",
+            "content": '<html><body><a href="mailto:sales@acme.test">Email sales</a></body></html>',
+            "method_used": "fake",
+        },
+    }
+
+    def fake_fetch_page(url: str, context=None):
+        return pages.get(url.rstrip("/"), {"status": "FAILED", "content": "", "failure_reason": "missing"})
+
+    monkeypatch.setattr(legacy_leads, "fetch_page", fake_fetch_page)
+
+    contact = legacy_leads.extract_contact_info("https://acme.test")
+
+    assert contact["email"] == "sales@acme.test"
+    assert contact["phone"] == "+1 555 123 4567"
+    assert contact["email_confidence"] == "verified_email"
+    assert contact["lead_readiness_score"] == 100
+    sources = {item["source"] for item in contact["email_candidates"]}
+    assert {"mailto", "footer", "structured_data"}.issubset(sources)
+
+
+def test_contact_extraction_adds_likely_common_email_when_no_observed_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    pages = {
+        "https://quietco.test": {
+            "status": "SUCCESS",
+            "content": '<html><body><a href="/contact">Contact</a><p>Call us for service.</p></body></html>',
+            "method_used": "fake",
+        },
+        "https://quietco.test/contact": {
+            "status": "SUCCESS",
+            "content": "<html><body><p>We reply during business hours.</p></body></html>",
+            "method_used": "fake",
+        },
+    }
+
+    def fake_fetch_page(url: str, context=None):
+        return pages.get(url.rstrip("/"), {"status": "FAILED", "content": "", "failure_reason": "missing"})
+
+    monkeypatch.setattr(legacy_leads, "fetch_page", fake_fetch_page)
+
+    contact = legacy_leads.extract_contact_info("https://quietco.test")
+
+    assert contact["email"] == ""
+    assert contact["likely_email"] == "info@quietco.test"
+    assert contact["likely_emails"] == [
+        "info@quietco.test",
+        "sales@quietco.test",
+        "contact@quietco.test",
+        "hello@quietco.test",
+        "support@quietco.test",
+    ]
+    assert contact["email_confidence"] == "likely_email"
+    assert contact["lead_readiness_score"] == 70
+
+
 @pytest.mark.anyio
 async def test_api_exports_only_standardized_lead_fields() -> None:
     app = create_fastapi_app(db=build_memory_session())
@@ -110,6 +185,9 @@ async def test_api_exports_only_standardized_lead_fields() -> None:
             "country",
             "verified_email",
             "phone",
+            "likely_email",
+            "email_confidence",
+            "lead_readiness_score",
             "service_reason",
             "industry",
             "score",
@@ -123,6 +201,9 @@ async def test_api_exports_only_standardized_lead_fields() -> None:
         assert row["country"] == ""
         assert row["verified_email"] == "info@acme.test"
         assert row["phone"] == ""
+        assert row["likely_email"] == ""
+        assert row["email_confidence"] == "verified_email"
+        assert row["lead_readiness_score"] == 100
         assert row["service_reason"] == "Strong business fit"
 
 
@@ -268,7 +349,7 @@ async def test_upsert_dedupes_by_company_url_when_email_is_blank() -> None:
 
 
 @pytest.mark.anyio
-async def test_same_domain_generic_email_is_kept_with_low_confidence() -> None:
+async def test_same_domain_generic_email_is_kept_with_verified_confidence() -> None:
     db = build_memory_session()
     tenant = TenantContext(tenant_id="tenant-email-generic")
     saved = await LeadService(db).upsert_lead(
@@ -282,7 +363,8 @@ async def test_same_domain_generic_email_is_kept_with_low_confidence() -> None:
 
     assert saved.verified_email == "info@company.com"
     assert saved.metadata["email_quality"] == "generic"
-    assert saved.metadata["email_confidence"] == "low"
+    assert saved.metadata["email_confidence"] == "verified_email"
+    assert saved.metadata["lead_readiness_score"] == 100
 
 
 @pytest.mark.anyio
@@ -301,7 +383,8 @@ async def test_same_domain_personal_email_beats_generic() -> None:
 
     assert saved.verified_email == "bilal@alraee.com.sa"
     assert saved.metadata["email_quality"] == "direct"
-    assert saved.metadata["email_confidence"] == "high"
+    assert saved.metadata["email_confidence"] == "verified_email"
+    assert saved.metadata["lead_readiness_score"] == 100
     assert saved.metadata["rejected_emails"] == [
         {"email": "info@alraee.com.sa", "reason": "lower_ranked_same_domain_candidate"}
     ]
@@ -323,6 +406,8 @@ async def test_mismatched_domain_email_is_rejected() -> None:
     assert saved.verified_email == ""
     assert saved.email == ""
     assert saved.metadata["email_quality"] == "missing"
+    assert saved.metadata["email_confidence"] == "unknown"
+    assert saved.metadata["lead_readiness_score"] == 0
     assert saved.metadata["rejected_emails"] == [
         {"email": "info@pacificenergy.com.au", "reason": "domain_mismatch"}
     ]
@@ -345,6 +430,81 @@ async def test_public_email_domain_is_rejected() -> None:
     assert saved.metadata["rejected_emails"] == [
         {"email": "owner@gmail.com", "reason": "public_email_domain"}
     ]
+
+
+@pytest.mark.anyio
+async def test_likely_email_sets_readiness_without_verified_email() -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-likely-email")
+
+    saved = await LeadService(db).upsert_lead(
+        tenant,
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company_url="https://likely.test",
+            metadata={"likely_email": "info@likely.test", "email_confidence": "likely_email"},
+        ),
+    )
+
+    assert saved.verified_email == ""
+    assert saved.email == ""
+    assert saved.metadata["likely_email"] == "info@likely.test"
+    assert saved.metadata["email_quality"] == "likely"
+    assert saved.metadata["email_confidence"] == "likely_email"
+    assert saved.metadata["lead_readiness_score"] == 70
+
+
+@pytest.mark.anyio
+async def test_dashboard_snapshot_reports_contact_audit_counts() -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-contact-audit")
+    service = LeadService(db)
+
+    await service.upsert_lead(
+        tenant,
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company_url="https://ready.test",
+            verified_email="info@ready.test",
+            email="info@ready.test",
+        ),
+    )
+    await service.upsert_lead(
+        tenant,
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company_url="https://phone.test",
+            phone="+923000000000",
+        ),
+    )
+    await service.upsert_lead(
+        tenant,
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company_url="https://likely.test",
+            metadata={"likely_email": "info@likely.test"},
+        ),
+    )
+    await service.upsert_lead(
+        tenant,
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company_url="https://empty.test",
+        ),
+    )
+
+    snapshot = await service.dashboard_snapshot(tenant)
+
+    assert snapshot["lead_count"] == 4
+    assert snapshot["leads_with_website"] == 4
+    assert snapshot["leads_with_phone"] == 1
+    assert snapshot["leads_with_email"] == 1
+    assert snapshot["leads_with_verified_email"] == 1
+    assert snapshot["verified_email_rate"] == 25.0
+    assert snapshot["email_ready_leads"] == 1
+    assert snapshot["likely_email_leads"] == 1
+    assert snapshot["phone_only_leads"] == 1
+    assert snapshot["no_contact_leads"] == 1
 
 
 @pytest.mark.anyio

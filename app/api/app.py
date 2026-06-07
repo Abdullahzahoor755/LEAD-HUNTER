@@ -211,12 +211,22 @@ def _serialize_lead(lead: Lead, include_agency_kit: bool = False) -> Dict[str, A
     metadata = dict(lead.metadata or {})
     contact = metadata.get("contact", {}) if isinstance(metadata.get("contact", {}), dict) else {}
     phone = str(lead.phone or metadata.get("phone", "") or metadata.get("Phone", "") or contact.get("phone", "") or "").strip()
+    likely_email = LeadService.likely_email_from_metadata(metadata)
+    lead_readiness_score = metadata.get("lead_readiness_score")
+    if lead_readiness_score is None:
+        lead_readiness_score = LeadService.lead_readiness_score(lead.verified_email, likely_email, phone)
+    email_confidence = str(metadata.get("email_confidence", "") or "").strip().lower()
+    if not email_confidence:
+        email_confidence = "verified_email" if lead.verified_email else ("likely_email" if likely_email else "unknown")
     outreach_status = str(lead.outreach_status or "").strip().lower()
     payload = {
         "company_url": str(lead.company_url or "").strip(),
         "country": str(lead.country or "").strip(),
         "verified_email": str(lead.verified_email or "").strip().lower(),
         "phone": phone,
+        "likely_email": likely_email,
+        "email_confidence": email_confidence,
+        "lead_readiness_score": int(lead_readiness_score or 0),
         "service_reason": str(lead.service_reason or "").strip(),
         "industry": str(lead.industry or "").strip(),
         "score": int(lead.score or 0),

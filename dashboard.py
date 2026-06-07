@@ -1365,16 +1365,18 @@ def format_outreach_error(error_code: str) -> str:
     return value
 
 
-def contact_readiness_label(verified_email: str, phone: str) -> str:
+def contact_readiness_label(verified_email: str, phone: str, likely_email: str = "") -> str:
     if str(verified_email or "").strip():
         return "Email-ready"
+    if str(likely_email or "").strip():
+        return "Likely email"
     if str(phone or "").strip():
         return "Phone-only"
     return "No contact"
 
 
-def contact_next_action(verified_email: str, phone: str) -> str:
-    if contact_readiness_label(verified_email, phone) == "Phone-only":
+def contact_next_action(verified_email: str, phone: str, likely_email: str = "") -> str:
+    if contact_readiness_label(verified_email, phone, likely_email) == "Phone-only":
         return "Generate WhatsApp Sales Kit"
     return ""
 
@@ -1394,7 +1396,10 @@ STANDARD_LEAD_EXPORT_COLUMNS = [
     "country",
     "verified_email",
     "phone",
+    "likely_email",
+    "email_confidence",
     "contact_readiness",
+    "lead_readiness_score",
     "next_contact_action",
     "service_reason",
     "industry",
@@ -1422,6 +1427,9 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
                 "country": str(item.get("country", "") or "").strip(),
                 "verified_email": str(item.get("verified_email", "") or "").strip().lower(),
                 "phone": str(item.get("phone", "") or "").strip(),
+                "likely_email": str(item.get("likely_email", "") or "").strip().lower(),
+                "email_confidence": str(item.get("email_confidence", "") or "").strip().lower(),
+                "lead_readiness_score": item.get("lead_readiness_score", 0),
                 "service_reason": str(item.get("service_reason", "") or "").strip(),
                 "industry": str(item.get("industry", "") or "").strip(),
                 "score": item.get("score", 0),
@@ -1436,12 +1444,13 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
                 "marketing_campaign_kit": item.get("marketing_campaign_kit", {}) if isinstance(item.get("marketing_campaign_kit", {}), dict) else {},
             }
         )
-        rows[-1]["contact_readiness"] = contact_readiness_label(rows[-1]["verified_email"], rows[-1]["phone"])
-        rows[-1]["next_contact_action"] = contact_next_action(rows[-1]["verified_email"], rows[-1]["phone"])
+        rows[-1]["contact_readiness"] = contact_readiness_label(rows[-1]["verified_email"], rows[-1]["phone"], rows[-1]["likely_email"])
+        rows[-1]["next_contact_action"] = contact_next_action(rows[-1]["verified_email"], rows[-1]["phone"], rows[-1]["likely_email"])
     if not rows:
         return pd.DataFrame(columns=["id", *STANDARD_LEAD_EXPORT_COLUMNS, "agency_kit", "offer_match", "whatsapp_sales_kit", "marketing_campaign_kit"])
     frame = pd.DataFrame(rows)
     frame["score"] = pd.to_numeric(frame.get("score", pd.Series(0, index=frame.index)), errors="coerce").fillna(0)
+    frame["lead_readiness_score"] = pd.to_numeric(frame.get("lead_readiness_score", pd.Series(0, index=frame.index)), errors="coerce").fillna(0).astype(int)
     frame["followup_count"] = pd.to_numeric(frame.get("followup_count", pd.Series(0, index=frame.index)), errors="coerce").fillna(0).astype(int)
     for column in STANDARD_LEAD_EXPORT_COLUMNS:
         if column not in frame.columns:
@@ -1722,6 +1731,14 @@ def render_generation_status_card(snapshot: Dict[str, Any]) -> None:
     ]
     cards = "".join(render_metric_card(label, value, hint) for label, value, hint in metrics)
     st.markdown(f'<div class="page-section"><div class="metric-card-grid">{cards}</div></div>', unsafe_allow_html=True)
+    contact_metrics = [
+        ("Email-ready Leads", str(int(snapshot.get("email_ready_leads", 0) or 0)), "Verified business email"),
+        ("Phone-only Leads", str(int(snapshot.get("phone_only_leads", 0) or 0)), "WhatsApp or call first"),
+        ("No-contact Leads", str(int(snapshot.get("no_contact_leads", 0) or 0)), "Needs enrichment"),
+        ("Verified email rate", f"{float(snapshot.get('verified_email_rate', 0) or 0):.1f}%", "Ready for outreach"),
+    ]
+    contact_cards = "".join(render_metric_card(label, value, hint) for label, value, hint in contact_metrics)
+    st.markdown(f'<div class="page-section"><div class="metric-card-grid">{contact_cards}</div></div>', unsafe_allow_html=True)
 
 
 def render_dashboard_page(frame: pd.DataFrame, snapshot: Dict[str, Any]) -> None:
