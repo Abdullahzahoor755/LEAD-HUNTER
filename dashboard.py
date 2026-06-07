@@ -146,6 +146,17 @@ def extract_auth_role(auth: Dict[str, Any], include_token: bool = True) -> str:
 
 def normalize_auth_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     auth = dict(payload or {}) if isinstance(payload, dict) else {}
+    token = str(auth.get("token") or auth.get("auth_token") or "").strip()
+    if token:
+        auth["token"] = token
+        try:
+            token_payload = decode_jwt_token(token)
+        except Exception:
+            token_payload = {}
+        for key in ("tenant_id", "tenant_slug", "user_id", "email", "role", "plan"):
+            value = token_payload.get(key)
+            if value:
+                auth.setdefault(key, value)
     role = extract_auth_role(auth)
     if role:
         auth["role"] = role
@@ -154,6 +165,79 @@ def normalize_auth_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         auth.setdefault("plan", plan)
         auth.setdefault("subscription_plan", plan)
     return auth
+
+
+def query_param_value(params: Any, key: str) -> str:
+    try:
+        value = params.get(key, "")
+    except Exception:
+        return ""
+    if isinstance(value, list):
+        return str(value[0] if value else "")
+    return str(value or "")
+
+
+def current_query_params() -> Dict[str, Any]:
+    try:
+        return dict(getattr(st, "query_params"))
+    except Exception:
+        try:
+            return dict(st.experimental_get_query_params())
+        except Exception:
+            return {}
+
+
+def clear_google_auth_query_params() -> None:
+    try:
+        st.query_params.clear()
+        return
+    except Exception:
+        pass
+    try:
+        st.experimental_set_query_params()
+    except Exception:
+        return
+
+
+def consume_google_auth_redirect() -> None:
+    params = current_query_params()
+    status = query_param_value(params, "google_auth").strip().lower()
+    if not status:
+        return
+    if status == "success":
+        token = query_param_value(params, "auth_token").strip()
+        if token:
+            st.session_state["auth"] = normalize_auth_payload({"token": token})
+            st.session_state["latest_subscription"] = {}
+            st.session_state["plan_onboarding_seen"] = ""
+            clear_google_auth_query_params()
+            st.rerun()
+            return
+        st.session_state["google_auth_error"] = "Google sign in did not return a session token."
+    elif status == "error":
+        st.session_state["google_auth_error"] = query_param_value(params, "message") or "Google sign in failed safely."
+    clear_google_auth_query_params()
+
+
+def start_google_auth_flow() -> None:
+    try:
+        response = api_request("GET", "/auth/google/start")
+        payload = response.json()
+    except Exception as error:
+        st.error(f"Google sign in failed safely: {error}")
+        return
+    if not response.is_success:
+        st.error(str(payload.get("detail", "Google sign in is not configured.")))
+        return
+    authorization_url = str(payload.get("authorization_url", "") or "").strip()
+    if not authorization_url:
+        st.error("Google sign in did not return an authorization URL.")
+        return
+    st.markdown(f'<meta http-equiv="refresh" content="0; url={html.escape(authorization_url)}">', unsafe_allow_html=True)
+    if hasattr(st, "link_button"):
+        st.link_button("Open Google Sign In", authorization_url, use_container_width=True)
+    else:
+        st.markdown(f'<a href="{html.escape(authorization_url)}">Open Google Sign In</a>', unsafe_allow_html=True)
 
 
 def render_landing_styles() -> None:
@@ -1209,6 +1293,7 @@ def render_empty_state(title: str, message: str, action_label: str | None = None
 
 
 def require_login() -> TenantContext | None:
+    consume_google_auth_redirect()
     auth = st.session_state.get("auth", {})
     if auth.get("tenant_id"):
         return TenantContext(
@@ -1261,6 +1346,9 @@ def require_login() -> TenantContext | None:
 
     with auth_col:
         st.markdown('<div class="auth-card"><h2>Access your workspace</h2><p>Create a Free workspace or log into an existing tenant.</p>', unsafe_allow_html=True)
+        google_error = str(st.session_state.pop("google_auth_error", "") or "").strip()
+        if google_error:
+            st.error(google_error)
         login_tab, signup_tab = st.tabs(["Login", "Create Free Account"])
         with login_tab:
             with st.form("admin_login"):
@@ -1268,6 +1356,8 @@ def require_login() -> TenantContext | None:
                 email = st.text_input("Email", value="", placeholder="you@company.com")
                 password = st.text_input("Password", value="", type="password", placeholder="Enter your password")
                 submitted = st.form_submit_button("Login", use_container_width=True)
+            if st.button("Continue with Google", key="google_login_button", use_container_width=True):
+                start_google_auth_flow()
             if submitted:
                 try:
                     response = api_request(
@@ -1297,6 +1387,8 @@ def require_login() -> TenantContext | None:
                 signup_full_name = st.text_input("Your Name", value="", placeholder="Your name")
                 signup_password = st.text_input("Password", value="", type="password", placeholder="Enter your password")
                 signup_submitted = st.form_submit_button("Start Free", use_container_width=True)
+            if st.button("Sign up with Google", key="google_signup_button", use_container_width=True):
+                start_google_auth_flow()
             if signup_submitted:
                 tenant_id = signup_tenant.strip()
                 tenant_name = signup_name.strip() or tenant_id

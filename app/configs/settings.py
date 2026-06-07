@@ -54,6 +54,9 @@ class Settings:
     google_oauth_client_id: str = Field(default="", alias="GOOGLE_OAUTH_CLIENT_ID")
     google_oauth_client_secret: str = Field(default="", alias="GOOGLE_OAUTH_CLIENT_SECRET")
     google_oauth_redirect_uri: str = Field(default="", alias="GOOGLE_OAUTH_REDIRECT_URI")
+    google_auth_client_id: str = Field(default="", alias="GOOGLE_AUTH_CLIENT_ID")
+    google_auth_client_secret: str = Field(default="", alias="GOOGLE_AUTH_CLIENT_SECRET")
+    google_auth_redirect_uri: str = Field(default="", alias="GOOGLE_AUTH_REDIRECT_URI")
     frontend_base_url: str = dataclass_field(
         default_factory=lambda: os.getenv("FRONTEND_BASE_URL", os.getenv("APP_FRONTEND_URL", ""))
     )

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict
+import re
+import secrets
+from typing import Any, Dict, Sequence
 
 from app.core.auth import create_jwt_token, decode_jwt_token, get_plan_limits, hash_password, normalize_subscription_plan, verify_password
 from app.core.models import Tenant, TenantContext, User
@@ -89,6 +91,62 @@ class AuthService:
             raise AuthenticationError("Tenant does not exist.")
         return self._build_auth_result(tenant, user)
 
+    async def google_login_or_signup(
+        self,
+        email: str,
+        full_name: str = "",
+        google_sub: str = "",
+        picture: str = "",
+        email_verified: bool = False,
+    ) -> AuthResult:
+        normalized_email = str(email or "").strip().lower()
+        if not normalized_email or "@" not in normalized_email:
+            raise AuthenticationError("Google account did not return a valid email.")
+        if not email_verified:
+            raise AuthenticationError("Google email is not verified.")
+
+        existing = await self._find_user_by_email_globally(normalized_email)
+        if existing is not None:
+            tenant, user = existing
+            if user.status.lower() != "active":
+                raise AuthenticationError("User account is not active.")
+            metadata = dict(user.metadata or {})
+            metadata["google_auth"] = {
+                "sub": str(google_sub or metadata.get("google_sub", "") or ""),
+                "email_verified": True,
+                **({"picture": picture} if picture else {}),
+            }
+            user.metadata = metadata
+            await maybe_await(self.db.for_tenant(TenantContext(tenant_id=user.tenant_id)).save("users", user))
+            return self._build_auth_result(tenant, user)
+
+        tenant_id, slug = await self._unique_google_tenant_identity(normalized_email)
+        display_name = full_name.strip() or normalized_email.split("@", 1)[0].replace(".", " ").replace("-", " ").title()
+        tenant = await self.tenant_service.create_tenant(
+            tenant_id=tenant_id,
+            name=display_name or tenant_id,
+            slug=slug,
+            subscription_plan="Free",
+        )
+        user = User(
+            tenant_id=tenant.tenant_id,
+            email=normalized_email,
+            full_name=display_name,
+            password_hash=hash_password(secrets.token_urlsafe(32)),
+            role="member",
+            status="active",
+            metadata={
+                "subscription_plan": "Free",
+                "google_auth": {
+                    "sub": str(google_sub or ""),
+                    "email_verified": True,
+                    **({"picture": picture} if picture else {}),
+                },
+            },
+        )
+        await maybe_await(self.db.for_tenant(TenantContext(tenant_id=tenant.tenant_id)).save("users", user))
+        return self._build_auth_result(tenant, user)
+
     async def authenticate_token(self, token: str) -> Dict[str, Any]:
         payload = decode_jwt_token(token)
         tenant_id = require_tenant_id(str(payload.get("tenant_id", "")))
@@ -118,6 +176,35 @@ class AuthService:
     async def _find_tenant(self, tenant_id: str) -> Tenant | None:
         tenants = await maybe_await(self.db.tenants.list(tenant_id))
         return tenants[0] if tenants else None
+
+    async def _find_user_by_email_globally(self, email: str) -> tuple[Tenant, User] | None:
+        normalized = str(email or "").strip().lower()
+        users: Sequence[User] = await maybe_await(self.db.users.list_all())
+        matches = [user for user in users if user.email.strip().lower() == normalized]
+        matches.sort(key=lambda user: (0 if str(user.role or "").strip().lower() == "admin" else 1, user.created_at))
+        for user in matches:
+            tenant = await self._find_tenant(user.tenant_id)
+            if tenant is not None:
+                return tenant, user
+        return None
+
+    async def _unique_google_tenant_identity(self, email: str) -> tuple[str, str]:
+        prefix = str(email or "").split("@", 1)[0]
+        base = self._slugify(prefix) or "google-user"
+        tenants: Sequence[Tenant] = await maybe_await(self.db.tenants.list_all())
+        existing_ids = {str(tenant.tenant_id or "").strip().lower() for tenant in tenants}
+        existing_slugs = {str(tenant.slug or "").strip().lower() for tenant in tenants}
+        candidate = base
+        suffix = 1
+        while candidate.lower() in existing_ids or candidate.lower() in existing_slugs:
+            candidate = f"{base}-{suffix}"
+            suffix += 1
+        return candidate, candidate
+
+    def _slugify(self, value: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower())
+        slug = re.sub(r"-+", "-", slug).strip("-")
+        return slug[:48].strip("-")
 
     async def _enforce_team_member_limit(self, tenant: Tenant) -> None:
         limits = get_plan_limits(tenant.subscription_plan or "Starter")

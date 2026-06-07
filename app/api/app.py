@@ -47,9 +47,11 @@ GMAIL_OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.readonly",
 ]
+GOOGLE_AUTH_SCOPES = ["openid", "email", "profile"]
 GOOGLE_OAUTH_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_GMAIL_PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
+GOOGLE_AUTH_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 
 
 @dataclass(slots=True)
@@ -283,6 +285,32 @@ def _google_oauth_redirect_uri() -> str:
     return _settings_value("google_oauth_redirect_uri", "GOOGLE_OAUTH_REDIRECT_URI")
 
 
+def _google_auth_client_id() -> str:
+    return _settings_value("google_auth_client_id", "GOOGLE_AUTH_CLIENT_ID")
+
+
+def _google_auth_client_secret() -> str:
+    return _settings_value("google_auth_client_secret", "GOOGLE_AUTH_CLIENT_SECRET")
+
+
+def _google_auth_redirect_uri() -> str:
+    return _settings_value("google_auth_redirect_uri", "GOOGLE_AUTH_REDIRECT_URI")
+
+
+def _google_auth_frontend_redirect_url(success: bool, message: str, token: str = "") -> str:
+    base_url = _settings_value("frontend_base_url", "APP_FRONTEND_URL").rstrip("/")
+    params = {"google_auth": "success" if success else "error", "message": message}
+    if token:
+        params["auth_token"] = token
+    if base_url:
+        return f"{base_url}/?{urlencode(params)}"
+    return f"/?{urlencode(params)}"
+
+
+def _google_auth_redirect_response(success: bool, message: str, token: str = "") -> RedirectResponse:
+    return RedirectResponse(_google_auth_frontend_redirect_url(success, message, token), status_code=302)
+
+
 def _gmail_frontend_redirect_url(success: bool, message: str) -> str:
     status = "success" if success else "error"
     base_url = _settings_value("frontend_base_url", "APP_FRONTEND_URL").rstrip("/")
@@ -317,6 +345,25 @@ def _build_gmail_authorization_url(redirect_uri: str, state: str) -> str:
     return f"{GOOGLE_OAUTH_AUTH_URL}?{urlencode(params)}"
 
 
+def _google_auth_redirect_uri_for_request(request: Request) -> str:
+    configured = _google_auth_redirect_uri()
+    if configured:
+        return configured
+    return str(request.url_for("google_auth_callback"))
+
+
+def _build_google_auth_authorization_url(redirect_uri: str, state: str) -> str:
+    params = {
+        "client_id": _google_auth_client_id(),
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": " ".join(GOOGLE_AUTH_SCOPES),
+        "state": state,
+        "prompt": "select_account",
+    }
+    return f"{GOOGLE_OAUTH_AUTH_URL}?{urlencode(params)}"
+
+
 async def exchange_gmail_oauth_code(code: str, redirect_uri: str) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=20) as client:
         response = await client.post(
@@ -330,6 +377,34 @@ async def exchange_gmail_oauth_code(code: str, redirect_uri: str) -> Dict[str, A
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
+        response.raise_for_status()
+        data = response.json()
+    return dict(data)
+
+
+async def exchange_google_auth_code(code: str, redirect_uri: str) -> Dict[str, Any]:
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(
+            GOOGLE_OAUTH_TOKEN_URL,
+            data={
+                "code": code,
+                "client_id": _google_auth_client_id(),
+                "client_secret": _google_auth_client_secret(),
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        response.raise_for_status()
+        data = response.json()
+    return dict(data)
+
+
+async def fetch_google_auth_profile(access_token: str) -> Dict[str, Any]:
+    if not access_token:
+        return {}
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(GOOGLE_AUTH_USERINFO_URL, headers={"Authorization": f"Bearer {access_token}"})
         response.raise_for_status()
         data = response.json()
     return dict(data)
@@ -440,6 +515,62 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
             return asdict(result)
         except ValueError as error:
             raise HTTPException(status_code=401, detail=str(error)) from error
+
+    @app.get("/auth/google/start")
+    async def google_auth_start(request: Request) -> Dict[str, Any]:
+        if not _google_auth_client_id() or not _google_auth_client_secret():
+            raise HTTPException(status_code=400, detail="Google authentication is not configured.")
+        state = create_jwt_token(
+            {
+                "purpose": "google_auth",
+                "nonce": os.urandom(16).hex(),
+            },
+            expires_in_seconds=600,
+        )
+        redirect_uri = _google_auth_redirect_uri_for_request(request)
+        authorization_url = _build_google_auth_authorization_url(redirect_uri, state)
+        return {"authorization_url": authorization_url}
+
+    @app.get("/auth/google/callback")
+    async def google_auth_callback(
+        request: Request,
+        code: str = "",
+        state: str = "",
+        error: str = "",
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> RedirectResponse:
+        if error:
+            return _google_auth_redirect_response(False, "Google sign in was cancelled.")
+        if not code or not state:
+            return _google_auth_redirect_response(False, "Google sign in response was incomplete.")
+        try:
+            state_payload = decode_jwt_token(state)
+            if state_payload.get("purpose") != "google_auth":
+                raise ValueError("Invalid OAuth state.")
+        except ValueError:
+            return _google_auth_redirect_response(False, "Google sign in state was invalid or expired.")
+
+        redirect_uri = _google_auth_redirect_uri_for_request(request)
+        try:
+            token_data = await exchange_google_auth_code(code, redirect_uri)
+            profile = await fetch_google_auth_profile(str(token_data.get("access_token", "") or ""))
+            email = str(profile.get("email", "") or "").strip().lower()
+            verified_raw = profile.get("email_verified", False)
+            email_verified = bool(verified_raw) if isinstance(verified_raw, bool) else str(verified_raw).strip().lower() == "true"
+            if not email_verified:
+                return _google_auth_redirect_response(False, "Google email is not verified.")
+            result = await AuthService(db_session).google_login_or_signup(
+                email=email,
+                full_name=str(profile.get("name", "") or "").strip(),
+                google_sub=str(profile.get("sub", "") or "").strip(),
+                picture=str(profile.get("picture", "") or "").strip(),
+                email_verified=email_verified,
+            )
+        except ValueError as auth_error:
+            return _google_auth_redirect_response(False, str(auth_error))
+        except Exception:
+            return _google_auth_redirect_response(False, "Google sign in failed safely.")
+        return _google_auth_redirect_response(True, "Google sign in successful.", result.token)
 
     @app.get("/leads")
     async def list_leads(

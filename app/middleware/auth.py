@@ -20,6 +20,8 @@ class AuthTenantMiddleware(BaseHTTPMiddleware):
             "/readyz",
             "/signup",
             "/login",
+            "/auth/google/start",
+            "/auth/google/callback",
             "/settings/providers/gmail/oauth/callback",
         }
         if request.url.path in public_paths:
