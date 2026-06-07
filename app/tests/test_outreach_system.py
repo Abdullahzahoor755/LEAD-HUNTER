@@ -159,6 +159,40 @@ async def test_successful_send_persists_status_sent_sent(monkeypatch: pytest.Mon
 
 
 @pytest.mark.anyio
+async def test_retry_failed_verified_email_lead_clears_old_error_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-retry-success")
+    db.tenants.save(_tenant_record(tenant.tenant_id))
+    await _configure_gmail(db, tenant, monkeypatch)
+    lead = db.for_tenant(tenant).save(
+        "leads",
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company="Retry Co",
+            company_url="https://retry.test",
+            email="lead@retry.test",
+            verified_email="lead@retry.test",
+            status="failed",
+            outreach_status="failed",
+            metadata={"outreach_error": "gmail_send_failed", "outreach_error_at": "2026-01-01T00:00:00+00:00"},
+        ),
+    )
+    fake_provider = _FakeGmailProvider()
+    monkeypatch.setattr(outreach_module, "build_provider_registry", lambda: {"gmail": fake_provider})
+
+    result = await OutreachAgent().run(AgentRequest(tenant=tenant, payload={}), db)
+
+    saved = db.for_tenant(tenant).get("leads", lead.id)
+    assert result["sent_messages"] == 1
+    assert result["failed_messages"] == 0
+    assert fake_provider.sent[0][1] == "lead@retry.test"
+    assert saved.status == "sent"
+    assert saved.outreach_status == "sent"
+    assert "outreach_error" not in saved.metadata
+    assert "outreach_error_at" not in saved.metadata
+
+
+@pytest.mark.anyio
 async def test_failed_send_persists_failed_status_and_email_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
     db = build_memory_session()
     tenant = TenantContext(tenant_id="tenant-send-failed")
@@ -304,14 +338,25 @@ async def test_outreach_preflight_counts_sendable_no_email_and_unknown_failures(
         )
         db.for_tenant(tenant).save(
             "leads",
-            Lead(tenant_id=tenant.tenant_id, company="Failed", status="failed", outreach_status="failed", metadata={}),
+            Lead(
+                tenant_id=tenant.tenant_id,
+                company="Failed",
+                email="lead@failed.test",
+                verified_email="lead@failed.test",
+                status="failed",
+                outreach_status="failed",
+                metadata={},
+            ),
         )
         response = await client.get("/outreach/preflight", headers=_auth_headers(token))
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["gmail_connected"] is False
-    assert payload["sendable_count"] == 1
+    assert payload["pending_sendable_count"] == 1
+    assert payload["retryable_failed_count"] == 1
+    assert payload["sendable_count"] == 2
+    assert payload["already_sent_count"] == 0
     assert payload["no_email_count"] == 1
     assert payload["failed_without_reason_count"] == 1
     assert payload["sample_errors"][0]["outreach_error"] == "unknown_outreach_failure"
@@ -352,6 +397,8 @@ async def test_outreach_preflight_with_zero_verified_email_leads() -> None:
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["pending_sendable_count"] == 0
+    assert payload["retryable_failed_count"] == 0
     assert payload["sendable_count"] == 0
     assert payload["no_email_count"] == 1
     assert payload["gmail_connected"] is False
@@ -393,8 +440,94 @@ async def test_outreach_preflight_with_one_verified_email_lead() -> None:
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["pending_sendable_count"] == 1
+    assert payload["retryable_failed_count"] == 0
     assert payload["sendable_count"] == 1
     assert payload["no_email_count"] == 0
+
+
+@pytest.mark.anyio
+async def test_outreach_preflight_counts_retryable_failed_and_matches_selected_leads() -> None:
+    db = build_memory_session()
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        signup = await client.post(
+            "/signup",
+            json={
+                "tenant_id": "tenant-preflight-retryable",
+                "tenant_name": "Tenant Preflight Retryable",
+                "tenant_slug": "tenant-preflight-retryable",
+                "email": "owner@preflight-retryable.test",
+                "password": "secret123",
+                "full_name": "Owner",
+                "plan": "Pro",
+            },
+        )
+        token = signup.json()["token"]
+        tenant = TenantContext(tenant_id="tenant-preflight-retryable")
+        pending = db.for_tenant(tenant).save(
+            "leads",
+            Lead(
+                tenant_id=tenant.tenant_id,
+                company="Pending",
+                email="lead@pending.test",
+                verified_email="lead@pending.test",
+                status="pending",
+                outreach_status="pending",
+            ),
+        )
+        failed = db.for_tenant(tenant).save(
+            "leads",
+            Lead(
+                tenant_id=tenant.tenant_id,
+                company="Failed",
+                email="lead@failed-retry.test",
+                verified_email="lead@failed-retry.test",
+                status="failed",
+                outreach_status="failed",
+                metadata={"outreach_error": "gmail_send_failed"},
+            ),
+        )
+        db.for_tenant(tenant).save(
+            "leads",
+            Lead(
+                tenant_id=tenant.tenant_id,
+                company="Sent",
+                email="lead@sent.test",
+                verified_email="lead@sent.test",
+                status="sent",
+                outreach_status="sent",
+            ),
+        )
+        db.for_tenant(tenant).save(
+            "leads",
+            Lead(tenant_id=tenant.tenant_id, company="No Email", status="pending", outreach_status="pending"),
+        )
+        db.for_tenant(tenant).save(
+            "leads",
+            Lead(
+                tenant_id=tenant.tenant_id,
+                company="Sending",
+                email="lead@sending.test",
+                verified_email="lead@sending.test",
+                status="sending",
+                outreach_status="sending",
+            ),
+        )
+        response = await client.get("/outreach/preflight", headers=_auth_headers(token))
+
+    selected = await OutreachService(db).list_pending_outreach_leads(tenant, set())
+    selected_ids = {lead.id for lead in selected}
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["pending_sendable_count"] == 1
+    assert payload["retryable_failed_count"] == 1
+    assert payload["sendable_count"] == 2
+    assert payload["already_sent_count"] == 1
+    assert payload["no_email_count"] == 1
+    assert selected_ids == {pending.id, failed.id}
 
 
 @pytest.mark.anyio

@@ -1551,7 +1551,10 @@ def load_outreach_preflight() -> Dict[str, Any]:
     if not response.is_success:
         return {
             "gmail_connected": False,
+            "pending_sendable_count": 0,
+            "retryable_failed_count": 0,
             "sendable_count": 0,
+            "already_sent_count": 0,
             "no_email_count": 0,
             "failed_without_reason_count": 0,
             "sample_errors": [],
@@ -1560,15 +1563,26 @@ def load_outreach_preflight() -> Dict[str, Any]:
 
 
 def render_outreach_preflight_summary(preflight: Dict[str, Any]) -> None:
+    pending_sendable_count = int(preflight.get("pending_sendable_count", 0) or 0)
+    retryable_failed_count = int(preflight.get("retryable_failed_count", 0) or 0)
     sendable_count = int(preflight.get("sendable_count", 0) or 0)
+    already_sent_count = int(preflight.get("already_sent_count", 0) or 0)
     no_email_count = int(preflight.get("no_email_count", 0) or 0)
     gmail_connected = bool(preflight.get("gmail_connected"))
     st.caption(
         "Sendable email leads: "
         f"{sendable_count} | "
+        f"Pending: {pending_sendable_count} | "
+        f"Retryable failed: {retryable_failed_count} | "
+        f"Already sent: {already_sent_count} | "
         f"Leads without verified email: {no_email_count} | "
         f"Gmail connected: {str(gmail_connected).lower()}"
     )
+    if pending_sendable_count == 0 and retryable_failed_count > 0:
+        st.info(
+            f"No new pending email leads found, but {retryable_failed_count} failed verified-email leads can be retried. "
+            "Send Outreach will include retryable failed leads automatically."
+        )
 
 
 def render_add_test_lead_form() -> None:

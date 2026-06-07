@@ -79,6 +79,14 @@ class OutreachAgent(BaseAgent):
         provider = build_provider_registry()["gmail"]
         account = ProviderAccount(tenant_id=request.tenant.tenant_id, **credentials)
         for lead in pending_leads:
+            await service.prepare_outreach_attempt(request.tenant, lead)
+            lead.status = "pending"
+            lead.outreach_status = "pending"
+            lead.metadata = {
+                key: value
+                for key, value in dict(lead.metadata or {}).items()
+                if key not in {"outreach_error", "outreach_error_at"}
+            }
             audit_log(
                 LOGGER,
                 logging.INFO,

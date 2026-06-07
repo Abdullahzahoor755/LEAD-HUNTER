@@ -634,27 +634,7 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
             for item in os.getenv("EMAIL_OPTOUT_DOMAINS", "").split(",")
             if item.strip()
         }
-        leads = await LeadService(db_session).list_leads(tenant)
-        sendable_statuses = {"pending", "draft", "no_content_scraped", "blocked_site", "slow_site", "js_site"}
-        sendable_count = 0
-        no_email_count = 0
-        failed_without_reason_count = 0
-        sample_errors: list[Dict[str, str]] = []
-        for lead in leads:
-            status = str(lead.status or lead.outreach_status or "").strip().lower()
-            outreach_status = str(lead.outreach_status or "").strip().lower()
-            metadata = dict(lead.metadata or {})
-            recipient = service.outreach_recipient(lead)
-            if status in sendable_statuses:
-                if not recipient:
-                    no_email_count += 1
-                elif service._email_domain(recipient) not in blocked_domains:
-                    sendable_count += 1
-            raw_error = str(metadata.get("outreach_error", "") or "").strip()
-            if (status == "failed" or outreach_status == "failed") and not raw_error:
-                failed_without_reason_count += 1
-                if len(sample_errors) < 5:
-                    sample_errors.append({"lead_id": lead.id, "outreach_error": "unknown_outreach_failure"})
+        counts = await service.outreach_preflight_counts(tenant, blocked_domains)
 
         try:
             credentials = await ProviderCredentialService(db_session).get_gmail_credentials(tenant)
@@ -663,10 +643,7 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         gmail_connected = bool(credentials.get("refresh_token") or credentials.get("access_token")) if credentials else False
         return {
             "gmail_connected": gmail_connected,
-            "sendable_count": sendable_count,
-            "no_email_count": no_email_count,
-            "failed_without_reason_count": failed_without_reason_count,
-            "sample_errors": sample_errors,
+            **counts,
         }
 
     @app.get("/jobs/recent")

@@ -19,6 +19,11 @@ LOGGER = logging.getLogger(__name__)
 
 
 class OutreachService:
+    PENDING_SENDABLE_STATUSES = {"pending", "draft", "no_content_scraped", "blocked_site", "slow_site", "js_site"}
+    RETRYABLE_FAILED_STATUSES = {"failed"}
+    IN_PROGRESS_STATUSES = {"running", "sending"}
+    SENT_STATUSES = {"sent"}
+
     def __init__(self, db: DatabaseSession | AsyncDatabaseSession) -> None:
         self.db = db
         self.lead_service = LeadService(db)
@@ -37,10 +42,9 @@ class OutreachService:
             raise ValueError("Tenant Gmail credentials are not configured.")
         account = ProviderAccount(tenant_id=tenant.tenant_id, **credentials)
         provider = build_provider_registry()["gmail"]
-        sendable_statuses = {"pending", "draft", "no_content_scraped", "blocked_site", "slow_site", "js_site"}
         for lead in await maybe_await(scoped_db.list("leads")):
             recipient = self.outreach_recipient(lead)
-            if lead.status.lower() not in sendable_statuses or not recipient:
+            if self.outreach_lead_bucket(lead, set()) not in {"pending_sendable", "retryable_failed"}:
                 continue
             try:
                 generated = await email_service.generate_outreach_email(tenant, lead)
@@ -93,19 +97,48 @@ class OutreachService:
         return {"sent_messages": sent, "failed_messages": failed}
 
     async def list_pending_outreach_leads(self, tenant: TenantContext, blocked_domains: set[str]) -> List[Lead]:
-        sendable_statuses = {"pending", "draft", "no_content_scraped", "blocked_site", "slow_site", "js_site"}
         leads = await self.lead_service.list_leads(tenant)
         return [
             lead
             for lead in leads
-            if lead.status.lower() in sendable_statuses
-            and lead.status.lower() != "unsubscribed"
-            and self.outreach_recipient(lead)
-            and self._email_domain(self.outreach_recipient(lead)) not in blocked_domains
+            if self.outreach_lead_bucket(lead, blocked_domains) in {"pending_sendable", "retryable_failed"}
         ]
 
     async def list_outreach_attempt_leads(self, tenant: TenantContext, blocked_domains: set[str]) -> List[Lead]:
         return await self.list_pending_outreach_leads(tenant, blocked_domains)
+
+    async def outreach_preflight_counts(self, tenant: TenantContext, blocked_domains: set[str]) -> Dict[str, Any]:
+        leads = await self.lead_service.list_leads(tenant)
+        counts: Dict[str, Any] = {
+            "pending_sendable_count": 0,
+            "retryable_failed_count": 0,
+            "sendable_count": 0,
+            "already_sent_count": 0,
+            "no_email_count": 0,
+            "failed_without_reason_count": 0,
+            "sample_errors": [],
+        }
+        for lead in leads:
+            bucket = self.outreach_lead_bucket(lead, blocked_domains)
+            if bucket == "pending_sendable":
+                counts["pending_sendable_count"] += 1
+            elif bucket == "retryable_failed":
+                counts["retryable_failed_count"] += 1
+            elif bucket == "already_sent":
+                counts["already_sent_count"] += 1
+            elif bucket == "no_email":
+                counts["no_email_count"] += 1
+
+            statuses = self._lead_status_values(lead)
+            metadata = dict(lead.metadata or {})
+            raw_error = str(metadata.get("outreach_error", "") or "").strip()
+            if "failed" in statuses and not raw_error:
+                counts["failed_without_reason_count"] += 1
+                if len(counts["sample_errors"]) < 5:
+                    counts["sample_errors"].append({"lead_id": lead.id, "outreach_error": "unknown_outreach_failure"})
+
+        counts["sendable_count"] = counts["pending_sendable_count"] + counts["retryable_failed_count"]
+        return counts
 
     async def mark_outreach_result(
         self,
@@ -152,7 +185,7 @@ class OutreachService:
         existing.status = status
         existing.outreach_status = status
         existing.metadata = metadata
-        await self.lead_service.upsert_lead(tenant, existing)
+        await maybe_await(scoped.save("leads", existing))
         audit_log(
             LOGGER,
             logging.INFO,
@@ -192,6 +225,20 @@ class OutreachService:
             message_id,
             thread_id,
         )
+
+    async def prepare_outreach_attempt(self, tenant: TenantContext, lead: Lead) -> None:
+        scoped = self.db.for_tenant(tenant)
+        existing = await maybe_await(scoped.get("leads", lead.id))
+        if existing is None:
+            return
+        metadata = dict(existing.metadata or {})
+        metadata.pop("outreach_error", None)
+        metadata.pop("outreach_error_at", None)
+        metadata["OutreachAttemptStartedAt"] = datetime.now(timezone.utc).isoformat()
+        existing.metadata = metadata
+        existing.status = "pending"
+        existing.outreach_status = "pending"
+        await maybe_await(scoped.save("leads", existing))
 
     async def list_followup_candidates(self, tenant: TenantContext, blocked_domains: set[str], now_value: datetime, parse_datetime) -> List[Dict[str, Any]]:
         scoped = self.db.for_tenant(tenant)
@@ -390,6 +437,34 @@ class OutreachService:
         if not local.strip() or "." not in domain or domain.startswith(".") or domain.endswith("."):
             return ""
         return email
+
+    def _lead_status_values(self, lead: Lead) -> set[str]:
+        values = {
+            str(lead.status or "").strip().lower(),
+            str(lead.outreach_status or "").strip().lower(),
+        }
+        values = {value for value in values if value}
+        return values or {"pending"}
+
+    def outreach_lead_bucket(self, lead: Lead, blocked_domains: set[str]) -> str:
+        statuses = self._lead_status_values(lead)
+        recipient = self.outreach_recipient(lead)
+
+        if statuses & self.SENT_STATUSES:
+            return "already_sent"
+        if statuses & self.IN_PROGRESS_STATUSES:
+            return "in_progress"
+        if not recipient:
+            if statuses & (self.PENDING_SENDABLE_STATUSES | self.RETRYABLE_FAILED_STATUSES):
+                return "no_email"
+            return "excluded"
+        if self._email_domain(recipient) in blocked_domains:
+            return "blocked"
+        if statuses & self.RETRYABLE_FAILED_STATUSES:
+            return "retryable_failed"
+        if statuses & self.PENDING_SENDABLE_STATUSES:
+            return "pending_sendable"
+        return "excluded"
 
     def safe_failure_reason(self, reason: str) -> str:
         return safe_outreach_error(reason)
