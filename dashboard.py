@@ -279,7 +279,10 @@ def render_landing_styles() -> None:
         [data-testid="stHeader"] {
             background: transparent;
         }
-        [data-testid="stToolbar"] {visibility: hidden; height: 0;}
+        [data-testid="stToolbar"] {
+            opacity: 0;
+            pointer-events: none;
+        }
         [data-testid="stDecoration"] {display: none;}
         [data-testid="stSidebar"] {
             background: #f8fafc;
@@ -1192,9 +1195,19 @@ def render_landing_styles() -> None:
             opacity: 1 !important;
         }
         [data-testid="stSidebarCollapsedControl"],
-        [data-testid="collapsedControl"],
-        button[kind="header"] {
+        [data-testid="collapsedControl"] {
+            display: block !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            pointer-events: auto !important;
             z-index: 1000000 !important;
+        }
+        [data-testid="stSidebarCollapsedControl"] button,
+        [data-testid="collapsedControl"] button {
+            display: inline-flex !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            pointer-events: auto !important;
         }
         img {
             max-width: 100%;
