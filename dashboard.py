@@ -1743,7 +1743,7 @@ def parse_api_json(response: httpx.Response, fallback_reason: str = "INVALID_API
             "error": str(error),
         }
         st.error("Backend returned invalid JSON. Check logs for details.")
-        return {"status": "FAILED", "reason": fallback_reason}
+        return {"status": "FAILED", "reason": fallback_reason, "detail": raw_text[:500] or fallback_reason}
 
 
 def enqueue_job(agent_name: str, payload: Dict[str, Any] | None = None, *, run_now: bool = True) -> None:
@@ -2939,7 +2939,7 @@ def render_email_crm_page(tenant: TenantContext, page: str) -> None:
     normalized_page = str(page or "Generate Leads")
     if normalized_page == "Generate Leads":
         snapshot_response = api_request("GET", "/dashboard/snapshot")
-        snapshot = snapshot_response.json()
+        snapshot = parse_api_json(snapshot_response, "DASHBOARD_SNAPSHOT_FAILED")
         if not snapshot_response.is_success:
             st.error(str(snapshot.get("detail", "Could not load dashboard snapshot.")))
             return
@@ -2993,7 +2993,7 @@ def render_dashboard_home(tenant: TenantContext) -> None:
         "A simple overview of leads, outreach, replies, and active jobs.",
     )
     snapshot_response = api_request("GET", "/dashboard/snapshot")
-    snapshot = snapshot_response.json()
+    snapshot = parse_api_json(snapshot_response, "DASHBOARD_SNAPSHOT_FAILED")
     if not snapshot_response.is_success:
         st.error(str(snapshot.get("detail", "Could not load dashboard snapshot.")))
         return

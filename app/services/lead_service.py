@@ -488,7 +488,7 @@ class LeadService:
         return {
             "tenant_id": tenant.tenant_id,
             "lead_count": total_leads,
-            "sent_count": len([lead for lead in leads if lead.status.lower() == "sent"]),
+            "sent_count": len([lead for lead in leads if str(lead.status or "").strip().lower() == "sent"]),
             "reply_count": len(replies),
             "job_count": len(jobs),
             "leads_with_website": leads_with_website,
