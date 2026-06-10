@@ -42,8 +42,8 @@ class Settings:
     billing_plan_prices: Dict[str, int] = dataclass_field(
         default_factory=lambda: {
             "Starter": int(os.getenv("BILLING_PRICE_STARTER_PKR", "5000")),
-            "Pro": int(os.getenv("BILLING_PRICE_PRO_PKR", "15000")),
-            "Agency": int(os.getenv("BILLING_PRICE_AGENCY_PKR", "45000")),
+            "Pro": int(os.getenv("BILLING_PRICE_PRO_USD", "20")),
+            "Agency": int(os.getenv("BILLING_PRICE_AGENCY_USD", "30")),
         }
     )
     billing_nayapay_name: str = dataclass_field(default_factory=lambda: os.getenv("BILLING_NAYAPAY_NAME", "Muhammad Abdullah"))

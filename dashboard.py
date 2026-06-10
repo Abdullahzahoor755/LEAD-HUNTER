@@ -34,7 +34,7 @@ NO_VERIFIED_EMAIL_LEADS_MESSAGE = "No verified email leads found. Email outreach
 st.set_page_config(page_title=PRODUCT_NAME, page_icon="🔎", layout="wide", initial_sidebar_state="expanded")
 
 API_BASE_URL = os.getenv("APP_API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
-DEFAULT_PAYMENT_QR_PATH = "/home/mabdullah/Downloads/WhatsApp Image 2026-05-25 at 12.39.52 AM.jpeg"
+DEFAULT_PAYMENT_QR_PATH = str(Path(__file__).resolve().parent / "assets" / "payment-qr.jpeg")
 
 
 def bootstrap_dashboard_state() -> None:
@@ -68,7 +68,7 @@ PLAN_DETAILS: Dict[str, Dict[str, Any]] = {
         ],
     },
     "Pro": {
-        "price": "$15/month",
+        "price": "$20/month",
         "usage": "500+ leads/month + outreach automation",
         "limit": "500+ leads/month",
         "features": [
@@ -82,7 +82,7 @@ PLAN_DETAILS: Dict[str, Dict[str, Any]] = {
         ],
     },
     "Agency": {
-        "price": "$20/month",
+        "price": "$30/month",
         "usage": "1000+ leads/month + agency workflow",
         "limit": "1000+ leads/month",
         "features": [
@@ -282,12 +282,10 @@ def render_landing_styles() -> None:
         [data-testid="stToolbar"] {visibility: hidden; height: 0;}
         [data-testid="stDecoration"] {display: none;}
         [data-testid="stSidebar"] {
-            display: block !important;
-            visibility: visible !important;
-            transform: none !important;
             background: #f8fafc;
             border-right: 1px solid #e6f4f8;
             min-width: 18rem;
+            max-width: min(18rem, 86vw);
         }
         [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
             padding: 1.1rem .9rem;
@@ -1193,22 +1191,129 @@ def render_landing_styles() -> None:
             color: var(--text-secondary) !important;
             opacity: 1 !important;
         }
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="collapsedControl"],
+        button[kind="header"] {
+            z-index: 1000000 !important;
+        }
+        img {
+            max-width: 100%;
+            height: auto;
+        }
+        .stDataFrame,
+        [data-testid="stDataFrame"],
+        [data-testid="stTable"] {
+            max-width: 100%;
+            overflow-x: auto;
+        }
+        [data-testid="column"] {
+            min-width: 0;
+        }
         @media (max-width: 980px) {
-            .block-container {padding-left: 1rem; padding-right: 1rem; padding-top: 1.4rem;}
+            .block-container {
+                max-width: 100%;
+                padding-left: .85rem;
+                padding-right: .85rem;
+                padding-top: 4rem;
+            }
+            [data-testid="stSidebar"] {
+                min-width: 0 !important;
+                max-width: 86vw !important;
+            }
+            [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+                padding: .9rem .75rem 1.25rem;
+            }
             .top-hero {
                 display: block;
                 max-height: none;
                 min-height: 0;
+                padding: .85rem;
+            }
+            .hero-title,
+            .page-title,
+            .main-title,
+            .admin-title {
+                font-size: 1.35rem;
+                line-height: 1.2;
+                overflow-wrap: anywhere;
+            }
+            .hero-headline {
+                font-size: 2rem;
+                line-height: 1.08;
+            }
+            .landing-shell {
+                border-radius: 8px;
+                padding: 1rem;
+                overflow: visible;
+            }
+            .auth-card {
+                max-width: none;
+                margin-left: 0;
+                margin-top: 1rem;
+                padding: 1rem;
+            }
+            .pricing-strip,
+            .feature-grid,
+            .section-grid,
+            .metric-card-grid,
+            .mini-card-grid,
+            .hero-metrics,
+            .locked-grid,
+            .marketing-grid {
+                grid-template-columns: 1fr !important;
             }
             .summary-stack {
                 align-items: flex-start;
                 text-align: left;
                 margin-top: .85rem;
+                max-width: 100%;
             }
-            .hero-metrics,
-            .locked-grid,
-            .marketing-grid {
-                grid-template-columns: 1fr;
+            .summary-stack span,
+            .metric-value,
+            .hero-metric .value {
+                white-space: normal;
+                overflow-wrap: anywhere;
+            }
+            .stButton > button,
+            [data-testid="stFormSubmitButton"] button,
+            .stDownloadButton button,
+            .stLinkButton a {
+                min-height: 2.65rem;
+                white-space: normal;
+            }
+        }
+        @media (max-width: 640px) {
+            .block-container {
+                padding-left: .65rem;
+                padding-right: .65rem;
+            }
+            .page-card-inner,
+            .panel-card,
+            .feature-card,
+            .plan-card,
+            .metric-card,
+            .soft-card,
+            .marketing-card,
+            .day-card {
+                padding: .8rem !important;
+            }
+            .hero-headline {
+                font-size: 1.65rem;
+            }
+            .landing-tagline,
+            .hero-note,
+            .page-subtitle,
+            .section-caption {
+                font-size: .95rem;
+                line-height: 1.5;
+            }
+            .cta-row {
+                gap: .5rem;
+            }
+            .cta-pill {
+                width: 100%;
+                justify-content: center;
+                padding: .68rem .8rem;
             }
         }
         </style>
@@ -1326,8 +1431,8 @@ def require_login() -> TenantContext | None:
             """
             <div class="pricing-strip">
                 <div class="price-chip"><strong>Free</strong>Fallback mode and CSV-ready lead workflow</div>
-                <div class="price-chip"><strong>Pro</strong>Outreach, Gmail, and reply workflow</div>
-                <div class="price-chip"><strong>Agency</strong>Higher limits and agency operating tools</div>
+                <div class="price-chip"><strong>Pro - $20/month</strong>Outreach, Gmail, and reply workflow</div>
+                <div class="price-chip"><strong>Agency - $30/month</strong>Higher limits and agency operating tools</div>
             </div>
             """,
             unsafe_allow_html=True,
