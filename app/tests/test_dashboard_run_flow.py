@@ -164,6 +164,50 @@ def test_sidebar_hides_admin_for_member_role(monkeypatch) -> None:
     assert "Admin" not in module_options
 
 
+def test_sidebar_uses_clean_production_navigation(monkeypatch) -> None:
+    import dashboard
+
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["auth"] = {"tenant_id": "tenant-user", "email": "member@example.test", "role": "member"}
+    fake_st.session_state["sidebar_module"] = "Email CRM"
+    monkeypatch.setattr(dashboard, "st", fake_st)
+    monkeypatch.setattr(dashboard, "st_autorefresh", None)
+
+    dashboard.render_sidebar_navigation()
+
+    module_options = [options for label, options, _ in fake_st.sidebar.radio_calls if label == "Module"][0]
+    crm_options = [options for label, options, _ in fake_st.sidebar.radio_calls if label == "Email CRM"][0]
+
+    assert module_options == ["Dashboard", "Email CRM", "Marketing Kit", "Settings"]
+    assert crm_options == ["Generate Leads", "Live Leads", "Outreach", "Replies"]
+
+    removed_items = {
+        "AI Agency Kit",
+        "Offer Matchmaker",
+        "WhatsApp Sales Kit",
+        "Followups",
+        "CSV Export",
+        "Generate from Lead",
+        "Ad Copy",
+        "Reels Script",
+        "7-Day Content Calendar",
+        "Mini Agency Mode",
+    }
+    assert removed_items.isdisjoint(module_options)
+    assert removed_items.isdisjoint(crm_options)
+
+    marketing_st = _FakeStreamlit()
+    marketing_st.session_state["auth"] = fake_st.session_state["auth"]
+    marketing_st.session_state["sidebar_module"] = "Marketing Kit"
+    monkeypatch.setattr(dashboard, "st", marketing_st)
+
+    dashboard.render_sidebar_navigation()
+
+    marketing_options = [options for label, options, _ in marketing_st.sidebar.radio_calls if label == "Marketing Kit"][0]
+    assert marketing_options == ["Campaign Generator"]
+    assert removed_items.isdisjoint(marketing_options)
+
+
 def test_auth_role_supports_common_response_shapes(monkeypatch) -> None:
     import dashboard
 

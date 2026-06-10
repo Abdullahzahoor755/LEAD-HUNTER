@@ -1,5 +1,6 @@
 venv/
 __pycache__/
+**/__pycache__/
 .env
 token.json
 credentials.json
@@ -7,7 +8,11 @@ service_account.json
 *.pyc
 .pytest_cache/
 *.csv
+*.sqlite
+*.db
 logs/
+screenshots/
+tmp/
 
 # Local/dev editor and scratch files
 .codex/

@@ -1868,7 +1868,7 @@ def render_dashboard_page(frame: pd.DataFrame, snapshot: Dict[str, Any]) -> None
     st.markdown("</div></div>", unsafe_allow_html=True)
 
 
-def render_table_page(frame: pd.DataFrame, columns: List[str]) -> None:
+def render_table_page(frame: pd.DataFrame, columns: List[str], *, show_csv_export: bool = True) -> None:
     st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">Lead Table</div>', unsafe_allow_html=True)
     st.markdown('<div class="section-caption">Review saved leads and export the visible columns.</div>', unsafe_allow_html=True)
@@ -1882,14 +1882,126 @@ def render_table_page(frame: pd.DataFrame, columns: List[str]) -> None:
     else:
         st.caption(f"Showing {len(export_frame)} lead rows.")
         st.dataframe(export_frame, use_container_width=True, hide_index=True)
-        csv_frame = sanitize_csv_frame(export_frame)
-        st.download_button(
-            "Export Visible Leads CSV",
-            csv_frame.to_csv(index=False).encode("utf-8"),
-            file_name="leads.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+        if show_csv_export:
+            csv_frame = sanitize_csv_frame(export_frame)
+            st.download_button(
+                "Export Visible Leads CSV",
+                csv_frame.to_csv(index=False).encode("utf-8"),
+                file_name="leads.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def render_lead_action_cta(row: pd.Series) -> None:
+    readiness = str(row.get("contact_readiness", "") or "").strip()
+    outreach_status = str(row.get("outreach_status", "") or "pending").strip().replace("_", " ").title()
+    if readiness == "Phone-only":
+        st.info("Phone-only lead: generate a WhatsApp Sales Kit for the first touch.")
+    elif readiness in {"Email-ready", "Likely email"}:
+        st.success(f"Email-ready lead. Outreach status: {outreach_status or 'Pending'}")
+    else:
+        st.warning("No contact found yet. Enrich this lead before outreach.")
+
+
+def render_lead_action_buttons(row: pd.Series, index: int) -> None:
+    lead_id = str(row.get("id", "") or "").strip()
+    if not lead_id:
+        st.warning("This lead is missing an ID, so advanced tools cannot save outputs yet.")
+        return
+
+    agency_kit = row.get("agency_kit", {}) if isinstance(row.get("agency_kit", {}), dict) else {}
+    offer_match = row.get("offer_match", {}) if isinstance(row.get("offer_match", {}), dict) else {}
+    whatsapp_sales_kit = row.get("whatsapp_sales_kit", {}) if isinstance(row.get("whatsapp_sales_kit", {}), dict) else {}
+
+    cols = st.columns(3)
+    with cols[0]:
+        if st.button("AI Agency Kit", key=f"live_agency_kit_{lead_id}_{index}", use_container_width=True):
+            response = api_request("POST", f"/leads/{lead_id}/agency-kit", json={})
+            payload = parse_api_json(response)
+            if response.is_success:
+                st.success("Agency Kit generated.")
+                st.rerun()
+            else:
+                st.error(str(payload.get("detail", "Could not generate Agency Kit.")))
+    with cols[1]:
+        if st.button("Offer Matchmaker", key=f"live_offer_match_{lead_id}_{index}", use_container_width=True):
+            response = api_request("POST", f"/leads/{lead_id}/offer-match", json={})
+            payload = parse_api_json(response)
+            if response.is_success:
+                remember_offer_match(payload.get("offer_match", {}), str(row.get("company_url", "") or lead_id))
+                st.success("Offer match generated.")
+                st.rerun()
+            else:
+                st.error(str(payload.get("detail", "Could not generate offer match.")))
+    with cols[2]:
+        if st.button("WhatsApp Sales Kit", key=f"live_whatsapp_sales_{lead_id}_{index}", use_container_width=True):
+            response = api_request("POST", f"/leads/{lead_id}/whatsapp-sales-kit", json={})
+            payload = parse_api_json(response)
+            if response.is_success:
+                remember_whatsapp_sales_kit(payload.get("whatsapp_sales_kit", {}), str(row.get("company_url", "") or lead_id))
+                st.success("WhatsApp Sales Kit generated.")
+                st.rerun()
+            else:
+                st.error(str(payload.get("detail", "Could not generate WhatsApp Sales Kit.")))
+
+    with st.expander("AI Agency Kit details", expanded=bool(agency_kit)):
+        render_agency_kit_details(agency_kit)
+    with st.expander("Offer Matchmaker details", expanded=bool(offer_match)):
+        render_offer_match_output(offer_match)
+    with st.expander("WhatsApp Sales Kit details", expanded=bool(whatsapp_sales_kit)):
+        render_whatsapp_sales_output(whatsapp_sales_kit)
+
+
+def render_live_leads_page(frame: pd.DataFrame) -> None:
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
+    header_cols = st.columns([2, 1])
+    with header_cols[0]:
+        st.markdown('<div class="section-title">Live Leads</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-caption">Review saved leads, export CSV, and open advanced tools inside each lead.</div>', unsafe_allow_html=True)
+    with header_cols[1]:
+        if frame.empty:
+            st.button("Export CSV", use_container_width=True, disabled=True)
+        else:
+            csv_frame = sanitize_csv_frame(frame[[column for column in STANDARD_LEAD_EXPORT_COLUMNS if column in frame.columns]])
+            st.download_button(
+                "Export CSV",
+                csv_frame.to_csv(index=False).encode("utf-8"),
+                file_name="leads.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+    if frame.empty:
+        render_empty_state("No leads yet", "Enter a niche and country to generate your first leads.", "Generate Leads")
+        st.markdown("</div></div>", unsafe_allow_html=True)
+        return
+
+    st.caption(f"Showing {len(frame)} lead rows.")
+    summary_columns = [
+        "company_url",
+        "country",
+        "verified_email",
+        "phone",
+        "contact_readiness",
+        "lead_readiness_score",
+        "outreach_status",
+        "reply_status",
+    ]
+    render_table_page(frame, summary_columns, show_csv_export=False)
+
+    for index, row in frame.head(50).iterrows():
+        company = str(row.get("company_url", "") or row.get("verified_email", "") or row.get("phone", "") or "Lead").strip()
+        readiness = str(row.get("contact_readiness", "") or "").strip()
+        score = int(row.get("lead_readiness_score", 0) or 0)
+        with st.expander(f"{company[:90]} - {readiness or 'Lead'} - Score {score}", expanded=False):
+            render_lead_action_cta(row)
+            lead_cols = st.columns(3)
+            lead_cols[0].write(f"Email: {row.get('verified_email', '') or row.get('likely_email', '') or 'Not found'}")
+            lead_cols[1].write(f"Phone: {row.get('phone', '') or 'Not found'}")
+            lead_cols[2].write(f"Industry: {row.get('industry', '') or 'Unknown'}")
+            st.write(f"Service reason: {row.get('service_reason', '') or 'Not available'}")
+            render_lead_action_buttons(row, int(index) if isinstance(index, int) else 0)
     st.markdown("</div></div>", unsafe_allow_html=True)
 
 
@@ -2703,17 +2815,7 @@ def render_email_crm_page(tenant: TenantContext, page: str) -> None:
         return
     if normalized_page == "Live Leads":
         frame = filtered_frame(load_dashboard_data(tenant))
-        render_table_page(frame, STANDARD_LEAD_EXPORT_COLUMNS)
-        return
-    if normalized_page == "AI Agency Kit":
-        frame = load_dashboard_data(tenant)
-        render_agency_kit_panel(frame)
-        return
-    if normalized_page == "Offer Matchmaker":
-        render_offer_matchmaker_page(tenant)
-        return
-    if normalized_page == "WhatsApp Sales Kit":
-        render_whatsapp_sales_kit_page(tenant)
+        render_live_leads_page(frame)
         return
     if normalized_page == "Outreach":
         render_pro_action_page(
@@ -2722,6 +2824,19 @@ def render_email_crm_page(tenant: TenantContext, page: str) -> None:
             "Send Outreach - Pro",
             "outreach",
         )
+        with st.expander("Advanced: Followups", expanded=False):
+            render_pro_action_page(
+                "Followups",
+                "Run scheduled follow-up messages for leads that have not replied yet.",
+                "Run Followups - Pro",
+                "followup",
+            )
+            frame = load_dashboard_data(tenant)
+            render_table_page(
+                frame,
+                ["company_url", "country", "industry", "outreach_status", "followup_count", "reply_status", "last_reply_at"],
+                show_csv_export=False,
+            )
         return
     if normalized_page == "Replies":
         render_pro_action_page(
@@ -2734,21 +2849,28 @@ def render_email_crm_page(tenant: TenantContext, page: str) -> None:
         frame = load_dashboard_data(tenant)
         render_table_page(frame, ["company_url", "verified_email", "country", "reply_status", "last_reply_at"])
         return
-    if normalized_page == "Followups":
-        render_pro_action_page(
-            "Followups",
-            "Run scheduled follow-up messages for leads that have not replied yet.",
-            "Run Followups - Pro",
-            "followup",
-        )
-        frame = load_dashboard_data(tenant)
-        render_table_page(frame, ["company_url", "country", "industry", "outreach_status", "followup_count", "reply_status", "last_reply_at"])
-        return
-    if normalized_page == "CSV Export":
-        frame = load_dashboard_data(tenant)
-        render_table_page(frame, STANDARD_LEAD_EXPORT_COLUMNS)
-        return
     st.info("Choose an Email CRM tool from the sidebar.")
+
+
+def render_dashboard_home(tenant: TenantContext) -> None:
+    render_module_header(
+        "Dashboard",
+        "A simple overview of leads, outreach, replies, and active jobs.",
+    )
+    snapshot_response = api_request("GET", "/dashboard/snapshot")
+    snapshot = snapshot_response.json()
+    if not snapshot_response.is_success:
+        st.error(str(snapshot.get("detail", "Could not load dashboard snapshot.")))
+        return
+    frame = load_dashboard_data(tenant)
+    render_generation_status_card(snapshot)
+    render_dashboard_page(frame, snapshot)
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Main Actions</div>', unsafe_allow_html=True)
+    st.markdown(
+        "Use the sidebar for the five core workflows: generate leads, view leads, send outreach, view replies, or generate a campaign."
+    )
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
 def current_marketing_campaign() -> Dict[str, Any]:
@@ -2826,7 +2948,7 @@ def render_marketing_campaign_output(campaign: Dict[str, Any]) -> None:
 
     calendar = campaign.get("seven_day_content_calendar", []) or []
     if calendar:
-        st.markdown("### 7-Day Calendar")
+        st.markdown("### 7-Day Content Calendar")
         st.dataframe(pd.DataFrame(calendar), use_container_width=True, hide_index=True)
 
     st.markdown(f"**Lead magnet:** {campaign.get('lead_magnet', '')}")
@@ -2900,42 +3022,67 @@ def render_marketing_content_calendar(campaign: Dict[str, Any]) -> None:
     st.markdown("</div></div>", unsafe_allow_html=True)
 
 
-def render_campaign_generator_page() -> None:
+def render_campaign_generator_page(tenant: TenantContext) -> None:
     st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">Campaign Generator</div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-caption">Build a complete fallback campaign from any business or service idea.</div>', unsafe_allow_html=True)
-    with st.form("marketing_campaign_idea_form"):
-        business_idea = st.text_input("Business/service idea", value="", placeholder="e.g. immigration consultancy for Canada visas")
-        col_location, col_audience = st.columns(2)
-        with col_location:
-            target_location = st.text_input("Target location", value="", placeholder="e.g. Dubai, UAE")
-        with col_audience:
-            target_audience = st.text_input("Target audience", value="", placeholder="e.g. working professionals planning to move abroad")
-        campaign_goal = st.text_input("Campaign goal", value="", placeholder="e.g. book consultation calls")
-        submitted = st.form_submit_button("Generate Campaign Kit", use_container_width=True)
-    if submitted:
-        if not business_idea.strip():
-            st.error("Business/service idea is required.")
-        else:
-            response = api_request(
-                "POST",
-                "/marketing/campaign/from-idea",
-                json={
-                    "business_idea": business_idea.strip(),
-                    "target_location": target_location.strip(),
-                    "target_audience": target_audience.strip(),
-                    "campaign_goal": campaign_goal.strip(),
-                },
-            )
-            payload = parse_api_json(response)
-            if response.is_success:
-                campaign = payload.get("marketing_campaign_kit", {})
-                remember_marketing_campaign(campaign, business_idea.strip())
-                st.success("Marketing Campaign Kit generated.")
+    st.markdown('<div class="section-caption">Build one complete campaign: ads, reels, landing page copy, calendar, and optional agency plan.</div>', unsafe_allow_html=True)
+    source_mode = st.radio(
+        "Generate campaign from",
+        ["From Business Idea", "From Existing Lead"],
+        horizontal=True,
+        key="campaign_generator_source_mode",
+    )
+    if source_mode == "From Business Idea":
+        with st.form("marketing_campaign_idea_form"):
+            business_idea = st.text_input("Business/service idea", value="", placeholder="e.g. immigration consultancy for Canada visas")
+            col_location, col_audience = st.columns(2)
+            with col_location:
+                target_location = st.text_input("Target location", value="", placeholder="e.g. Dubai, UAE")
+            with col_audience:
+                target_audience = st.text_input("Target audience", value="", placeholder="e.g. working professionals planning to move abroad")
+            campaign_goal = st.text_input("Campaign goal", value="", placeholder="e.g. book consultation calls")
+            submitted = st.form_submit_button("Generate Campaign Kit", use_container_width=True)
+        if submitted:
+            if not business_idea.strip():
+                st.error("Business/service idea is required.")
             else:
-                st.error(str(payload.get("detail", "Could not generate campaign.")))
+                response = api_request(
+                    "POST",
+                    "/marketing/campaign/from-idea",
+                    json={
+                        "business_idea": business_idea.strip(),
+                        "target_location": target_location.strip(),
+                        "target_audience": target_audience.strip(),
+                        "campaign_goal": campaign_goal.strip(),
+                    },
+                )
+                payload = parse_api_json(response)
+                if response.is_success:
+                    campaign = payload.get("marketing_campaign_kit", {})
+                    remember_marketing_campaign(campaign, business_idea.strip())
+                    st.success("Marketing Campaign Kit generated.")
+                else:
+                    st.error(str(payload.get("detail", "Could not generate campaign.")))
+    else:
+        frame = load_dashboard_data(tenant)
+        labels = lead_picker_options(frame)
+        if not labels:
+            st.info("No leads yet. Generate leads first, then return here to create a campaign from a lead.")
+        else:
+            selected_id = st.selectbox("Choose a lead", list(labels.keys()), key="campaign_generator_lead_id", format_func=lambda item: labels.get(item, item))
+            if st.button("Generate Marketing Kit for Lead", use_container_width=True):
+                response = api_request("POST", f"/marketing/campaign/from-lead/{selected_id}", json={})
+                payload = parse_api_json(response)
+                if response.is_success:
+                    campaign = payload.get("marketing_campaign_kit", {})
+                    remember_marketing_campaign(campaign, labels.get(selected_id, selected_id))
+                    st.success("Marketing Campaign Kit generated and saved to lead metadata.")
+                else:
+                    st.error(str(payload.get("detail", "Could not generate campaign from lead.")))
     st.markdown("</div></div>", unsafe_allow_html=True)
     render_marketing_campaign_output(current_marketing_campaign())
+    with st.expander("Advanced: Mini Agency Mode", expanded=False):
+        render_mini_agency_mode_page()
 
 
 def render_generate_from_lead_page(tenant: TenantContext) -> None:
@@ -3081,7 +3228,7 @@ def render_marketing_campaign_page(tenant: TenantContext, page: str = "Campaign 
     )
     normalized_page = str(page or "Campaign Generator")
     if normalized_page == "Campaign Generator" or normalized_page == "Generate from Business Idea":
-        render_campaign_generator_page()
+        render_campaign_generator_page(tenant)
         return
     if normalized_page == "Generate from Lead":
         render_generate_from_lead_page(tenant)
@@ -3098,7 +3245,7 @@ def render_marketing_campaign_page(tenant: TenantContext, page: str = "Campaign 
     if normalized_page == "Mini Agency Mode":
         render_mini_agency_mode_page()
         return
-    render_campaign_generator_page()
+    render_campaign_generator_page(tenant)
 
 
 def render_sidebar_navigation() -> Dict[str, str]:
@@ -3121,26 +3268,23 @@ def render_sidebar_navigation() -> Dict[str, str]:
     if refresh_enabled and st_autorefresh:
         st_autorefresh(interval=30_000, key="dashboard_refresh")
 
-    modules = ["Email CRM", "Marketing Kit", "Settings"]
+    modules = ["Dashboard", "Email CRM", "Marketing Kit", "Settings"]
     if is_admin_user():
         modules.append("Admin")
     if st.session_state.get("sidebar_module") not in modules:
-        st.session_state["sidebar_module"] = "Email CRM"
+        st.session_state["sidebar_module"] = "Dashboard"
     st.sidebar.markdown("### Modules")
     module = st.sidebar.radio("Module", modules, key="sidebar_module", label_visibility="collapsed")
 
     page = ""
-    if module == "Email CRM":
+    if module == "Dashboard":
+        page = "Dashboard"
+    elif module == "Email CRM":
         crm_pages = [
             "Generate Leads",
             "Live Leads",
-            "AI Agency Kit",
-            "Offer Matchmaker",
-            "WhatsApp Sales Kit",
             "Outreach",
             "Replies",
-            "Followups",
-            "CSV Export",
         ]
         if st.session_state.get("email_crm_page") not in crm_pages:
             st.session_state["email_crm_page"] = "Generate Leads"
@@ -3149,11 +3293,6 @@ def render_sidebar_navigation() -> Dict[str, str]:
     elif module == "Marketing Kit":
         marketing_pages = [
             "Campaign Generator",
-            "Generate from Lead",
-            "Ad Copy",
-            "Reels Script",
-            "7-Day Content Calendar",
-            "Mini Agency Mode",
         ]
         if st.session_state.get("marketing_kit_page") not in marketing_pages:
             st.session_state["marketing_kit_page"] = "Campaign Generator"
@@ -3185,7 +3324,9 @@ def main() -> None:
     module = navigation["module"]
     page = navigation["page"]
 
-    if module == "Email CRM":
+    if module == "Dashboard":
+        render_dashboard_home(tenant)
+    elif module == "Email CRM":
         render_email_crm_page(tenant, page)
     elif module == "Marketing Kit":
         render_marketing_campaign_page(tenant, page)
