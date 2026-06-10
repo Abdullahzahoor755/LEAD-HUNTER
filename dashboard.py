@@ -279,14 +279,12 @@ def render_landing_styles() -> None:
         [data-testid="stHeader"] {
             background: transparent;
         }
-        [data-testid="stToolbar"] {
-            opacity: 0;
-            pointer-events: none;
-        }
         [data-testid="stDecoration"] {display: none;}
         [data-testid="stSidebar"] {
             background: #f8fafc;
             border-right: 1px solid #e6f4f8;
+        }
+        [data-testid="stSidebar"][aria-expanded="true"] {
             min-width: 18rem;
             max-width: min(18rem, 86vw);
         }
@@ -1194,21 +1192,6 @@ def render_landing_styles() -> None:
             color: var(--text-secondary) !important;
             opacity: 1 !important;
         }
-        [data-testid="stSidebarCollapsedControl"],
-        [data-testid="collapsedControl"] {
-            display: block !important;
-            visibility: visible !important;
-            opacity: 1 !important;
-            pointer-events: auto !important;
-            z-index: 1000000 !important;
-        }
-        [data-testid="stSidebarCollapsedControl"] button,
-        [data-testid="collapsedControl"] button {
-            display: inline-flex !important;
-            visibility: visible !important;
-            opacity: 1 !important;
-            pointer-events: auto !important;
-        }
         img {
             max-width: 100%;
             height: auto;
@@ -1227,9 +1210,9 @@ def render_landing_styles() -> None:
                 max-width: 100%;
                 padding-left: .85rem;
                 padding-right: .85rem;
-                padding-top: 4rem;
+                padding-top: 2.8rem;
             }
-            [data-testid="stSidebar"] {
+            [data-testid="stSidebar"][aria-expanded="true"] {
                 min-width: 0 !important;
                 max-width: 86vw !important;
             }
