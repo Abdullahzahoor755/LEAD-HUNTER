@@ -280,6 +280,40 @@ def render_landing_styles() -> None:
             background: transparent;
         }
         [data-testid="stDecoration"] {display: none;}
+        [data-testid="stHeader"] button[aria-label*="sidebar" i],
+        [data-testid="stHeader"] button[title*="sidebar" i],
+        button[aria-label*="sidebar" i],
+        button[title*="sidebar" i],
+        [data-testid="collapsedControl"] button,
+        [data-testid="stSidebarCollapsedControl"] button {
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            pointer-events: auto !important;
+            width: 2.4rem !important;
+            height: 2.4rem !important;
+            min-width: 2.4rem !important;
+            min-height: 2.4rem !important;
+            margin: .35rem !important;
+            border: 1px solid #bdebf7 !important;
+            border-radius: 8px !important;
+            background: #ffffff !important;
+            color: #0b2545 !important;
+            box-shadow: 0 8px 18px rgba(11, 37, 69, .10) !important;
+            z-index: 1000001 !important;
+        }
+        [data-testid="stHeader"] button[aria-label*="sidebar" i] svg,
+        [data-testid="stHeader"] button[title*="sidebar" i] svg,
+        button[aria-label*="sidebar" i] svg,
+        button[title*="sidebar" i] svg,
+        [data-testid="collapsedControl"] button svg,
+        [data-testid="stSidebarCollapsedControl"] button svg {
+            color: #0b2545 !important;
+            fill: currentColor !important;
+            stroke: currentColor !important;
+        }
         [data-testid="stSidebar"] {
             background: #f8fafc;
             border-right: 1px solid #e6f4f8;
