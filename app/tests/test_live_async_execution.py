@@ -83,6 +83,9 @@ class AsyncRepositoryAdapter:
     async def get_any(self, item_id: str):
         return self.repo.get_any(item_id)
 
+    async def list_all(self):
+        return self.repo.list_all()
+
 
 @pytest.mark.anyio
 async def test_live_async_execution_path_persists_across_restart(monkeypatch: pytest.MonkeyPatch) -> None:

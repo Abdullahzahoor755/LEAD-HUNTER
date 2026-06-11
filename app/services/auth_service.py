@@ -53,7 +53,7 @@ class AuthService:
         email: str,
         password: str,
         full_name: str,
-        plan: str = "Starter",
+        plan: str = "Free",
         role: str = "owner",
     ) -> AuthResult:
         organization_name = str(tenant_name or tenant_slug or tenant_id or "").strip()
@@ -64,13 +64,14 @@ class AuthService:
             tenant_name=organization_name,
             tenant_slug=tenant_slug,
         )
-        resolved_tenant_id = uuid4().hex
+        resolved_tenant_id = tenant_id.strip() if (tenant_id and tenant_id.strip()) else uuid4().hex
         normalized_slug = await self._unique_public_signup_slug(organization_name)
+        normalized_plan = normalize_subscription_plan(plan)
         tenant = await self.tenant_service.create_tenant(
             tenant_id=resolved_tenant_id,
             name=organization_name,
             slug=normalized_slug,
-            subscription_plan="Free",
+            subscription_plan=normalized_plan,
         )
         await self._enforce_team_member_limit(tenant)
         user = User(
@@ -78,9 +79,9 @@ class AuthService:
             email=email.strip().lower(),
             full_name=full_name.strip(),
             password_hash=hash_password(password),
-            role="owner",
+            role=role,
             status="active",
-            metadata={"subscription_plan": "Free"},
+            metadata={"subscription_plan": normalized_plan},
         )
         await maybe_await(self.db.for_tenant(TenantContext(tenant_id=resolved_tenant_id)).save("users", user))
         return self._build_auth_result(tenant, user)

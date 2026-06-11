@@ -82,12 +82,12 @@ class ApiApplication:
 
     async def signup(
         self,
-        tenant_id: str = "",
         tenant_name: str,
-        tenant_slug: str = "",
         email: str,
         password: str,
         full_name: str,
+        tenant_id: str = "",
+        tenant_slug: str = "",
         plan: str = "Free",
     ) -> Dict[str, Any]:
         result = await AuthService(self.db).signup(
