@@ -3815,8 +3815,7 @@ def render_sidebar_navigation() -> Dict[str, str]:
         if logo_uri
         else ""
     )
-    st.sidebar.markdown(
-        f"""
+    sidebar_brand_html = f"""
         <div class="sidebar-brand">
             <div class="sidebar-brand-row">
                 {logo_markup}
@@ -3824,9 +3823,8 @@ def render_sidebar_navigation() -> Dict[str, str]:
             </div>
             <div class="sidebar-brand-subtitle">AI Agency Operating System</div>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    """
+    st.sidebar.markdown(sidebar_brand_html, unsafe_allow_html=True)
     st.sidebar.markdown(
         """
         <div class="sidebar-demo">
