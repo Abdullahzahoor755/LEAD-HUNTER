@@ -40,6 +40,13 @@ DEFAULT_PAYMENT_QR_PATH = str(Path(__file__).resolve().parent / "assets" / "paym
 LOGO_PATH = Path(__file__).resolve().parent / "assets" / "logo.png"
 
 
+def resolve_local_asset_path(path_value: str) -> Path:
+    path = Path(str(path_value or "").strip())
+    if path.is_absolute():
+        return path
+    return Path(__file__).resolve().parent / path
+
+
 def asset_data_uri(path: Path) -> str:
     if not path.exists():
         return ""
@@ -3023,19 +3030,22 @@ def render_subscribe_section() -> None:
                 st.caption(f"Leads: {limits.get('monthly_leads', 0)} | Emails: {limits.get('monthly_emails', 0)}")
                 st.caption("Agency Mode included" if item.get("agency_mode") else "Standard workspace")
     payment = plans_payload.get("payment", {}) or {}
+    plan_names = [str(item.get("name", "")) for item in plan_items if str(item.get("name", "")) and str(item.get("name", "")) != "Free"] or ["Starter", "Pro", "Agency"]
+    default_index = plan_names.index(default_plan) if default_plan in plan_names else 0
+    selected_plan = st.selectbox("Selected plan", plan_names, index=default_index, key="billing_selected_plan")
+    selected_plan_item = next((item for item in plan_items if str(item.get("name", "")) == selected_plan), {})
     with st.expander("Payment instructions", expanded=True):
         st.write(f"Method: {payment.get('method_name', '')}")
         st.write(f"Account title: {payment.get('account_title', '')}")
         st.write(f"Account number: {payment.get('account_number', '')}")
-        qr_path = str(payment.get("qr_path") or DEFAULT_PAYMENT_QR_PATH)
-        if Path(qr_path).exists():
-            st.image(qr_path, caption="Payment QR", width=180)
+        st.write(f"Amount: {plans_payload.get('currency', 'PKR')} {selected_plan_item.get('price', 0)}")
+        qr_path = str(selected_plan_item.get("qr_path") or payment.get("qr_path") or DEFAULT_PAYMENT_QR_PATH)
+        local_qr_path = resolve_local_asset_path(qr_path)
+        if local_qr_path.exists():
+            st.image(str(local_qr_path), caption=f"{selected_plan} Payment QR", width=220)
         elif payment.get("qr_code_url"):
             st.image(str(payment.get("qr_code_url")), caption="Payment QR", width=180)
-    plan_names = [str(item.get("name", "")) for item in plan_items if str(item.get("name", "")) and str(item.get("name", "")) != "Free"] or ["Starter", "Pro", "Agency"]
-    default_index = plan_names.index(default_plan) if default_plan in plan_names else 0
     with st.form("payment_request_form"):
-        plan = st.selectbox("Selected plan", plan_names, index=default_index)
         full_name = st.text_input("Full name", value=str(st.session_state.get("auth", {}).get("full_name", "") or ""))
         phone = st.text_input("Phone / WhatsApp number")
         payment_method = st.selectbox("Payment method", ["JazzCash", "EasyPaisa", "Bank Transfer", "Nayapay", "Sadapay", "Other"])
@@ -3052,7 +3062,7 @@ def render_subscribe_section() -> None:
         data = {
             "full_name": full_name.strip(),
             "phone_number": phone.strip(),
-            "selected_plan": plan,
+            "selected_plan": selected_plan,
             "payment_method": payment_method,
             "transaction_reference": transaction_reference.strip(),
             "user_note": note.strip(),

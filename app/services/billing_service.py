@@ -28,10 +28,19 @@ class BillingService:
                     "price": int(settings.billing_plan_prices.get(name, 0) or 0),
                     "limits": limits,
                     "agency_mode": name == "Agency",
+                    "qr_path": self.plan_qr_path(name),
                 }
                 for name, limits in PLAN_LIMITS.items()
             ],
         }
+
+    def plan_qr_path(self, plan: str) -> str:
+        normalized = str(plan or "").strip().lower()
+        if normalized == "pro":
+            return settings.payment_qr_path_pro
+        if normalized == "agency":
+            return settings.payment_qr_path_agency
+        return settings.payment_qr_path
 
     def payment_instructions(self) -> Dict[str, str]:
         return {

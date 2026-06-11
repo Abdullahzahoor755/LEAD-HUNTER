@@ -36,6 +36,10 @@ def test_env_example_payment_placeholders_only() -> None:
     assert "PAYMENT_ACCOUNT_TITLE=replace_me" in source
     assert "PAYMENT_ACCOUNT_NUMBER=replace_me" in source
     assert "PAYMENT_QR_PATH=assets/payment-qr.jpeg" in source
+    assert "PAYMENT_QR_PATH_PRO=assets/payment-qr-pro.jpeg" in source
+    assert "PAYMENT_QR_PATH_AGENCY=assets/payment-qr-agency.jpeg" in source
+    assert "BILLING_PRICE_PRO_PKR=2800" in source
+    assert "BILLING_PRICE_AGENCY_PKR=5000" in source
 
 
 async def _payment_request(client: httpx.AsyncClient, token: str, plan: str = "Pro") -> httpx.Response:
@@ -74,6 +78,13 @@ async def test_user_can_create_and_list_pending_payment_request() -> None:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         signup = await _signup(client, "Tenant Billing One", "owner@billing-one.test")
+        plans = await client.get("/billing/plans", headers=_auth_headers(signup["token"]))
+        assert plans.status_code == 200
+        plan_map = {item["name"]: item for item in plans.json()["items"]}
+        assert plan_map["Pro"]["price"] == 2800
+        assert plan_map["Pro"]["qr_path"] == "assets/payment-qr-pro.jpeg"
+        assert plan_map["Agency"]["price"] == 5000
+        assert plan_map["Agency"]["qr_path"] == "assets/payment-qr-agency.jpeg"
         response = await _payment_request(client, signup["token"], "Pro")
         assert response.status_code == 200
         payment = response.json()["payment_request"]

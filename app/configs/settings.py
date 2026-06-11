@@ -42,8 +42,8 @@ class Settings:
     billing_plan_prices: Dict[str, int] = dataclass_field(
         default_factory=lambda: {
             "Starter": int(os.getenv("BILLING_PRICE_STARTER_PKR", "5000")),
-            "Pro": int(os.getenv("BILLING_PRICE_PRO_USD", "20")),
-            "Agency": int(os.getenv("BILLING_PRICE_AGENCY_USD", "30")),
+            "Pro": int(os.getenv("BILLING_PRICE_PRO_PKR", os.getenv("BILLING_PRICE_PRO_USD", "2800"))),
+            "Agency": int(os.getenv("BILLING_PRICE_AGENCY_PKR", os.getenv("BILLING_PRICE_AGENCY_USD", "5000"))),
         }
     )
     billing_nayapay_name: str = dataclass_field(default_factory=lambda: os.getenv("BILLING_NAYAPAY_NAME", "Muhammad Abdullah"))
@@ -56,6 +56,8 @@ class Settings:
     payment_method_name: str = dataclass_field(default_factory=lambda: os.getenv("PAYMENT_METHOD_NAME", "JazzCash/EasyPaisa/Bank Transfer"))
     payment_currency: str = dataclass_field(default_factory=lambda: os.getenv("PAYMENT_CURRENCY", "PKR"))
     payment_qr_path: str = dataclass_field(default_factory=lambda: os.getenv("PAYMENT_QR_PATH", "assets/payment-qr.jpeg"))
+    payment_qr_path_pro: str = dataclass_field(default_factory=lambda: os.getenv("PAYMENT_QR_PATH_PRO", "assets/payment-qr-pro.jpeg"))
+    payment_qr_path_agency: str = dataclass_field(default_factory=lambda: os.getenv("PAYMENT_QR_PATH_AGENCY", "assets/payment-qr-agency.jpeg"))
     google_oauth_client_id: str = Field(default="", alias="GOOGLE_OAUTH_CLIENT_ID")
     google_oauth_client_secret: str = Field(default="", alias="GOOGLE_OAUTH_CLIENT_SECRET")
     google_oauth_redirect_uri: str = Field(default="", alias="GOOGLE_OAUTH_REDIRECT_URI")
