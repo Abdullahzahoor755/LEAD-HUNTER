@@ -42,6 +42,21 @@ def test_sidebar_css_contains_open_and_close_selectors() -> None:
     assert "background: #07111f" in source
 
 
+def test_sidebar_brand_html_is_rendered_safely_once() -> None:
+    source = dashboard.Path(dashboard.__file__).read_text(encoding="utf-8")
+
+    assert "def render_sidebar_brand()" in source
+    assert "st.sidebar.markdown(sidebar_brand_html, unsafe_allow_html=True)" in source
+    assert "st.sidebar.write(sidebar_brand_html)" not in source
+    assert "st.sidebar.text(sidebar_brand_html)" not in source
+    assert "st.sidebar.caption(sidebar_brand_html)" not in source
+    assert "st.sidebar.code(sidebar_brand_html)" not in source
+    assert "st.code(sidebar_brand_html)" not in source
+    assert source.count("st.sidebar.markdown(sidebar_brand_html, unsafe_allow_html=True)") == 1
+    assert "lhai-sidebar-brand" in source
+    assert "sidebar-brand-title" not in source
+
+
 def test_lead_sort_newest_oldest_and_highest_score() -> None:
     frame = pd.DataFrame(
         [

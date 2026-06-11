@@ -413,33 +413,52 @@ def render_landing_styles() -> None:
         [data-testid="stSidebar"] label {
             color: #cbd5e1 !important;
         }
-        .sidebar-brand {
+        .lhai-sidebar-brand {
             padding: .25rem .1rem 1rem;
             margin-bottom: .4rem;
-            border-bottom: 1px solid rgba(148, 163, 184, .14);
+            border-bottom: 1px solid #dceff6;
         }
-        .sidebar-brand-row {
+        .lhai-sidebar-brand-inner {
             display: flex;
             align-items: center;
             gap: .68rem;
         }
-        .sidebar-brand-logo {
-            width: 38px;
-            height: 38px;
-            flex: 0 0 38px;
+        .lhai-sidebar-logo-wrap {
+            width: 40px;
+            height: 40px;
+            flex: 0 0 40px;
             border-radius: 50%;
-            object-fit: cover;
+            display: grid;
+            place-items: center;
+            background: #020617;
+            color: #ffffff;
+            overflow: hidden;
             box-shadow: 0 8px 22px rgba(7, 17, 31, .16);
         }
-        .sidebar-brand-title {
-            color: #f8fafc;
+        .lhai-sidebar-logo {
+            width: 38px;
+            height: 38px;
+            border-radius: 50%;
+            object-fit: cover;
+            display: block;
+        }
+        .lhai-sidebar-fallback-logo {
+            font-size: 1rem;
+            font-weight: 900;
+            line-height: 1;
+        }
+        .lhai-sidebar-copy {
+            min-width: 0;
+        }
+        .lhai-sidebar-title {
+            color: #0b2545;
             font-weight: 850;
             font-size: 1.05rem;
             line-height: 1.2;
             letter-spacing: 0;
         }
-        .sidebar-brand-subtitle {
-            color: #94a3b8;
+        .lhai-sidebar-subtitle {
+            color: #475569;
             font-size: .78rem;
             line-height: 1.35;
             margin-top: .18rem;
@@ -987,7 +1006,6 @@ def render_landing_styles() -> None:
         [data-testid="stSidebar"] label,
         [data-testid="stSidebar"] p,
         [data-testid="stSidebar"] span,
-        [data-testid="stSidebar"] div,
         [data-testid="stSidebar"] .stMarkdown {
             color: var(--text) !important;
         }
@@ -1012,28 +1030,9 @@ def render_landing_styles() -> None:
             color: #0f7490 !important;
             font-weight: 750;
         }
-        .sidebar-brand {
-            border-bottom: 1px solid #dceff6;
-        }
-        .sidebar-brand-row {
-            display: flex;
-            align-items: center;
-            gap: .68rem;
-        }
-        .sidebar-brand-logo {
-            width: 38px;
-            height: 38px;
-            flex: 0 0 38px;
-            border-radius: 50%;
-            object-fit: cover;
-            box-shadow: 0 8px 22px rgba(7, 17, 31, .12);
-        }
-        .sidebar-brand-title {
-            color: var(--text-strong);
-        }
-        .sidebar-brand-subtitle {
-            color: var(--muted);
-        }
+        .lhai-sidebar-brand {border-bottom-color: #dceff6;}
+        .lhai-sidebar-title {color: var(--text-strong);}
+        .lhai-sidebar-subtitle {color: var(--muted);}
         .sidebar-demo-copy {
             color: var(--muted);
         }
@@ -3808,36 +3807,41 @@ def render_marketing_campaign_page(tenant: TenantContext, page: str = "Campaign 
     render_campaign_generator_page(tenant)
 
 
-def render_sidebar_navigation() -> Dict[str, str]:
+def render_sidebar_brand() -> None:
     logo_uri = asset_data_uri(LOGO_PATH)
-    logo_markup = (
-        f'<img class="sidebar-brand-logo" src="{logo_uri}" alt="{html.escape(PRODUCT_NAME)} logo">'
-        if logo_uri
-        else ""
+    if logo_uri:
+        logo_markup = f'<img class="lhai-sidebar-logo" src="{logo_uri}" alt="{html.escape(PRODUCT_NAME)} logo">'
+    else:
+        logo_markup = '<span class="lhai-sidebar-fallback-logo">LH</span>'
+    sidebar_brand_html = (
+        '<div class="lhai-sidebar-brand">'
+        '<div class="lhai-sidebar-brand-inner">'
+        '<div class="lhai-sidebar-logo-wrap">'
+        f"{logo_markup}"
+        "</div>"
+        '<div class="lhai-sidebar-copy">'
+        '<div class="lhai-sidebar-title">Lead Hunter AI</div>'
+        '<div class="lhai-sidebar-subtitle">AI Agency Operating System</div>'
+        "</div>"
+        "</div>"
+        "</div>"
     )
-    sidebar_brand_html = f"""
-        <div class="sidebar-brand">
-            <div class="sidebar-brand-row">
-                {logo_markup}
-                <div class="sidebar-brand-title">Lead Hunter AI</div>
-            </div>
-            <div class="sidebar-brand-subtitle">AI Agency Operating System</div>
-        </div>
-    """
     st.sidebar.markdown(sidebar_brand_html, unsafe_allow_html=True)
-    st.sidebar.markdown(
-        """
-        <div class="sidebar-demo">
-            <div class="sidebar-demo-copy">Lead Hunter AI finds targeted businesses, extracts contacts, writes outreach, sends emails, and tracks replies.</div>
-            <div class="sidebar-benefits">
-                <div class="sidebar-benefit">Find better leads</div>
-                <div class="sidebar-benefit">Send personalized outreach</div>
-                <div class="sidebar-benefit">Track replies and follow-ups</div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+
+
+def render_sidebar_navigation() -> Dict[str, str]:
+    render_sidebar_brand()
+    sidebar_demo_html = (
+        '<div class="sidebar-demo">'
+        '<div class="sidebar-demo-copy">Lead Hunter AI finds targeted businesses, extracts contacts, writes outreach, sends emails, and tracks replies.</div>'
+        '<div class="sidebar-benefits">'
+        '<div class="sidebar-benefit">Find better leads</div>'
+        '<div class="sidebar-benefit">Send personalized outreach</div>'
+        '<div class="sidebar-benefit">Track replies and follow-ups</div>'
+        "</div>"
+        "</div>"
     )
+    st.sidebar.markdown(sidebar_demo_html, unsafe_allow_html=True)
     st.sidebar.markdown("### Workspace")
     if st.sidebar.button("Logout", use_container_width=True):
         st.session_state["auth"] = {}
