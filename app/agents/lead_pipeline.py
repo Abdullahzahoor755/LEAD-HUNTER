@@ -44,31 +44,63 @@ class DiscoveryAgent(JsonAgent):
         import leads as legacy
 
         query = str(input_json.get("query", "")).strip()
-        if not query:
+        niche = str(input_json.get("niche", "") or input_json.get("industry", "") or "").strip()
+        location = str(input_json.get("location", "") or input_json.get("country", "") or input_json.get("target_country", "") or "").strip()
+        query_variants = legacy.build_search_query_variants(niche=niche, location=location, query=query)
+        if not query_variants:
             raise ValueError("DiscoveryAgent requires a non-empty 'query'.")
         limit = input_json.get("limit")
         limit_value = int(limit) if limit is not None else None
+        raw_result_limit = max(10, min(max((limit_value or 10) * 4, 20), 100))
         seen_websites = {str(item) for item in input_json.get("seen_websites", []) if str(item).strip()}
 
-        search_results = legacy.search_google(query)
-        websites = legacy.extract_websites(search_results)
+        all_results = []
+        aggregate_stats = {
+            "raw_results_count": 0,
+            "filtered_results_count": 0,
+            "rejected_bad_domain_count": 0,
+            "rejected_irrelevant_count": 0,
+            "duplicate_domain_count": 0,
+        }
+        events = []
         candidate_websites = []
-        for website in websites:
-            website_key = legacy.get_website_key(website)
-            if website_key in seen_websites:
-                legacy.LOGGER.info("Skipping duplicate website already processed: %s", website)
-                continue
-            seen_websites.add(website_key)
-            candidate_websites.append(website)
+        for variant in query_variants:
+            try:
+                search_results = legacy.search_google(variant, num=raw_result_limit)
+            except TypeError:
+                search_results = legacy.search_google(variant)
+            all_results.extend(search_results)
+            websites, stats = legacy.extract_websites_with_stats(search_results)
+            for key, value in stats.items():
+                if key == "events":
+                    events.extend(list(value or []))
+                    continue
+                aggregate_stats[key] += int(value or 0)
+            for website in websites:
+                website_key = legacy.get_website_key(website)
+                if website_key in seen_websites:
+                    aggregate_stats["duplicate_domain_count"] += 1
+                    legacy.LOGGER.info("Skipping duplicate website already processed: %s", website)
+                    events.append({"stage": "filtering", "status": "rejected", "domain": legacy.root_domain_from_url(website), "url": website, "reason": "rejected_duplicate_domain", "message": "duplicate_domain_skipped"})
+                    continue
+                seen_websites.add(website_key)
+                candidate_websites.append(website)
+                if limit_value is not None and len(candidate_websites) >= limit_value:
+                    break
             if limit_value is not None and len(candidate_websites) >= limit_value:
                 break
 
         return {
-            "query": query,
-            "search_results_count": len(search_results),
+            "query": query_variants[0],
+            "final_query": query_variants[0],
+            "query_variants": query_variants,
+            "query_variants_count": len(query_variants),
+            "search_results_count": len(all_results),
+            **aggregate_stats,
             "websites": candidate_websites,
             "website_count": len(candidate_websites),
             "seen_websites": sorted(seen_websites),
+            "events": events,
         }
 
 

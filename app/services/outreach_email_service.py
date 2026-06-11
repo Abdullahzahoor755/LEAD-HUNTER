@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from typing import Any, Dict
 from urllib.parse import urlparse
@@ -21,12 +22,13 @@ class OutreachEmailService:
         self.db = db
 
     async def generate_outreach_email(self, tenant: TenantContext, lead: Lead) -> Dict[str, Any]:
-        fallback = self._fallback_outreach(lead)
+        config = await self.personalization_config(tenant)
+        fallback = self._fallback_outreach(lead, config)
         return await self._maybe_ai_refine(
             tenant=tenant,
             fallback=fallback,
             system_prompt="You refine concise B2B cold outreach emails and return strict JSON.",
-            user_prompt=self._outreach_refinement_prompt(lead, fallback),
+            user_prompt=self._outreach_refinement_prompt(lead, fallback, config),
         )
 
     async def generate_followup_email(
@@ -51,17 +53,90 @@ class OutreachEmailService:
             return normalized
         return f"{normalized}{UNSUBSCRIBE_FOOTER}"
 
-    def _fallback_outreach(self, lead: Lead) -> Dict[str, Any]:
+    async def personalization_config(self, tenant: TenantContext) -> Dict[str, Any]:
+        tenants = await maybe_await(self.db.tenants.list(tenant.tenant_id))
+        settings = dict(tenants[0].settings or {}) if tenants else {}
+        config = dict(settings.get("email_personalization", {}) or {})
+        return {
+            "sender_name": str(config.get("sender_name", "") or "").strip(),
+            "brand_name": str(config.get("brand_name", "") or "").strip(),
+            "services_offered": str(config.get("services_offered", "") or "AI lead generation, website automation, chatbot development, marketing automation").strip(),
+            "target_customer_type": str(config.get("target_customer_type", "") or "businesses").strip(),
+            "tone": str(config.get("tone", "") or "Professional").strip(),
+            "email_goal": str(config.get("email_goal", "") or "Start conversation").strip(),
+            "cta": str(config.get("cta", "") or "a quick 10-minute call this week").strip(),
+            "language": str(config.get("language", "") or "English").strip(),
+            "signature": str(config.get("signature", "") or "").strip(),
+            "updated_at": str(config.get("updated_at", "") or "").strip(),
+        }
+
+    async def save_personalization_config(self, tenant: TenantContext, config: Dict[str, Any]) -> Dict[str, Any]:
+        tenants = await maybe_await(self.db.tenants.list(tenant.tenant_id))
+        if not tenants:
+            raise ValueError("Tenant does not exist.")
+        tenant_record = tenants[0]
+        settings = dict(tenant_record.settings or {})
+        settings["email_personalization"] = {
+            "sender_name": str(config.get("sender_name", "") or "").strip()[:120],
+            "brand_name": str(config.get("brand_name", "") or "").strip()[:120],
+            "services_offered": str(config.get("services_offered", "") or "").strip()[:500],
+            "target_customer_type": str(config.get("target_customer_type", "") or "").strip()[:180],
+            "tone": str(config.get("tone", "") or "Professional").strip()[:60],
+            "email_goal": str(config.get("email_goal", "") or "Start conversation").strip()[:80],
+            "cta": str(config.get("cta", "") or "").strip()[:220],
+            "language": str(config.get("language", "") or "English").strip()[:80],
+            "signature": str(config.get("signature", "") or "").strip()[:300],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        tenant_record.settings = settings
+        await maybe_await(self.db.tenants.save(tenant_record))
+        return await self.personalization_config(tenant)
+
+    async def generate_sample_email(self, tenant: TenantContext, lead: Lead | None = None, config: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        config = dict(config or await self.personalization_config(tenant))
+        sample = lead or Lead(
+            tenant_id=tenant.tenant_id,
+            company="Sample Software Co",
+            company_url="https://example.com",
+            industry="Software & IT",
+            service_reason="The company sells services online and may benefit from better lead capture and follow-up.",
+        )
+        return self._fallback_outreach(sample, config)
+
+    def _fallback_outreach(self, lead: Lead, config: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        config = dict(config or {})
         company = self._company_label(lead)
-        observation = self._observation(lead)
-        value_prop = self._value_prop(lead)
+        sender_name = str(config.get("sender_name", "") or "").strip()
+        brand_name = str(config.get("brand_name", "") or "our team").strip()
+        services = str(config.get("services_offered", "") or self._value_prop(lead)).strip()
+        target = str(config.get("target_customer_type", "") or "businesses").strip()
+        tone = str(config.get("tone", "") or "Professional").strip()
+        goal = str(config.get("email_goal", "") or "Start conversation").strip()
+        language = str(config.get("language", "") or "English").strip()
+        cta = str(config.get("cta", "") or "a quick 10-minute call this week").strip()
+        signature = str(config.get("signature", "") or sender_name or brand_name).strip()
+        personalized_line = self._personalized_line(lead)
         subject = f"Quick idea for {company}"[:90]
+        context_note = ""
+        if tone or goal or language:
+            context_note = f"\nTone: {tone}. Goal: {goal}. Language: {language}."
         body = (
             f"Hi {company} team,\n\n"
-            f"I noticed {observation}. {value_prop}\n\n"
-            "Would it be worth a quick 10-minute chat to see if this could help?"
+            f"I'm {sender_name + ' from ' if sender_name else ''}{brand_name}. "
+            f"We help {target} with {services}.\n\n"
+            f"{personalized_line}\n\n"
+            f"Would you be open to {cta}?\n\n"
+            f"Best,\n{signature}"
+            f"{context_note if context_note and language.lower() != 'english' else ''}"
         )
-        return {"subject": subject, "body": body, "mode": "fallback"}
+        return {
+            "subject": subject,
+            "body": body,
+            "mode": "fallback",
+            "tone": tone,
+            "email_goal": goal,
+            "language": language,
+        }
 
     def _fallback_followup(
         self,
@@ -151,11 +226,14 @@ class OutreachEmailService:
             return {}
         return dict(parsed) if isinstance(parsed, dict) else {}
 
-    def _outreach_refinement_prompt(self, lead: Lead, fallback: Dict[str, Any]) -> str:
+    def _outreach_refinement_prompt(self, lead: Lead, fallback: Dict[str, Any], config: Dict[str, Any]) -> str:
         return (
             "Refine this cold outreach email. Keep it under 120 words, professional, non-spammy, and specific.\n"
-            "Preserve one observation, one value proposition, and one soft CTA.\n"
+            "Use the sender name, brand/company name, services, target customer type, tone, email goal, CTA, and language from the sender configuration.\n"
+            "Use the lead company name, website/domain, and business description when available.\n"
+            "Avoid fake claims, spammy wording, scraping mentions, or saying AI found their website. Avoid saying 'I noticed' unless supported by lead context.\n"
             "Return strict JSON only: {\"subject\":\"\", \"body\":\"\"}\n\n"
+            f"Sender configuration: {json.dumps(config, ensure_ascii=True)}\n"
             f"Lead context: {json.dumps(self._lead_context(lead), ensure_ascii=True)}\n"
             f"Fallback email: {json.dumps({'subject': fallback.get('subject', ''), 'body': fallback.get('body', '')}, ensure_ascii=True)}"
         )
@@ -216,6 +294,14 @@ class OutreachEmailService:
         if domain:
             return f"your website at {domain} is already a useful first touchpoint"
         return "your business may benefit from a clearer lead capture and follow-up process"
+
+    def _personalized_line(self, lead: Lead) -> str:
+        reason = str(lead.service_reason or lead.reason or "").strip()
+        if reason:
+            return reason[:180]
+        if lead.industry:
+            return f"For {lead.industry.strip()} teams, a simpler lead capture and follow-up system can often turn more inquiries into conversations."
+        return "A practical starting point could be improving lead capture, response speed, and follow-up consistency."
 
     def _value_prop(self, lead: Lead) -> str:
         metadata = dict(lead.metadata or {})

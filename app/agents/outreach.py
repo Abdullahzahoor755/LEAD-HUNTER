@@ -63,10 +63,22 @@ class OutreachAgent(BaseAgent):
                     lead=lead,
                     subject="",
                     body="",
-                    reason="missing_gmail_credentials",
+                    reason="gmail_not_connected",
                 )
                 failed += 1
-            await self._record_safe_failure_logs(request.tenant.tenant_id, pending_leads, "missing_gmail_credentials")
+            await self._record_safe_failure_logs(request.tenant.tenant_id, pending_leads, "gmail_not_connected")
+            return await self._record_run(db, request, sent, failed)
+        if not str(credentials.get("refresh_token", "") or "").strip():
+            for lead in pending_leads:
+                await self._mark_failed(service, request.tenant, lead, "", "", "gmail_missing_refresh_token")
+                failed += 1
+            await self._record_safe_failure_logs(request.tenant.tenant_id, pending_leads, "gmail_missing_refresh_token")
+            return await self._record_run(db, request, sent, failed)
+        if not str(credentials.get("email_address", "") or credentials.get("sender_email", "") or "").strip():
+            for lead in pending_leads:
+                await self._mark_failed(service, request.tenant, lead, "", "", "gmail_sender_not_verified")
+                failed += 1
+            await self._record_safe_failure_logs(request.tenant.tenant_id, pending_leads, "gmail_sender_not_verified")
             return await self._record_run(db, request, sent, failed)
         audit_log(
             LOGGER,
@@ -106,6 +118,8 @@ class OutreachAgent(BaseAgent):
                     request.tenant.tenant_id,
                     lead.id,
                 )
+                await self._mark_failed(service, request.tenant, lead, "", "", "no_verified_email")
+                failed += 1
                 continue
             try:
                 try:

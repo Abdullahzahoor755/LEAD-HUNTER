@@ -471,9 +471,23 @@ class OutreachService:
 
     def classify_send_failure(self, error: Exception) -> str:
         text = f"{type(error).__name__} {error}".lower()
-        if any(marker in text for marker in ("oauth", "token", "refresh", "invalid_grant", "unauthorized", "401")):
-            return "oauth_token_error"
-        return "gmail_send_failed"
+        if any(marker in text for marker in ("accessnotconfigured", "api has not been used", "gmail api", "disabled")):
+            return "gmail_api_disabled"
+        if any(marker in text for marker in ("invalid_grant", "refresh token", "refresherror")):
+            return "gmail_refresh_failed"
+        if "insufficient" in text or "insufficientpermissions" in text or "insufficient scopes" in text:
+            return "gmail_insufficient_scopes"
+        if "invalid recipient" in text or "invalid_to" in text or "recipient" in text and "invalid" in text:
+            return "gmail_invalid_recipient"
+        if any(marker in text for marker in ("rate limit", "ratelimit", "quota", "user-rate-limit")):
+            return "gmail_quota_exceeded"
+        if "sender" in text and any(marker in text for marker in ("not verified", "forbidden", "denied")):
+            return "gmail_sender_not_verified"
+        if any(marker in text for marker in ("timeout", "connection", "network", "temporarily unavailable")):
+            return "gmail_network_error"
+        if any(marker in text for marker in ("oauth", "token", "unauthorized", "401")):
+            return "gmail_token_expired"
+        return "gmail_unknown_send_error"
 
     def _ensure_unsubscribe_footer(self, body: str) -> str:
         footer = "If you prefer not to hear from us again, reply with unsubscribe."

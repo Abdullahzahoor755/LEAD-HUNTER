@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import traceback
 from typing import Any, Dict, List
@@ -25,18 +26,77 @@ class LeadGenerationAgent(BaseAgent):
 
     async def run(self, request: AgentRequest, db: DatabaseSession | AsyncDatabaseSession) -> Dict[str, Any]:
         tenant_id = request.tenant.tenant_id
+        job_id = str(request.payload.get("_job_id", "") or "").strip()
         limit = int(request.payload.get("limit", legacy_leads.DEFAULT_LEAD_LIMIT))
         query = str(request.payload.get("query", "")).strip()
+        niche = str(request.payload.get("niche", "") or request.payload.get("industry", "") or "").strip()
+        location = str(request.payload.get("location", "") or request.payload.get("country", "") or request.payload.get("target_country", "") or "").strip()
+        if niche or location:
+            query = legacy_leads.build_search_query(niche=niche, location=location, query=query)
         target_country = self._country_from_payload(request.payload)
         lead_service = LeadService(db)
         ai_mode = "fallback" if not await self._tenant_has_pro_features(db, tenant_id) else ""
         legacy_leads.load_environment()
+        missing_keys = self._missing_required_keys()
+        if missing_keys:
+            output = self._empty_output(
+                query=query,
+                message="Lead search is not configured. Add SERPER_API_KEY to .env and restart the backend.",
+                rejection_reasons={"missing_search_api_key": 1},
+            )
+            LOGGER.error(
+                "Lead generation preflight failed tenant=%s job_query_present=%s missing_keys=%s",
+                tenant_id,
+                bool(query),
+                ",".join(missing_keys),
+            )
+            await AgentRunService(db).record_run(
+                request.tenant,
+                AgentRun(
+                    tenant_id=tenant_id,
+                    agent_name=self.name,
+                    status="failed",
+                    input_payload=request.payload,
+                    output_payload=output,
+                    error=output["message"],
+                ),
+            )
+            return {"status": "FAILED", "message": output["message"], "data": output}
 
         try:
             if query:
-                raw_leads = legacy_leads.process_query(query, seen_websites=set(), limit=limit, ai_mode=ai_mode)
+                try:
+                    raw_leads = legacy_leads.process_query(
+                        query,
+                        seen_websites=set(),
+                        limit=limit,
+                        ai_mode=ai_mode,
+                        niche=niche,
+                        location=location,
+                    )
+                except TypeError as error:
+                    if "unexpected keyword argument" not in str(error):
+                        raise
+                    raw_leads = legacy_leads.process_query(query, seen_websites=set(), limit=limit, ai_mode=ai_mode)
             else:
                 raw_leads = legacy_leads.generate_leads(limit=limit, ai_mode=ai_mode)
+            pipeline_stats = self._pipeline_stats(raw_leads)
+            pipeline_events = self._pipeline_events()
+            await self._record_job_progress(db, request.tenant, job_id, pipeline_stats, pipeline_events)
+            LOGGER.info(
+                "Lead pipeline counts tenant=%s job_query_present=%s discovered_urls_count=%s scraped_pages_count=%s "
+                "cleaned_records_count=%s extracted_emails_count=%s scored_leads_count=%s accepted_leads_count=%s "
+                "rejected_leads_count=%s",
+                tenant_id,
+                bool(query),
+                pipeline_stats["discovered_urls_count"],
+                pipeline_stats["scraped_pages_count"],
+                pipeline_stats["cleaned_records_count"],
+                pipeline_stats["extracted_emails_count"],
+                pipeline_stats["scored_leads_count"],
+                pipeline_stats["accepted_leads_count"],
+                pipeline_stats["rejected_leads_count"],
+            )
 
             saved: List[Lead] = []
             skipped_count = 0
@@ -81,6 +141,14 @@ class LeadGenerationAgent(BaseAgent):
                     source_query=query,
                     metadata=self._metadata_from_raw(item),
                 )
+                lead.metadata["lead_quality_grade"] = legacy_leads.lead_quality_grade(
+                    lead.website or lead.company_url,
+                    lead.metadata,
+                    email=lead.verified_email or lead.email,
+                    phone=lead.phone,
+                )
+                if not (lead.verified_email or lead.email):
+                    lead.metadata["outreach_readiness"] = "needs_manual_contact"
                 if not lead.service_reason:
                     LOGGER.info(
                         "Lead service_reason empty tenant=%s website=%s reason=missing_claude_reason_or_intent_summary",
@@ -93,9 +161,35 @@ class LeadGenerationAgent(BaseAgent):
                         tenant_id,
                         item.get("website", ""),
                     )
-                saved.append(await lead_service.upsert_lead(request.tenant, lead))
+                saved_lead = await lead_service.upsert_lead(request.tenant, lead)
+                saved.append(saved_lead)
+                pipeline_events.append(
+                    {
+                        "stage": "saving",
+                        "status": "saved",
+                        "domain": legacy_leads.root_domain_from_url(saved_lead.company_url or saved_lead.website),
+                        "url": saved_lead.company_url or saved_lead.website,
+                        "message": "lead_saved",
+                        "metadata": {
+                            "quality_grade": saved_lead.metadata.get("lead_quality_grade", ""),
+                            "outreach_readiness": "email_ready" if saved_lead.verified_email else "needs_manual_contact",
+                        },
+                    }
+                )
 
-            output = {"saved_leads": len(saved), "skipped_leads": skipped_count, "lead_count": len(saved), "query": query}
+            output = {
+                **pipeline_stats,
+                "saved_leads": len(saved),
+                "skipped_leads": skipped_count,
+                "lead_count": len(saved),
+                "query": query,
+                "message": self._result_message(len(saved), pipeline_stats),
+            }
+            output["a_grade_leads"] = sum(1 for item in saved if str(item.metadata.get("lead_quality_grade", "")) == "A")
+            output["b_grade_leads"] = sum(1 for item in saved if str(item.metadata.get("lead_quality_grade", "")) == "B")
+            output["no_email_leads"] = sum(1 for item in saved if not item.verified_email)
+            output["outreach_ready_leads"] = sum(1 for item in saved if item.verified_email)
+            await self._record_job_progress(db, request.tenant, job_id, output, pipeline_events, completed=True)
             agent_run = AgentRun(
                 tenant_id=tenant_id,
                 agent_name=self.name,
@@ -104,7 +198,7 @@ class LeadGenerationAgent(BaseAgent):
                 output_payload=output,
             )
             await AgentRunService(db).record_run(request.tenant, agent_run)
-            return {"status": "SUCCESS", "message": "Lead generation completed.", "data": {"agent_run_id": agent_run.id, **output}}
+            return {"status": "SUCCESS", "message": output["message"], "data": {"agent_run_id": agent_run.id, **output}}
         except Exception as error:
             LOGGER.exception("Lead generation failed for tenant=%s query=%r", tenant_id, query)
             agent_run = AgentRun(
@@ -122,8 +216,85 @@ class LeadGenerationAgent(BaseAgent):
             return {
                 "status": "FAILED",
                 "message": "Lead generation failed safely.",
-                "data": {"saved_leads": 0, "skipped_leads": 0, "lead_count": 0, "query": query},
+                "data": self._empty_output(query=query, message="Lead generation failed safely."),
             }
+
+    def _missing_required_keys(self) -> list[str]:
+        if os.getenv("SERPER_API_KEY", "").strip():
+            return []
+        if getattr(legacy_leads.search_google, "__module__", "") != "leads":
+            return []
+        if getattr(legacy_leads.process_query, "__module__", "") != "leads":
+            return []
+        return ["SERPER_API_KEY"]
+
+    def _pipeline_stats(self, raw_leads: List[Dict[str, Any]] | None) -> Dict[str, Any]:
+        stats = dict(getattr(legacy_leads, "LAST_PIPELINE_STATS", {}) or {})
+        defaults = self._empty_output(query="", message="")
+        for key in (
+            "discovered_urls_count",
+            "query_variants_count",
+            "raw_results_count",
+            "filtered_results_count",
+            "rejected_bad_domain_count",
+            "rejected_irrelevant_count",
+            "duplicate_domain_count",
+            "scraped_pages_count",
+            "cleaned_records_count",
+            "extracted_emails_count",
+            "scored_leads_count",
+            "accepted_leads_count",
+            "rejected_leads_count",
+        ):
+            stats[key] = int(stats.get(key, 0) or 0)
+        if not stats["accepted_leads_count"] and raw_leads:
+            stats["accepted_leads_count"] = len(raw_leads)
+            stats["scored_leads_count"] = max(stats["scored_leads_count"], len(raw_leads))
+            stats["extracted_emails_count"] = max(
+                stats["extracted_emails_count"],
+                sum(1 for item in raw_leads if str(item.get("email", "")).strip()),
+            )
+        reasons = stats.get("rejection_reasons", {})
+        stats["rejection_reasons"] = dict(reasons) if isinstance(reasons, dict) else {}
+        for key, value in defaults.items():
+            stats.setdefault(key, value)
+        return stats
+
+    def _empty_output(
+        self,
+        query: str,
+        message: str,
+        rejection_reasons: Dict[str, int] | None = None,
+    ) -> Dict[str, Any]:
+        return {
+            "discovered_urls_count": 0,
+            "final_query": query,
+            "query_variants_count": 0,
+            "raw_results_count": 0,
+            "filtered_results_count": 0,
+            "rejected_bad_domain_count": 0,
+            "rejected_irrelevant_count": 0,
+            "duplicate_domain_count": 0,
+            "scraped_pages_count": 0,
+            "cleaned_records_count": 0,
+            "extracted_emails_count": 0,
+            "scored_leads_count": 0,
+            "accepted_leads_count": 0,
+            "rejected_leads_count": 0,
+            "saved_leads": 0,
+            "skipped_leads": 0,
+            "lead_count": 0,
+            "query": query,
+            "rejection_reasons": dict(rejection_reasons or {}),
+            "message": message,
+        }
+
+    def _result_message(self, saved_count: int, stats: Dict[str, Any]) -> str:
+        if saved_count:
+            return f"Lead generation completed. Saved {saved_count} lead(s)."
+        if int(stats.get("discovered_urls_count", 0) or 0) == 0:
+            return "Lead generation completed with 0 leads: no URLs were discovered."
+        return "Lead generation completed with 0 leads: all candidates were rejected or already existed."
 
     def _service_reason_from_raw(self, item: Dict[str, Any]) -> str:
         analysis_reason = str(item.get("analysis_reason", "")).strip()
@@ -156,6 +327,42 @@ class LeadGenerationAgent(BaseAgent):
         if item.get("quality_reason"):
             metadata["quality_reason"] = str(item.get("quality_reason", "")).strip()
         return metadata
+
+    def _pipeline_events(self) -> list[Dict[str, Any]]:
+        return list(getattr(legacy_leads, "LAST_PIPELINE_EVENTS", []) or [])
+
+    async def _record_job_progress(
+        self,
+        db: DatabaseSession | AsyncDatabaseSession,
+        tenant,
+        job_id: str,
+        stats: Dict[str, Any],
+        events: list[Dict[str, Any]],
+        completed: bool = False,
+    ) -> None:
+        if not job_id:
+            return
+        scoped = db.for_tenant(tenant)
+        job = await maybe_await(scoped.get("jobs", job_id))
+        if job is None:
+            return
+        safe_events: list[Dict[str, Any]] = []
+        for event in events[-120:]:
+            payload = dict(event or {})
+            payload.pop("content", None)
+            payload.pop("html", None)
+            safe_events.append(payload)
+        summary = dict(job.result_summary or {})
+        summary.update(
+            {
+                "current_stage": "completed" if completed else "running",
+                "progress_percentage": 100 if completed else min(95, int(stats.get("scraped_pages_count", 0) or 0) * 5),
+                "stats": dict(stats or {}),
+                "events": safe_events,
+            }
+        )
+        job.result_summary = summary
+        await maybe_await(scoped.save("jobs", job))
 
     async def _tenant_has_pro_features(self, db: DatabaseSession | AsyncDatabaseSession, tenant_id: str) -> bool:
         tenants = await maybe_await(db.tenants.list(tenant_id))

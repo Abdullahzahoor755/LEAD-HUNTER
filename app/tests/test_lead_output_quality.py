@@ -10,15 +10,163 @@ from app.agents.lead_generation import LeadGenerationAgent
 from app.agents.lead_pipeline import ScoringAgent, ScraperAgent
 from app.agents.outreach import OutreachAgent
 from app.api.app import create_fastapi_app
-from app.core.models import Lead, Tenant, TenantContext
+from app.core.models import Job, Lead, Tenant, TenantContext
 from app.db.session import build_memory_session
 from app.providers.base import ProviderSendResult
+from app.services.auth_service import AuthService
 from app.services.lead_service import LeadService
+from app.services.outreach_service import OutreachService
 from app.services.provider_credential_service import ProviderCredentialService
 
 
 def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def test_it_pakistan_query_builder_and_variants() -> None:
+    assert legacy_leads.build_search_query("IT", "Pakistan") == "IT companies in Pakistan"
+    variants = legacy_leads.build_search_query_variants("IT", "Pakistan")
+    assert "IT companies in Pakistan" in variants
+    assert "software houses in Pakistan" in variants
+    assert "custom software development companies in Pakistan" in variants
+    assert len(variants) >= 6
+
+
+def test_search_result_filter_rejects_bad_sources_and_keeps_company() -> None:
+    results = [
+        {"title": "Developer tools", "link": "https://github.com/example", "snippet": "code"},
+        {"title": "Pakistan Embassy", "link": "https://example.org/embassy", "snippet": "government consulate"},
+        {"title": "Acme Software Company", "link": "https://acmesoft.example/services", "snippet": "software development company"},
+    ]
+    websites, stats = legacy_leads.extract_websites_with_stats(results)
+    assert websites == ["https://acmesoft.example"]
+    assert stats["rejected_bad_domain_count"] >= 2
+    assert any(event.get("reason") == "rejected_bad_domain_github" for event in stats["events"])
+
+
+def test_lead_quality_grade_and_email_quality_helpers() -> None:
+    grade = legacy_leads.lead_quality_grade(
+        "https://acmesoft.example",
+        {"industry": "Software development", "contact_page": "https://acmesoft.example/contact"},
+        email="info@acmesoft.example",
+        phone="+123",
+    )
+    assert grade == "A"
+
+
+def test_gmail_api_disabled_is_specific_safe_reason() -> None:
+    reason = OutreachService(build_memory_session()).classify_send_failure(
+        RuntimeError("HttpError 403 accessNotConfigured Gmail API has not been used in project before or it is disabled")
+    )
+    assert reason == "gmail_api_disabled"
+
+
+@pytest.mark.anyio
+async def test_missing_serper_key_returns_clear_lead_generation_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-missing-serper")
+    monkeypatch.delenv("SERPER_API_KEY", raising=False)
+    monkeypatch.setattr(legacy_leads, "load_environment", lambda: None)
+
+    result = await LeadGenerationAgent().run(
+        AgentRequest(tenant=tenant, payload={"query": "software companies in Pakistan", "limit": 1}),
+        db,
+    )
+
+    assert result["status"] == "FAILED"
+    assert "SERPER_API_KEY" in result["message"]
+    assert result["data"]["rejection_reasons"] == {"missing_search_api_key": 1}
+
+
+@pytest.mark.anyio
+async def test_jobs_recent_returns_lead_generation_stats() -> None:
+    db = build_memory_session()
+    auth = await AuthService(db).signup(
+        tenant_id="tenant-job-stats",
+        tenant_name="Tenant Job Stats",
+        tenant_slug="tenant-job-stats",
+        email="owner@jobstats.test",
+        password="secret123",
+        full_name="Owner",
+        plan="Agency",
+    )
+    tenant = TenantContext(tenant_id=auth.tenant_id)
+    db.for_tenant(tenant).save(
+        "jobs",
+        Job(
+            tenant_id=auth.tenant_id,
+            name="lead_generation",
+            status="completed",
+            result={
+                "status": "SUCCESS",
+                "message": "Lead generation completed with 0 leads: no URLs were discovered.",
+                "data": {
+                    "raw_results_count": 10,
+                    "filtered_results_count": 0,
+                    "saved_leads": 0,
+                    "lead_count": 0,
+                },
+            },
+        ),
+    )
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/jobs/recent", headers=_auth_headers(auth.token))
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["result"]["raw_results_count"] == 10
+    assert item["result"]["saved_leads"] == 0
+
+
+@pytest.mark.anyio
+async def test_job_events_endpoint_is_tenant_scoped() -> None:
+    db = build_memory_session()
+    owner = await AuthService(db).signup(
+        tenant_id="tenant-events-owner",
+        tenant_name="Tenant Events Owner",
+        tenant_slug="tenant-events-owner",
+        email="owner@events.test",
+        password="secret123",
+        full_name="Owner",
+        plan="Agency",
+    )
+    other = await AuthService(db).signup(
+        tenant_id="tenant-events-other",
+        tenant_name="Tenant Events Other",
+        tenant_slug="tenant-events-other",
+        email="other@events.test",
+        password="secret123",
+        full_name="Other",
+        plan="Agency",
+    )
+    tenant = TenantContext(tenant_id=owner.tenant_id)
+    job = db.for_tenant(tenant).save(
+        "jobs",
+        Job(
+            tenant_id=owner.tenant_id,
+            name="lead_generation",
+            status="completed",
+            result_summary={
+                "progress_percentage": 100,
+                "current_stage": "completed",
+                "stats": {"saved_leads": 1, "rejected_leads_count": 2},
+                "events": [{"stage": "saving", "status": "saved", "domain": "acme.test", "message": "lead_saved"}],
+            },
+        ),
+    )
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        ok = await client.get(f"/jobs/{job.id}/events", headers=_auth_headers(owner.token))
+        status = await client.get(f"/jobs/{job.id}/status", headers=_auth_headers(owner.token))
+        missing = await client.get(f"/jobs/{job.id}/events", headers=_auth_headers(other.token))
+
+    assert ok.status_code == 200
+    assert ok.json()["events"][0]["message"] == "lead_saved"
+    assert status.json()["lead_stats"]["saved_leads"] == 1
+    assert missing.status_code == 404
 
 
 def test_scraper_uses_separate_contexts_for_contact_and_content(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -196,6 +344,9 @@ async def test_api_exports_only_standardized_lead_fields() -> None:
             "followup_count",
             "reply_status",
             "last_reply_at",
+            "email_quality",
+            "lead_quality_grade",
+            "save_reason",
         ]
         assert row["company_url"] == "https://acme.test"
         assert row["country"] == ""

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import re
 import secrets
 from typing import Any, Dict, Sequence
+from uuid import uuid4
 
 from app.core.auth import create_jwt_token, decode_jwt_token, get_plan_limits, hash_password, normalize_subscription_plan, verify_password
 from app.core.models import Tenant, TenantContext, User
@@ -35,6 +36,10 @@ class AuthenticationError(ValueError):
     """Raised when authentication fails."""
 
 
+class TenantNameAlreadyTakenError(ValueError):
+    """Raised when public signup tries to use an existing tenant identity."""
+
+
 class AuthService:
     def __init__(self, db: DatabaseSession | AsyncDatabaseSession) -> None:
         self.db = db
@@ -51,30 +56,31 @@ class AuthService:
         plan: str = "Starter",
         role: str = "owner",
     ) -> AuthResult:
-        resolved_tenant_id = require_tenant_id(tenant_id)
-        normalized_plan = normalize_subscription_plan(plan)
-        existing_user = await maybe_await(self.db.users.find_by_email(resolved_tenant_id, email))
-        if existing_user:
-            raise AuthenticationError("A user with this email already exists in the tenant.")
-
-        tenant = await self._find_tenant(resolved_tenant_id)
-        if tenant is None:
-            tenant = await self.tenant_service.create_tenant(
-                tenant_id=resolved_tenant_id,
-                name=tenant_name,
-                slug=tenant_slug,
-                subscription_plan=normalized_plan,
-            )
-
+        organization_name = str(tenant_name or tenant_slug or tenant_id or "").strip()
+        if not organization_name:
+            raise AuthenticationError("Organization name is required.")
+        await self._ensure_public_signup_identity_available(
+            requested_tenant_id=tenant_id,
+            tenant_name=organization_name,
+            tenant_slug=tenant_slug,
+        )
+        resolved_tenant_id = uuid4().hex
+        normalized_slug = await self._unique_public_signup_slug(organization_name)
+        tenant = await self.tenant_service.create_tenant(
+            tenant_id=resolved_tenant_id,
+            name=organization_name,
+            slug=normalized_slug,
+            subscription_plan="Free",
+        )
         await self._enforce_team_member_limit(tenant)
         user = User(
             tenant_id=resolved_tenant_id,
             email=email.strip().lower(),
             full_name=full_name.strip(),
             password_hash=hash_password(password),
-            role=role,
+            role="owner",
             status="active",
-            metadata={"subscription_plan": normalized_plan},
+            metadata={"subscription_plan": "Free"},
         )
         await maybe_await(self.db.for_tenant(TenantContext(tenant_id=resolved_tenant_id)).save("users", user))
         return self._build_auth_result(tenant, user)
@@ -176,6 +182,45 @@ class AuthService:
     async def _find_tenant(self, tenant_id: str) -> Tenant | None:
         tenants = await maybe_await(self.db.tenants.list(tenant_id))
         return tenants[0] if tenants else None
+
+    async def _ensure_public_signup_identity_available(
+        self,
+        requested_tenant_id: str,
+        tenant_name: str,
+        tenant_slug: str,
+    ) -> None:
+        requested_values = {
+            str(requested_tenant_id or "").strip().lower(),
+            str(tenant_name or "").strip().lower(),
+            str(tenant_slug or "").strip().lower(),
+            self._slugify(tenant_name),
+            self._slugify(tenant_slug),
+        }
+        requested_values.discard("")
+        tenants: Sequence[Tenant] = await maybe_await(self.db.tenants.list_all())
+        for tenant in tenants:
+            existing_values = {
+                str(tenant.tenant_id or "").strip().lower(),
+                str(tenant.name or "").strip().lower(),
+                str(tenant.slug or "").strip().lower(),
+                self._slugify(tenant.name),
+                self._slugify(tenant.slug),
+            }
+            existing_values.discard("")
+            if requested_values & existing_values:
+                raise TenantNameAlreadyTakenError("Tenant name is already taken. Please choose another name.")
+
+    async def _unique_public_signup_slug(self, tenant_name: str) -> str:
+        base = self._slugify(tenant_name) or "workspace"
+        tenants: Sequence[Tenant] = await maybe_await(self.db.tenants.list_all())
+        existing_slugs = {str(tenant.slug or "").strip().lower() for tenant in tenants}
+        existing_names = {self._slugify(tenant.name) for tenant in tenants}
+        candidate = base
+        suffix = 1
+        while candidate.lower() in existing_slugs or candidate.lower() in existing_names:
+            candidate = f"{base}-{suffix}"
+            suffix += 1
+        return candidate
 
     async def _find_user_by_email_globally(self, email: str) -> tuple[Tenant, User] | None:
         normalized = str(email or "").strip().lower()

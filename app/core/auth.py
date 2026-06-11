@@ -76,7 +76,7 @@ def get_jwt_secret() -> str:
 
 def validate_production_jwt_secret() -> None:
     environment = str(os.getenv("APP_ENV") or os.getenv("ENV") or settings.environment or "development").strip().lower()
-    secret = str(os.getenv("JWT_SECRET") or settings.jwt_secret or "").strip()
+    secret = str(settings.jwt_secret or os.getenv("JWT_SECRET") or "").strip()
     if environment == "production" and (not secret or secret == DEFAULT_JWT_SECRET):
         raise RuntimeError("JWT_SECRET must be set to a non-default value in production.")
     if environment != "production":

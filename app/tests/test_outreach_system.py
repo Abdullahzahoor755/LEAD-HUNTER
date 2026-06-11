@@ -209,11 +209,11 @@ async def test_failed_send_persists_failed_status_and_email_attempt(monkeypatch:
     assert result["failed_messages"] == 1
     assert saved.status == "failed"
     assert saved.outreach_status == "failed"
-    assert saved.metadata["outreach_error"] == "gmail_send_failed"
+    assert saved.metadata["outreach_error"] == "gmail_unknown_send_error"
     assert saved.metadata["outreach_error_at"]
     assert len(emails) == 1
     assert emails[0].status == "failed"
-    assert emails[0].metadata["error"] == "gmail_send_failed"
+    assert emails[0].metadata["error"] == "gmail_unknown_send_error"
 
 
 @pytest.mark.anyio
@@ -231,10 +231,10 @@ async def test_missing_gmail_credentials_persists_failure_reason(monkeypatch: py
     assert result["failed_messages"] == 1
     assert saved.status == "failed"
     assert saved.outreach_status == "failed"
-    assert saved.metadata["outreach_error"] == "missing_gmail_credentials"
+    assert saved.metadata["outreach_error"] == "gmail_not_connected"
     assert saved.metadata["outreach_error_at"]
     assert len(emails) == 1
-    assert emails[0].metadata["error"] == "missing_gmail_credentials"
+    assert emails[0].metadata["error"] == "gmail_not_connected"
 
 
 @pytest.mark.anyio
@@ -674,7 +674,7 @@ async def test_production_failure_log_uses_safe_fields(
     await OutreachAgent().run(AgentRequest(tenant=tenant, payload={}), db)
 
     assert "tenant-prod-failure-log" in caplog.text
-    assert "error_type=gmail_send_failed" in caplog.text
+    assert "error_type=gmail_unknown_send_error" in caplog.text
     assert "status=failed" in caplog.text
     assert "lead@acme-logistics.test" not in caplog.text
     assert "Would it be worth a quick" not in caplog.text

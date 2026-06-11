@@ -298,4 +298,4 @@ async def test_outreach_agent_missing_credentials_marks_lead_failed() -> None:
     assert result["failed_messages"] == 1
     assert saved.status == "failed"
     assert saved.outreach_status == "failed"
-    assert saved.metadata["outreach_error"] == "missing_gmail_credentials"
+    assert saved.metadata["outreach_error"] == "gmail_not_connected"

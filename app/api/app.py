@@ -25,7 +25,7 @@ from app.core.tenant import get_current_tenant, resolve_tenant_context
 from app.db.postgres import initialize_async_database, verify_async_database
 from app.db.session import AsyncDatabaseSession, DatabaseSession, get_async_db_session, reset_async_session_factory
 from app.services.admin_bootstrap_service import ensure_admin_from_env, has_admin_bootstrap_env
-from app.services.auth_service import AuthService
+from app.services.auth_service import AuthService, TenantNameAlreadyTakenError
 from app.services.admin_analytics_service import AdminAnalyticsService
 from app.services.agency_growth_service import AgencyGrowthService
 from app.services.agency_kit_service import AgencyKitLimitError, AgencyKitService
@@ -35,6 +35,7 @@ from app.services.job_service import JobService
 from app.services.lead_service import LeadService
 from app.services.marketing_campaign_service import MarketingCampaignLimitError, MarketingCampaignService
 from app.services.outreach_errors import normalized_outreach_error
+from app.services.outreach_email_service import OutreachEmailService
 from app.services.outreach_service import OutreachService
 from app.services.plan_gate import PlanGateError, require_pro_plan
 from app.services.provider_credential_service import ProviderCredentialService
@@ -81,13 +82,13 @@ class ApiApplication:
 
     async def signup(
         self,
-        tenant_id: str,
+        tenant_id: str = "",
         tenant_name: str,
-        tenant_slug: str,
+        tenant_slug: str = "",
         email: str,
         password: str,
         full_name: str,
-        plan: str = "Starter",
+        plan: str = "Free",
     ) -> Dict[str, Any]:
         result = await AuthService(self.db).signup(
             tenant_id=tenant_id,
@@ -118,13 +119,13 @@ class ApiApplication:
 
 
 class SignupRequest(BaseModel):
-    tenant_id: str
+    tenant_id: str = ""
     tenant_name: str
-    tenant_slug: str
+    tenant_slug: str = ""
     email: str
     password: str
     full_name: str
-    plan: str = "Starter"
+    plan: str = "Free"
 
 
 class LoginRequest(BaseModel):
@@ -208,6 +209,18 @@ class ApprovePaymentRequest(BaseModel):
     payment_reference_id: str
 
 
+class EmailPersonalizationRequest(BaseModel):
+    sender_name: str = ""
+    brand_name: str = ""
+    services_offered: str = ""
+    target_customer_type: str = ""
+    tone: str = "Professional"
+    email_goal: str = "Start conversation"
+    cta: str = ""
+    language: str = "English"
+    signature: str = ""
+
+
 def _serialize_lead(lead: Lead, include_agency_kit: bool = False) -> Dict[str, Any]:
     last_reply_at = lead.last_reply_at
     metadata = dict(lead.metadata or {})
@@ -243,15 +256,25 @@ def _serialize_lead(lead: Lead, include_agency_kit: bool = False) -> Dict[str, A
         "last_reply_at": last_reply_at.isoformat() if hasattr(last_reply_at, "isoformat") else str(last_reply_at or ""),
     }
     if include_agency_kit:
-        payload["id"] = lead.id
+        payload["id"] = str(lead.id or "").strip()
+        payload["company"] = str(lead.company or lead.company_name or "").strip()
+        payload["company_name"] = str(lead.company_name or lead.company or "").strip()
+        payload["created_at"] = lead.created_at.isoformat() if hasattr(lead.created_at, "isoformat") else str(lead.created_at or "")
+        payload["source_query"] = str(lead.source_query or "").strip()
         payload["agency_kit"] = metadata.get("agency_kit", {})
         payload["offer_match"] = metadata.get("offer_match", {})
         payload["whatsapp_sales_kit"] = metadata.get("whatsapp_sales_kit", {})
         payload["marketing_campaign_kit"] = metadata.get("marketing_campaign_kit", {})
+    payload["email_quality"] = str(metadata.get("email_quality", "") or "").strip()
+    payload["lead_quality_grade"] = str(metadata.get("lead_quality_grade", "") or "").strip()
+    payload["save_reason"] = str(metadata.get("quality_reason", "") or metadata.get("reason", "") or "").strip()
     return payload
 
 
 def _serialize_job(job: Job) -> Dict[str, Any]:
+    result = dict(job.result or {}) if isinstance(job.result, dict) else {}
+    data = dict(result.get("data", {}) or {}) if isinstance(result.get("data", {}), dict) else {}
+    summary = dict(job.result_summary or {}) if isinstance(job.result_summary, dict) else {}
     return {
         "job_id": job.id,
         "tenant_id": job.tenant_id,
@@ -260,6 +283,10 @@ def _serialize_job(job: Job) -> Dict[str, Any]:
         "created_at": job.created_at.isoformat() if hasattr(job.created_at, "isoformat") else str(job.created_at or ""),
         "updated_at": job.updated_at.isoformat() if hasattr(job.updated_at, "isoformat") else str(job.updated_at or ""),
         "error": str(job.error or "").strip(),
+        "agent_status": str(result.get("status", "") or "").strip(),
+        "message": str(result.get("message", "") or data.get("message", "") or "").strip(),
+        "result": data,
+        "result_summary": summary,
     }
 
 
@@ -502,6 +529,8 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         try:
             result = await AuthService(db_session).signup(**payload.model_dump())
             return asdict(result)
+        except TenantNameAlreadyTakenError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -787,6 +816,44 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         recent = sorted(jobs, key=lambda item: item.updated_at, reverse=True)[:20]
         return {"tenant_id": tenant.tenant_id, "items": [_serialize_job(job) for job in recent]}
 
+    @app.get("/jobs/{job_id}/status")
+    async def job_status(
+        job_id: str,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        job = await maybe_await(db_session.for_tenant(tenant).get("jobs", job_id))
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        serialized = _serialize_job(job)
+        summary = dict(serialized.get("result_summary", {}) or {})
+        return {
+            **serialized,
+            "progress_percentage": int(summary.get("progress_percentage", 0) or 0),
+            "current_stage": str(summary.get("current_stage", "") or serialized.get("status", "")),
+            "lead_stats": summary.get("stats", serialized.get("result", {})),
+            "recent_events": list(summary.get("events", []) or [])[-50:],
+        }
+
+    @app.get("/jobs/{job_id}/events")
+    async def job_events(
+        job_id: str,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        job = await maybe_await(db_session.for_tenant(tenant).get("jobs", job_id))
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        summary = dict(job.result_summary or {})
+        return {
+            "tenant_id": tenant.tenant_id,
+            "job_id": job.id,
+            "status": str(job.status or "").strip().lower(),
+            "events": list(summary.get("events", []) or []),
+        }
+
     @app.post("/jobs/run-once")
     async def run_job_once(request: Request, payload: RunOnceRequest | None = Body(default=None)) -> Dict[str, Any]:
         tenant = request.state.tenant
@@ -973,6 +1040,74 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         await require_pro_features(tenant, db_session, "Gmail automation is a Pro feature.")
         await ProviderCredentialService(db_session).disconnect_gmail(tenant)
         return {"configured": False, "connected": False, "sender_email": ""}
+
+    @app.get("/settings/email-personalization")
+    async def get_email_personalization(
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        config = await OutreachEmailService(db_session).personalization_config(tenant)
+        return {"tenant_id": tenant.tenant_id, "config": config}
+
+    @app.post("/settings/email-personalization")
+    async def save_email_personalization(
+        payload: EmailPersonalizationRequest,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        config = await OutreachEmailService(db_session).save_personalization_config(tenant, payload.model_dump())
+        return {"tenant_id": tenant.tenant_id, "config": config}
+
+    @app.post("/settings/email-personalization/preview")
+    async def preview_email_personalization(
+        payload: EmailPersonalizationRequest,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        service = OutreachEmailService(db_session)
+        config = {
+            **(await service.personalization_config(tenant)),
+            **payload.model_dump(),
+        }
+        sample = await service.generate_sample_email(tenant, config=config)
+        return {"tenant_id": tenant.tenant_id, "config": config, "sample": sample}
+
+    @app.get("/settings/outreach-profile")
+    async def get_outreach_profile(
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        config = await OutreachEmailService(db_session).personalization_config(tenant)
+        return {"tenant_id": tenant.tenant_id, "config": config}
+
+    @app.post("/settings/outreach-profile")
+    async def save_outreach_profile(
+        payload: EmailPersonalizationRequest,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        config = await OutreachEmailService(db_session).save_personalization_config(tenant, payload.model_dump())
+        return {"tenant_id": tenant.tenant_id, "config": config}
+
+    @app.post("/outreach/preview-email")
+    async def preview_outreach_email(
+        payload: EmailPersonalizationRequest,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        service = OutreachEmailService(db_session)
+        config = {
+            **(await service.personalization_config(tenant)),
+            **payload.model_dump(),
+        }
+        sample = await service.generate_sample_email(tenant, config=config)
+        return {"tenant_id": tenant.tenant_id, "config": config, "sample": sample}
 
     @app.post("/settings/providers/ai")
     async def save_ai_provider_settings(

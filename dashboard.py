@@ -4,6 +4,7 @@ Streamlit analytics dashboard backed by PostgreSQL.
 
 from __future__ import annotations
 
+import base64
 from datetime import datetime
 import html
 import mimetypes
@@ -18,6 +19,7 @@ import streamlit as st
 
 from app.core.auth import decode_jwt_token
 from app.core.models import TenantContext
+from app.services.outreach_errors import outreach_error_message
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -35,6 +37,32 @@ st.set_page_config(page_title=PRODUCT_NAME, page_icon="🔎", layout="wide", ini
 
 API_BASE_URL = os.getenv("APP_API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 DEFAULT_PAYMENT_QR_PATH = str(Path(__file__).resolve().parent / "assets" / "payment-qr.jpeg")
+LOGO_PATH = Path(__file__).resolve().parent / "assets" / "logo.png"
+
+
+def asset_data_uri(path: Path) -> str:
+    if not path.exists():
+        return ""
+    mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def build_dashboard_search_query(niche: str, location: str) -> str:
+    clean_niche = str(niche or "").strip()
+    clean_location = str(location or "").strip()
+    if not clean_niche and not clean_location:
+        return ""
+    if clean_niche and clean_location:
+        lowered = clean_niche.lower()
+        if lowered in {"it", "i.t", "information technology"}:
+            return f"IT companies in {clean_location}"
+        if "software" in lowered:
+            return f"software houses in {clean_location}"
+        if "digital marketing" in lowered:
+            return f"digital marketing agencies in {clean_location}"
+        return f"{clean_niche} companies in {clean_location}"
+    return clean_niche or clean_location
 
 
 def bootstrap_dashboard_state() -> None:
@@ -280,6 +308,15 @@ def render_landing_styles() -> None:
             background: transparent;
         }
         [data-testid="stDecoration"] {display: none;}
+        [data-testid="stSidebarCollapseButton"],
+        [data-testid="stSidebarCollapseButton"] button,
+        [data-testid="collapsedControl"],
+        [data-testid="collapsedControl"] button,
+        [data-testid="stSidebarCollapsedControl"] button,
+        button[title="Collapse sidebar"],
+        button[title="Open sidebar"],
+        button[aria-label="Collapse sidebar"],
+        button[aria-label="Open sidebar"],
         [data-testid="stHeader"] button[aria-label*="sidebar" i],
         [data-testid="stHeader"] button[title*="sidebar" i],
         button[aria-label*="sidebar" i],
@@ -297,20 +334,47 @@ def render_landing_styles() -> None:
             min-width: 2.4rem !important;
             min-height: 2.4rem !important;
             margin: .35rem !important;
-            border: 1px solid #bdebf7 !important;
-            border-radius: 8px !important;
-            background: #ffffff !important;
-            color: #0b2545 !important;
-            box-shadow: 0 8px 18px rgba(11, 37, 69, .10) !important;
+            border: 1px solid rgba(255, 255, 255, .16) !important;
+            border-radius: 11px !important;
+            background: #07111f !important;
+            color: #ffffff !important;
+            box-shadow: 0 10px 24px rgba(7, 17, 31, .28) !important;
             z-index: 1000001 !important;
         }
+        [data-testid="stSidebarCollapseButton"]:hover,
+        [data-testid="stSidebarCollapseButton"] button:hover,
+        [data-testid="collapsedControl"]:hover,
+        [data-testid="collapsedControl"] button:hover,
+        [data-testid="stSidebarCollapsedControl"] button:hover,
+        button[title="Collapse sidebar"]:hover,
+        button[title="Open sidebar"]:hover,
+        button[aria-label="Collapse sidebar"]:hover,
+        button[aria-label="Open sidebar"]:hover,
+        [data-testid="stHeader"] button[aria-label*="sidebar" i]:hover,
+        [data-testid="stHeader"] button[title*="sidebar" i]:hover,
+        button[aria-label*="sidebar" i]:hover,
+        button[title*="sidebar" i]:hover {
+            background: #102238 !important;
+            color: #ffffff !important;
+            border-color: rgba(255, 255, 255, .24) !important;
+            box-shadow: 0 12px 28px rgba(7, 17, 31, .34) !important;
+        }
+        [data-testid="stSidebarCollapseButton"] svg,
+        [data-testid="stSidebarCollapseButton"] button svg,
+        [data-testid="collapsedControl"] svg,
+        [data-testid="collapsedControl"] button svg,
+        [data-testid="stSidebarCollapsedControl"] button svg,
+        button[title="Collapse sidebar"] svg,
+        button[title="Open sidebar"] svg,
+        button[aria-label="Collapse sidebar"] svg,
+        button[aria-label="Open sidebar"] svg,
         [data-testid="stHeader"] button[aria-label*="sidebar" i] svg,
         [data-testid="stHeader"] button[title*="sidebar" i] svg,
         button[aria-label*="sidebar" i] svg,
         button[title*="sidebar" i] svg,
         [data-testid="collapsedControl"] button svg,
         [data-testid="stSidebarCollapsedControl"] button svg {
-            color: #0b2545 !important;
+            color: #ffffff !important;
             fill: currentColor !important;
             stroke: currentColor !important;
         }
@@ -354,6 +418,19 @@ def render_landing_styles() -> None:
             margin-bottom: .4rem;
             border-bottom: 1px solid rgba(148, 163, 184, .14);
         }
+        .sidebar-brand-row {
+            display: flex;
+            align-items: center;
+            gap: .68rem;
+        }
+        .sidebar-brand-logo {
+            width: 38px;
+            height: 38px;
+            flex: 0 0 38px;
+            border-radius: 50%;
+            object-fit: cover;
+            box-shadow: 0 8px 22px rgba(7, 17, 31, .16);
+        }
         .sidebar-brand-title {
             color: #f8fafc;
             font-weight: 850;
@@ -366,6 +443,30 @@ def render_landing_styles() -> None:
             font-size: .78rem;
             line-height: 1.35;
             margin-top: .18rem;
+        }
+        .sidebar-demo {
+            padding: .72rem .1rem .9rem;
+            border-bottom: 1px solid rgba(148, 163, 184, .14);
+            margin-bottom: .65rem;
+        }
+        .sidebar-demo-copy {
+            font-size: .78rem;
+            line-height: 1.38;
+            color: #475569;
+            margin-bottom: .55rem;
+        }
+        .sidebar-benefits {
+            display: grid;
+            gap: .35rem;
+        }
+        .sidebar-benefit {
+            border: 1px solid #dceff6;
+            border-radius: 8px;
+            padding: .42rem .5rem;
+            background: #ffffff;
+            color: #0b2545;
+            font-size: .76rem;
+            font-weight: 750;
         }
         .app-shell {
             max-width: var(--page-max-width);
@@ -914,10 +1015,26 @@ def render_landing_styles() -> None:
         .sidebar-brand {
             border-bottom: 1px solid #dceff6;
         }
+        .sidebar-brand-row {
+            display: flex;
+            align-items: center;
+            gap: .68rem;
+        }
+        .sidebar-brand-logo {
+            width: 38px;
+            height: 38px;
+            flex: 0 0 38px;
+            border-radius: 50%;
+            object-fit: cover;
+            box-shadow: 0 8px 22px rgba(7, 17, 31, .12);
+        }
         .sidebar-brand-title {
             color: var(--text-strong);
         }
         .sidebar-brand-subtitle {
+            color: var(--muted);
+        }
+        .sidebar-demo-copy {
             color: var(--muted);
         }
         .page-card,
@@ -1589,7 +1706,7 @@ def format_outreach_error(error_code: str) -> str:
     value = str(error_code or "").strip().lower()
     if value == "unknown_outreach_failure":
         return UNKNOWN_OUTREACH_FAILURE_MESSAGE
-    return value
+    return outreach_error_message(value)
 
 
 def contact_readiness_label(verified_email: str, phone: str, likely_email: str = "") -> str:
@@ -1619,12 +1736,16 @@ def can_show_test_lead_tool() -> bool:
 
 
 STANDARD_LEAD_EXPORT_COLUMNS = [
+    "company",
     "company_url",
+    "created_at",
     "country",
     "verified_email",
     "phone",
     "likely_email",
     "email_confidence",
+    "email_quality",
+    "lead_quality_grade",
     "contact_readiness",
     "lead_readiness_score",
     "next_contact_action",
@@ -1633,9 +1754,11 @@ STANDARD_LEAD_EXPORT_COLUMNS = [
     "score",
     "outreach_status",
     "outreach_error",
+    "save_reason",
     "followup_count",
     "reply_status",
     "last_reply_at",
+    "source_query",
 ]
 
 
@@ -1650,21 +1773,27 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
         rows.append(
             {
                 "id": str(item.get("id", "") or "").strip(),
+                "company": str(item.get("company", "") or item.get("company_name", "") or "").strip(),
                 "company_url": str(item.get("company_url", "") or "").strip(),
+                "created_at": str(item.get("created_at", "") or "").strip(),
                 "country": str(item.get("country", "") or "").strip(),
                 "verified_email": str(item.get("verified_email", "") or "").strip().lower(),
                 "phone": str(item.get("phone", "") or "").strip(),
                 "likely_email": str(item.get("likely_email", "") or "").strip().lower(),
                 "email_confidence": str(item.get("email_confidence", "") or "").strip().lower(),
+                "email_quality": str(item.get("email_quality", "") or "").strip().lower(),
+                "lead_quality_grade": str(item.get("lead_quality_grade", "") or "").strip(),
                 "lead_readiness_score": item.get("lead_readiness_score", 0),
                 "service_reason": str(item.get("service_reason", "") or "").strip(),
                 "industry": str(item.get("industry", "") or "").strip(),
                 "score": item.get("score", 0),
                 "outreach_status": str(item.get("outreach_status", "") or "").strip().lower(),
                 "outreach_error": format_outreach_error(str(item.get("outreach_error", "") or "").strip().lower()),
+                "save_reason": str(item.get("save_reason", "") or "").strip(),
                 "followup_count": item.get("followup_count", 0),
                 "reply_status": str(item.get("reply_status", "") or "").strip().lower(),
                 "last_reply_at": str(item.get("last_reply_at", "") or "").strip(),
+                "source_query": str(item.get("source_query", "") or "").strip(),
                 "agency_kit": item.get("agency_kit", {}) if isinstance(item.get("agency_kit", {}), dict) else {},
                 "offer_match": item.get("offer_match", {}) if isinstance(item.get("offer_match", {}), dict) else {},
                 "whatsapp_sales_kit": item.get("whatsapp_sales_kit", {}) if isinstance(item.get("whatsapp_sales_kit", {}), dict) else {},
@@ -1746,11 +1875,12 @@ def parse_api_json(response: httpx.Response, fallback_reason: str = "INVALID_API
         return {"status": "FAILED", "reason": fallback_reason, "detail": raw_text[:500] or fallback_reason}
 
 
-def enqueue_job(agent_name: str, payload: Dict[str, Any] | None = None, *, run_now: bool = True) -> None:
+def enqueue_job(agent_name: str, payload: Dict[str, Any] | None = None, *, run_now: bool = True) -> Dict[str, Any]:
     response = api_request("POST", "/jobs", json={"agent_name": agent_name, "payload": payload or {}})
     body = parse_api_json(response)
     if not response.is_success:
         raise RuntimeError(str(body.get("detail", f"Could not enqueue {agent_name}.")))
+    result: Dict[str, Any] = {"queued": body}
     if run_now:
         try:
             run_response = api_request("POST", "/jobs/run-once", json={"job_type": agent_name})
@@ -1762,14 +1892,50 @@ def enqueue_job(agent_name: str, payload: Dict[str, Any] | None = None, *, run_n
                 "error": str(error),
             }
             st.error(f"Could not trigger job execution: {error}")
-            return
+            return result
         run_body = parse_api_json(run_response)
+        result["run"] = run_body
         if not run_response.is_success:
             st.error(str(run_body.get("detail", f"Could not run {agent_name}.")))
-            return
-        if str(run_body.get("status", "")).strip().lower() == "failed":
+            return result
+        status = str(run_body.get("status", "")).strip().lower()
+        agent_status = str(run_body.get("agent_status", "")).strip().upper()
+        if status == "failed" or agent_status == "FAILED":
             st.error(str(run_body.get("message", f"Could not run {agent_name}.")))
-            return
+            return result
+    return result
+
+
+def render_lead_generation_result(run_body: Dict[str, Any]) -> None:
+    data = dict(run_body.get("data", {}) or {}) if isinstance(run_body.get("data", {}), dict) else {}
+    saved = int(data.get("saved_leads", data.get("lead_count", 0)) or 0)
+    if saved > 0:
+        st.success(f"Lead generation completed. Saved {saved} lead(s).")
+        return
+    if not data:
+        return
+    st.warning(str(run_body.get("message") or data.get("message") or "Lead generation finished with 0 saved leads."))
+    st.caption(
+        "Raw results: "
+        f"{int(data.get('raw_results_count', 0) or 0)} | "
+        "Filtered results: "
+        f"{int(data.get('filtered_results_count', 0) or 0)} | "
+        "URLs found: "
+        f"{int(data.get('discovered_urls_count', 0) or 0)} | "
+        f"Pages scraped: {int(data.get('scraped_pages_count', 0) or 0)} | "
+        f"Emails extracted: {int(data.get('extracted_emails_count', 0) or 0)} | "
+        f"Leads saved: {saved}"
+    )
+    rejected_sources = int(data.get("rejected_bad_domain_count", 0) or 0) + int(data.get("rejected_irrelevant_count", 0) or 0)
+    if rejected_sources:
+        st.info(
+            f"Only {saved} usable leads found. Reason: many search results were rejected as irrelevant, directories, "
+            "jobs, GitHub, government, or embassy pages. Try a more specific query like software houses in Lahore."
+        )
+    reasons = data.get("rejection_reasons", {})
+    if isinstance(reasons, dict) and reasons:
+        reason_text = ", ".join(f"{key}: {value}" for key, value in list(reasons.items())[:5])
+        st.caption(f"Rejection reasons: {reason_text}")
 
 
 def load_outreach_preflight() -> Dict[str, Any]:
@@ -1875,16 +2041,14 @@ def render_actions(tenant: TenantContext) -> None:
         target_industry = st.text_input("Target Industry", placeholder="e.g. software, logistics")
     with col_loc:
         target_country = st.text_input("Target Country", placeholder="e.g. Saudi Arabia, USA")
+    search_preview = build_dashboard_search_query(target_industry, target_country)
+    if search_preview:
+        st.caption(f"Search query: {search_preview}")
 
     busy = bool(st.session_state.get("lead_generation_busy", False))
     st.caption("This may take 1-3 minutes.")
     if st.button("Generate Leads", use_container_width=True, disabled=busy):
-        query_parts = []
-        if target_industry.strip():
-            query_parts.append(f"{target_industry.strip()} companies")
-        if target_country.strip():
-            query_parts.append(f"in {target_country.strip()}")
-        search_query = " ".join(query_parts)
+        search_query = build_dashboard_search_query(target_industry, target_country)
 
         st.session_state["lead_generation_busy"] = True
         with st.spinner("AI agent is finding leads... this may take 1-3 minutes."):
@@ -1892,9 +2056,18 @@ def render_actions(tenant: TenantContext) -> None:
             for step in ["Searching businesses...", "Scanning websites...", "Extracting contacts...", "Saving leads..."]:
                 st.write(step)
             try:
-                enqueue_job("lead_generation", {"limit": 10, "query": search_query}, run_now=True)
-                st.success("Lead generation completed. Refresh to see the latest saved leads.")
-                st.caption("Job ran successfully.")
+                job_result = enqueue_job(
+                    "lead_generation",
+                    {
+                        "limit": 10,
+                        "query": search_query,
+                        "niche": target_industry.strip(),
+                        "country": target_country.strip(),
+                        "location": target_country.strip(),
+                    },
+                    run_now=True,
+                )
+                render_lead_generation_result(dict(job_result.get("run", {}) or {}))
             finally:
                 st.session_state["lead_generation_busy"] = False
 
@@ -1958,6 +2131,43 @@ def load_recent_jobs() -> List[Dict[str, Any]]:
     return []
 
 
+def render_lead_pipeline_monitor(latest_job: Dict[str, Any]) -> None:
+    if str(latest_job.get("job_type", "")).strip() != "lead_generation":
+        return
+    summary = latest_job.get("result_summary", {})
+    if not isinstance(summary, dict):
+        return
+    stats = summary.get("stats", {})
+    events = list(summary.get("events", []) or [])[-30:]
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Lead Pipeline Monitor</div>', unsafe_allow_html=True)
+    st.caption(
+        f"Stage: {str(summary.get('current_stage', latest_job.get('status', ''))).title()} | "
+        f"Progress: {int(summary.get('progress_percentage', 0) or 0)}%"
+    )
+    cols = st.columns(6)
+    cols[0].metric("Raw Results", int(stats.get("raw_results_count", 0) or 0) if isinstance(stats, dict) else 0)
+    cols[1].metric("Valid Domains", int(stats.get("filtered_results_count", 0) or 0) if isinstance(stats, dict) else 0)
+    cols[2].metric("Saved Leads", int(stats.get("saved_leads", 0) or 0) if isinstance(stats, dict) else 0)
+    cols[3].metric("Rejected", int(stats.get("rejected_leads_count", 0) or 0) if isinstance(stats, dict) else 0)
+    cols[4].metric("A-Grade", int(stats.get("a_grade_leads", 0) or 0) if isinstance(stats, dict) else 0)
+    cols[5].metric("Outreach Ready", int(stats.get("outreach_ready_leads", 0) or 0) if isinstance(stats, dict) else 0)
+    if events:
+        rows = []
+        for event in reversed(events):
+            rows.append(
+                {
+                    "stage": str(event.get("stage", "")),
+                    "status": str(event.get("status", "")),
+                    "domain": str(event.get("domain", "")),
+                    "reason": str(event.get("reason", "")),
+                    "message": str(event.get("message", "")),
+                }
+            )
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
 def render_generation_status_card(snapshot: Dict[str, Any]) -> None:
     jobs = load_recent_jobs()
     latest_job = jobs[0] if jobs else {}
@@ -1972,6 +2182,22 @@ def render_generation_status_card(snapshot: Dict[str, Any]) -> None:
     ]
     cards = "".join(render_metric_card(label, value, hint) for label, value, hint in metrics)
     st.markdown(f'<div class="page-section"><div class="metric-card-grid">{cards}</div></div>', unsafe_allow_html=True)
+    render_lead_pipeline_monitor(latest_job)
+    if str(latest_job.get("job_type", "")).strip() == "lead_generation":
+        result = latest_job.get("result", {})
+        if isinstance(result, dict) and int(result.get("saved_leads", result.get("lead_count", 0)) or 0) == 0:
+            message = str(latest_job.get("message") or result.get("message") or "").strip()
+            if message:
+                st.warning(message)
+            st.caption(
+                "Last lead-generation result: "
+                f"raw results {int(result.get('raw_results_count', 0) or 0)}, "
+                f"filtered results {int(result.get('filtered_results_count', 0) or 0)}, "
+                f"URLs found {int(result.get('discovered_urls_count', 0) or 0)}, "
+                f"pages scraped {int(result.get('scraped_pages_count', 0) or 0)}, "
+                f"emails extracted {int(result.get('extracted_emails_count', 0) or 0)}, "
+                f"leads saved {int(result.get('saved_leads', 0) or 0)}."
+            )
     contact_metrics = [
         ("Email-ready Leads", str(int(snapshot.get("email_ready_leads", 0) or 0)), "Verified business email"),
         ("Phone-only Leads", str(int(snapshot.get("phone_only_leads", 0) or 0)), "WhatsApp or call first"),
@@ -2007,7 +2233,8 @@ def render_table_page(frame: pd.DataFrame, columns: List[str], *, show_csv_expor
     st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">Lead Table</div>', unsafe_allow_html=True)
     st.markdown('<div class="section-caption">Review saved leads and export the visible columns.</div>', unsafe_allow_html=True)
-    visible = frame.copy()
+    original_count = len(frame)
+    visible = apply_lead_table_controls(frame.copy())
     for column in columns:
         if column not in visible.columns:
             visible[column] = ""
@@ -2015,7 +2242,7 @@ def render_table_page(frame: pd.DataFrame, columns: List[str], *, show_csv_expor
     if export_frame.empty:
         render_empty_state("No leads yet", "Enter a niche and country to generate your first leads.", "Generate Leads")
     else:
-        st.caption(f"Showing {len(export_frame)} lead rows.")
+        st.caption(f"Showing {len(export_frame)} of {original_count} leads.")
         st.dataframe(export_frame, use_container_width=True, hide_index=True)
         if show_csv_export:
             csv_frame = sanitize_csv_frame(export_frame)
@@ -2027,6 +2254,113 @@ def render_table_page(frame: pd.DataFrame, columns: List[str], *, show_csv_expor
                 use_container_width=True,
             )
     st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def apply_lead_table_controls(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    with st.expander("Filter and sort leads", expanded=True):
+        if st.button("Reset filters", use_container_width=False):
+            for key in list(st.session_state.keys()):
+                if str(key).startswith("lead_filter_"):
+                    del st.session_state[key]
+            st.rerun()
+        search = st.text_input("Search company, domain, or email", key="lead_filter_search")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            grade = st.selectbox("Lead quality grade", ["All", "A", "B", "C", "Rejected/Weak"], key="lead_filter_grade")
+            outreach = st.selectbox("Outreach status", ["All", "pending", "sent", "failed", "bounced", "skipped"], key="lead_filter_outreach")
+        with c2:
+            email_quality = st.selectbox(
+                "Email quality",
+                ["All", "business_same_domain", "business_generic", "public_email", "suspicious", "missing"],
+                key="lead_filter_email_quality",
+            )
+            source_values = ["All"]
+            if "source_query" in frame.columns:
+                source_values.extend(sorted(value for value in frame["source_query"].dropna().astype(str).unique() if value))
+            source_query = st.selectbox("Source query", source_values, key="lead_filter_source")
+        with c3:
+            score_min = int(pd.to_numeric(frame.get("score", pd.Series([0])), errors="coerce").fillna(0).min())
+            score_max = int(max(pd.to_numeric(frame.get("score", pd.Series([10])), errors="coerce").fillna(0).max(), 10))
+            score_range = st.slider("Score range", score_min, score_max, (score_min, score_max), key="lead_filter_score")
+            date_range = None
+            if "created_at" in frame.columns:
+                created_dates = pd.to_datetime(frame["created_at"], errors="coerce", utc=True).dropna()
+                if not created_dates.empty:
+                    min_date = created_dates.min().date()
+                    max_date = created_dates.max().date()
+                    date_range = st.date_input("Created date range", value=(min_date, max_date), key="lead_filter_date")
+            sort_by = st.selectbox(
+                "Sort",
+                [
+                    "Newest first",
+                    "Oldest first",
+                    "Highest score first",
+                    "Lowest score first",
+                    "A-grade first",
+                    "Outreach ready first",
+                    "Email available first",
+                    "Company name A-Z",
+                ],
+                key="lead_filter_sort",
+            )
+
+    filtered = frame.copy()
+    if search:
+        haystack = (
+            filtered.get("company", pd.Series("", index=filtered.index)).astype(str)
+            + " "
+            + filtered.get("company_url", pd.Series("", index=filtered.index)).astype(str)
+            + " "
+            + filtered.get("verified_email", pd.Series("", index=filtered.index)).astype(str)
+        ).str.lower()
+        filtered = filtered[haystack.str.contains(str(search).lower(), na=False)]
+    if grade != "All" and "lead_quality_grade" in filtered.columns:
+        wanted = "Rejected" if grade == "Rejected/Weak" else grade
+        filtered = filtered[filtered["lead_quality_grade"].astype(str).str.lower().eq(wanted.lower())]
+    if outreach != "All" and "outreach_status" in filtered.columns:
+        filtered = filtered[filtered["outreach_status"].astype(str).str.lower().eq(outreach)]
+    if email_quality != "All" and "email_quality" in filtered.columns:
+        filtered = filtered[filtered["email_quality"].astype(str).str.lower().eq(email_quality)]
+    if source_query != "All" and "source_query" in filtered.columns:
+        filtered = filtered[filtered["source_query"].astype(str).eq(source_query)]
+    if "score" in filtered.columns:
+        scores = pd.to_numeric(filtered["score"], errors="coerce").fillna(0)
+        filtered = filtered[scores.between(score_range[0], score_range[1])]
+    if date_range and "created_at" in filtered.columns:
+        dates = pd.to_datetime(filtered["created_at"], errors="coerce", utc=True)
+        if isinstance(date_range, tuple) and len(date_range) == 2:
+            start, end = date_range
+            filtered = filtered[(dates.dt.date >= start) & (dates.dt.date <= end)]
+    filtered = sort_lead_frame(filtered, sort_by)
+    if filtered.empty:
+        st.info("No leads match these filters.")
+    return filtered
+
+
+def sort_lead_frame(frame: pd.DataFrame, sort_by: str) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    if sort_by == "Highest score first" and "score" in frame.columns:
+        return frame.assign(_score=pd.to_numeric(frame["score"], errors="coerce").fillna(0)).sort_values("_score", ascending=False).drop(columns=["_score"])
+    if sort_by == "Lowest score first" and "score" in frame.columns:
+        return frame.assign(_score=pd.to_numeric(frame["score"], errors="coerce").fillna(0)).sort_values("_score", ascending=True).drop(columns=["_score"])
+    if sort_by == "A-grade first" and "lead_quality_grade" in frame.columns:
+        order = {"A": 0, "B": 1, "C": 2, "Rejected": 3}
+        return frame.assign(_grade=frame["lead_quality_grade"].map(order).fillna(9)).sort_values("_grade").drop(columns=["_grade"])
+    if sort_by == "Outreach ready first" and "verified_email" in frame.columns:
+        return frame.assign(_ready=frame["verified_email"].astype(str).str.len() > 0).sort_values("_ready", ascending=False).drop(columns=["_ready"])
+    if sort_by == "Email available first" and "verified_email" in frame.columns:
+        return frame.assign(_email=frame["verified_email"].astype(str).str.len() > 0).sort_values("_email", ascending=False).drop(columns=["_email"])
+    if sort_by == "Company name A-Z" and "company" in frame.columns:
+        return frame.sort_values("company")
+    if sort_by in {"Newest first", "Oldest first"} and "created_at" in frame.columns:
+        created = pd.to_datetime(frame["created_at"], errors="coerce", utc=True)
+        return frame.assign(_created_at=created).sort_values("_created_at", ascending=sort_by == "Oldest first").drop(columns=["_created_at"])
+    if sort_by == "Oldest first":
+        return frame.iloc[::-1]
+    return frame
 
 
 def render_lead_action_cta(row: pd.Series) -> None:
@@ -2229,8 +2563,99 @@ def sanitize_csv_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
 def render_settings_page() -> None:
     render_ai_provider_settings()
+    render_email_personalization_settings()
     render_gmail_settings()
     render_account_plan_settings()
+
+
+def render_email_personalization_settings() -> None:
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Personalized Email Setup</div>', unsafe_allow_html=True)
+    st.caption("Tell Lead Hunter AI how to write outreach emails for your business.")
+    try:
+        response = api_request("GET", "/settings/email-personalization")
+        payload = parse_api_json(response)
+        config = dict(payload.get("config", {}) or {}) if response.is_success else {}
+    except Exception:
+        config = {}
+    tone_options = ["Professional", "Friendly", "Confident", "Warm", "Direct", "Premium", "Casual", "Formal"]
+    goal_options = ["Book a meeting", "Offer free audit", "Introduce services", "Start conversation", "Follow up", "Demo invitation"]
+    language_options = ["English", "Roman Urdu", "Arabic", "Simple English", "Custom"]
+    with st.form("email_personalization_form"):
+        c1, c2 = st.columns(2)
+        sender_name = c1.text_input("Sender name", value=str(config.get("sender_name", "") or ""), placeholder="Abdullah Zahoor")
+        brand_name = c2.text_input("Company / brand name", value=str(config.get("brand_name", "") or ""), placeholder="Lead Hunter AI")
+        services = st.text_area(
+            "Services offered",
+            value=str(config.get("services_offered", "") or ""),
+            placeholder="AI lead generation, website automation, chatbot development, marketing automation",
+        )
+        target_customer = st.text_input(
+            "Target customer type",
+            value=str(config.get("target_customer_type", "") or ""),
+            placeholder="software houses, agencies, consultants, dentists, real estate companies",
+        )
+        c3, c4, c5 = st.columns(3)
+        tone = c3.selectbox("Tone", tone_options, index=tone_options.index(str(config.get("tone", "Professional") or "Professional")) if str(config.get("tone", "Professional") or "Professional") in tone_options else 0)
+        goal = c4.selectbox("Email goal", goal_options, index=goal_options.index(str(config.get("email_goal", "Start conversation") or "Start conversation")) if str(config.get("email_goal", "Start conversation") or "Start conversation") in goal_options else 3)
+        language = c5.selectbox("Language", language_options, index=language_options.index(str(config.get("language", "English") or "English")) if str(config.get("language", "English") or "English") in language_options else 0)
+        cta = st.text_input("CTA", value=str(config.get("cta", "") or ""), placeholder="Would you be open to a quick 10-minute call this week?")
+        signature = st.text_area("Optional signature", value=str(config.get("signature", "") or ""), placeholder="Abdullah Zahoor\nFounder, Lead Hunter AI")
+        save_clicked = st.form_submit_button("Save settings", use_container_width=True)
+    body = {
+        "sender_name": sender_name,
+        "brand_name": brand_name,
+        "services_offered": services,
+        "target_customer_type": target_customer,
+        "tone": tone,
+        "email_goal": goal,
+        "cta": cta,
+        "language": language,
+        "signature": signature,
+    }
+    if save_clicked:
+        if not sender_name.strip() or not services.strip():
+            st.warning("Sender name and services offered are recommended for stronger personalization.")
+        response = api_request("POST", "/settings/email-personalization", json=body)
+        payload = parse_api_json(response)
+        if response.is_success:
+            st.success("Email personalization saved.")
+        else:
+            st.error(str(payload.get("detail", "Could not save email setup.")))
+    preview_col, reset_col = st.columns(2)
+    with preview_col:
+        preview_clicked = st.button("Generate sample email", use_container_width=True)
+    with reset_col:
+        reset_clicked = st.button("Reset to defaults", use_container_width=True)
+    if preview_clicked:
+        response = api_request("POST", "/settings/email-personalization/preview", json=body)
+        payload = parse_api_json(response)
+        sample = dict(payload.get("sample", {}) or {})
+        if response.is_success and sample:
+            st.markdown(f"**Subject:** {html.escape(str(sample.get('subject', '') or ''))}")
+            st.text_area("Sample body", value=str(sample.get("body", "") or ""), height=180)
+        else:
+            st.error(str(payload.get("detail", "Could not generate sample email.")))
+    if reset_clicked:
+        defaults = {
+            "sender_name": "",
+            "brand_name": "",
+            "services_offered": "",
+            "target_customer_type": "",
+            "tone": "Professional",
+            "email_goal": "Start conversation",
+            "cta": "",
+            "language": "English",
+            "signature": "",
+        }
+        response = api_request("POST", "/settings/email-personalization", json=defaults)
+        payload = parse_api_json(response)
+        if response.is_success:
+            st.success("Email personalization reset to defaults.")
+            st.rerun()
+        else:
+            st.error(str(payload.get("detail", "Could not reset email setup.")))
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
 def render_ai_provider_settings() -> None:
@@ -3384,11 +3809,33 @@ def render_marketing_campaign_page(tenant: TenantContext, page: str = "Campaign 
 
 
 def render_sidebar_navigation() -> Dict[str, str]:
+    logo_uri = asset_data_uri(LOGO_PATH)
+    logo_markup = (
+        f'<img class="sidebar-brand-logo" src="{logo_uri}" alt="{html.escape(PRODUCT_NAME)} logo">'
+        if logo_uri
+        else ""
+    )
+    st.sidebar.markdown(
+        f"""
+        <div class="sidebar-brand">
+            <div class="sidebar-brand-row">
+                {logo_markup}
+                <div class="sidebar-brand-title">Lead Hunter AI</div>
+            </div>
+            <div class="sidebar-brand-subtitle">AI Agency Operating System</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     st.sidebar.markdown(
         """
-        <div class="sidebar-brand">
-            <div class="sidebar-brand-title">Lead Hunter AI</div>
-            <div class="sidebar-brand-subtitle">AI Agency Operating System</div>
+        <div class="sidebar-demo">
+            <div class="sidebar-demo-copy">Lead Hunter AI finds targeted businesses, extracts contacts, writes outreach, sends emails, and tracks replies.</div>
+            <div class="sidebar-benefits">
+                <div class="sidebar-benefit">Find better leads</div>
+                <div class="sidebar-benefit">Send personalized outreach</div>
+                <div class="sidebar-benefit">Track replies and follow-ups</div>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,

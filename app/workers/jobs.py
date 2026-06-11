@@ -102,7 +102,9 @@ class AsyncJobQueue:
                     if is_plan_gated_agent(persisted_job.name):
                         await require_pro_plan(db, tenant)
                     agent = self.agents.get(persisted_job.name)
-                    request = AgentRequest(tenant=tenant, payload=persisted_job.payload)
+                    request_payload = dict(persisted_job.payload or {})
+                    request_payload["_job_id"] = persisted_job.id
+                    request = AgentRequest(tenant=tenant, payload=request_payload)
                     audit_log(
                         LOGGER,
                         logging.INFO,
@@ -112,10 +114,22 @@ class AsyncJobQueue:
                         persisted_job.name,
                         persisted_job.payload,
                     )
+                    LOGGER.info(
+                        "Job stage start tenant_id=%s job_id=%s agent_name=%s stage=agent_run",
+                        tenant.tenant_id,
+                        persisted_job.id,
+                        persisted_job.name,
+                    )
                     result = await agent.run(request, db)
+                    latest_job = await maybe_await(scoped_db.get("jobs", persisted_job.id))
+                    if latest_job is not None:
+                        persisted_job.result_summary = dict(latest_job.result_summary or {})
                     persisted_job.result = result
-                    persisted_job.status = "completed"
+                    agent_status = str(result.get("status", "") if isinstance(result, dict) else "").strip().upper()
+                    persisted_job.status = "failed" if agent_status == "FAILED" else "completed"
                     persisted_job.error = ""
+                    if persisted_job.status == "failed":
+                        persisted_job.error = str(result.get("message", "") if isinstance(result, dict) else "").strip()
                     persisted_job.locked_by = ""
                     persisted_job.locked_at = None
                     persisted_job.completed_at = datetime.now(timezone.utc)

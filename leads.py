@@ -88,6 +88,7 @@ PROMPT_FILES = {
 }
 
 EXCLUDED_DOMAINS = (
+    "github.com",
     "linkedin.com",
     "facebook.com",
     "instagram.com",
@@ -99,6 +100,7 @@ EXCLUDED_DOMAINS = (
     "crunchbase.com",
     "glassdoor.com",
     "indeed.com",
+    "rozee.pk",
     "reddit.com",
     "scribd.com",
     "f6s.com",
@@ -110,6 +112,8 @@ EXCLUDED_DOMAINS = (
     "wikipedia.org",
     "maps.google.",
     "google.com",
+    "gov.pk",
+    ".gov",
     ".gov.",
     ".gov/",
 )
@@ -125,6 +129,10 @@ DIRECTORY_KEYWORDS = (
 )
 
 EXCLUDED_RESULT_KEYWORDS = (
+    "embassy",
+    "consulate",
+    "government",
+    "ministry",
     "directory",
     "directories",
     "listing",
@@ -133,6 +141,8 @@ EXCLUDED_RESULT_KEYWORDS = (
     "jobs",
     "career",
     "careers",
+    "internship",
+    "internships",
     "salary",
     "salaries",
     "review",
@@ -143,6 +153,83 @@ EXCLUDED_RESULT_KEYWORDS = (
     "marketcap",
     "startup directory",
 )
+
+BUSINESS_RESULT_KEYWORDS = (
+    "company",
+    "companies",
+    "agency",
+    "agencies",
+    "software house",
+    "software development",
+    "it services",
+    "technology",
+    "digital marketing",
+    "web development",
+    "business services",
+    "solutions",
+    "services",
+)
+
+
+def root_domain_from_url(url: str) -> str:
+    host = get_website_key(url)
+    parts = [part for part in host.split(".") if part]
+    if len(parts) >= 3 and parts[-2] in {"com", "net", "org", "gov"}:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def search_result_rejection_reason(result: Dict[str, str]) -> str:
+    link = str(result.get("link", "") or "").strip().lower()
+    title = str(result.get("title", "") or "").strip().lower()
+    snippet = str(result.get("snippet", "") or "").strip().lower()
+    combined = " ".join([link, title, snippet])
+    if not link:
+        return "rejected_invalid_url"
+    if "github.com" in link:
+        return "rejected_bad_domain_github"
+    if any(marker in combined for marker in ("embassy", "consulate", "government", "ministry", "gov.pk", ".gov")):
+        return "rejected_government_or_embassy"
+    if any(marker in combined for marker in ("jobs", "career", "careers", "internship", "rozee.pk", "indeed.com")):
+        return "rejected_job_board"
+    if any(marker in link for marker in ("facebook.com", "youtube.com", "linkedin.com/jobs", "instagram.com", "twitter.com", "x.com")):
+        return "rejected_social_media"
+    if any(marker in combined for marker in ("directory", "listing", "listings", "marketplace", "techbehemoths", "designrush", "zoominfo", "lusha")):
+        return "rejected_directory"
+    if not is_valid_company_website(str(result.get("link", "") or "")):
+        return "rejected_invalid_url"
+    if not looks_like_relevant_business_result(result):
+        return "rejected_irrelevant_title"
+    return ""
+
+
+def lead_quality_grade(website: str, metadata: Dict[str, Any], email: str = "", phone: str = "") -> str:
+    if not website or any(marker in website.lower() for marker in EXCLUDED_DOMAINS):
+        return "Rejected"
+    score = 0
+    if root_domain_from_url(website):
+        score += 3
+    combined = " ".join(
+        [
+            str(metadata.get("industry", "")),
+            str(metadata.get("company_summary", "")),
+            str(metadata.get("reason", "")),
+            str(metadata.get("quality_reason", "")),
+        ]
+    ).lower()
+    if any(keyword in combined for keyword in BUSINESS_RESULT_KEYWORDS):
+        score += 2
+    if str(metadata.get("contact_page", "") or "").strip():
+        score += 2
+    if str(email or "").strip():
+        score += 2
+    if str(phone or "").strip():
+        score += 1
+    if score >= 8 and str(email or "").strip():
+        return "A"
+    if score >= 5:
+        return "B"
+    return "C"
 
 HEADERS = {
     "User-Agent": (
@@ -213,6 +300,8 @@ EMAIL_BAD_SUBSTRINGS = (
 )
 
 GENERATED_LEADS: List[Dict[str, Any]] = []
+LAST_PIPELINE_STATS: Dict[str, Any] = {}
+LAST_PIPELINE_EVENTS: List[Dict[str, Any]] = []
 GMAIL_PROFILE_EMAIL: Optional[str] = None
 UNSUBSCRIBE_FOOTER = "\n\nIf you prefer not to hear from us again, reply with unsubscribe."
 
@@ -418,13 +507,53 @@ def retry_operation(operation: Callable, description: str, attempts: int = 3, de
     raise last_error
 
 
-def search_google(query: str) -> List[Dict[str, str]]:
+def build_search_query(niche: str = "", location: str = "", query: str = "") -> str:
+    niche_value = str(niche or "").strip()
+    location_value = str(location or "").strip()
+    query_value = re.sub(r"\s+", " ", str(query or "").strip())
+    if niche_value and location_value:
+        lowered = niche_value.lower()
+        if lowered in {"it", "i.t", "information technology"}:
+            return f"IT companies in {location_value}"
+        if "software" in lowered:
+            return f"software houses in {location_value}"
+        if "digital marketing" in lowered:
+            return f"digital marketing agencies in {location_value}"
+        return f"{niche_value} companies in {location_value}"
+    return query_value
+
+
+def build_search_query_variants(niche: str = "", location: str = "", query: str = "") -> List[str]:
+    final_query = build_search_query(niche=niche, location=location, query=query)
+    location_value = str(location or "").strip()
+    niche_value = str(niche or "").strip().lower()
+    variants: List[str] = []
+    if location_value and niche_value in {"it", "i.t", "information technology"}:
+        variants = [
+            f"IT companies in {location_value}",
+            f"software houses in {location_value}",
+            f"software development companies in {location_value}",
+            f"IT services companies in {location_value}",
+            f"technology companies in {location_value}",
+            f"custom software development companies in {location_value}",
+        ]
+    elif final_query:
+        variants = [final_query]
+    deduped: List[str] = []
+    for item in variants:
+        normalized = re.sub(r"\s+", " ", str(item or "").strip())
+        if normalized and normalized.lower() not in {existing.lower() for existing in deduped}:
+            deduped.append(normalized)
+    return deduped
+
+
+def search_google(query: str, num: int = 10) -> List[Dict[str, str]]:
     api_key = os.getenv("SERPER_API_KEY", "").strip()
     if not api_key:
         LOGGER.error("SERPER_API_KEY is missing.")
         return []
 
-    payload = {"q": query, "num": 10}
+    payload = {"q": query, "num": max(10, min(int(num or 10), 100))}
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
 
     LOGGER.info("Searching Google for: %s", query)
@@ -472,6 +601,18 @@ def looks_like_directory_result(result: Dict[str, str]) -> bool:
     return any(keyword in combined_text for keyword in EXCLUDED_RESULT_KEYWORDS)
 
 
+def looks_like_relevant_business_result(result: Dict[str, str]) -> bool:
+    combined_text = " ".join(
+        [result.get("title", "").strip(), result.get("snippet", "").strip(), result.get("link", "").strip()]
+    ).lower()
+    if any(keyword in combined_text for keyword in BUSINESS_RESULT_KEYWORDS):
+        return True
+    link = result.get("link", "").strip().lower()
+    parsed = urlparse(link if "://" in link else f"https://{link}")
+    path = parsed.path.strip("/")
+    return bool(parsed.netloc and not path)
+
+
 def normalize_homepage_url(url: str) -> str:
     parsed = urlparse(url)
     scheme = parsed.scheme or "https"
@@ -506,22 +647,47 @@ def get_website_key(url: str) -> str:
     return netloc.rstrip("/")
 
 
-def extract_websites(search_results: List[Dict[str, str]]) -> List[str]:
+def extract_websites_with_stats(search_results: List[Dict[str, str]]) -> Tuple[List[str], Dict[str, int]]:
     websites = []
     seen = set()
+    stats = {
+        "raw_results_count": len(search_results),
+        "filtered_results_count": 0,
+        "rejected_bad_domain_count": 0,
+        "rejected_irrelevant_count": 0,
+        "duplicate_domain_count": 0,
+    }
+    events: List[Dict[str, Any]] = []
     for result in search_results:
-        if looks_like_directory_result(result):
-            continue
         url = result.get("link", "").strip()
-        if not url or not is_valid_company_website(url):
+        domain = root_domain_from_url(url)
+        title = str(result.get("title", "") or "").strip()[:160]
+        events.append({"stage": "searching", "status": "found", "domain": domain, "url": url, "title": title, "message": "raw_result_found"})
+        reason = search_result_rejection_reason(result)
+        if reason:
+            if reason in {"rejected_bad_domain_github", "rejected_government_or_embassy", "rejected_job_board", "rejected_social_media", "rejected_invalid_url"}:
+                stats["rejected_bad_domain_count"] += 1
+            else:
+                stats["rejected_irrelevant_count"] += 1
+            events.append({"stage": "filtering", "status": "rejected", "domain": domain, "url": url, "title": title, "reason": reason, "message": "raw_result_rejected"})
             continue
         homepage = normalize_homepage_url(url)
-        website_key = get_website_key(homepage)
+        website_key = root_domain_from_url(homepage)
         if website_key in seen:
+            stats["duplicate_domain_count"] += 1
+            events.append({"stage": "filtering", "status": "rejected", "domain": website_key, "url": homepage, "title": title, "reason": "rejected_duplicate_domain", "message": "duplicate_domain_skipped"})
             continue
         seen.add(website_key)
         websites.append(homepage)
+        stats["filtered_results_count"] += 1
+        events.append({"stage": "filtering", "status": "accepted", "domain": website_key, "url": homepage, "title": title, "message": "domain_accepted"})
     LOGGER.info("Extracted %s unique company websites.", len(websites))
+    stats["events"] = events  # type: ignore[assignment]
+    return websites, stats
+
+
+def extract_websites(search_results: List[Dict[str, str]]) -> List[str]:
+    websites, _ = extract_websites_with_stats(search_results)
     return websites
 
 
@@ -2235,9 +2401,23 @@ def process_query(
     seen_websites: Optional[set] = None,
     limit: Optional[int] = None,
     ai_mode: str = "",
+    niche: str = "",
+    location: str = "",
 ) -> List[Dict[str, Any]]:
+    global LAST_PIPELINE_EVENTS, LAST_PIPELINE_STATS
     leads = []
     skipped_count = 0
+    events: List[Dict[str, Any]] = []
+    stats: Dict[str, Any] = {
+        "discovered_urls_count": 0,
+        "scraped_pages_count": 0,
+        "cleaned_records_count": 0,
+        "extracted_emails_count": 0,
+        "scored_leads_count": 0,
+        "accepted_leads_count": 0,
+        "rejected_leads_count": 0,
+        "rejection_reasons": {},
+    }
     if seen_websites is None:
         seen_websites = set()
 
@@ -2245,15 +2425,31 @@ def process_query(
         DiscoveryAgent(),
         {
             "query": query,
+            "niche": niche,
+            "location": location,
             "seen_websites": sorted(seen_websites),
             "limit": limit,
         },
     )
     seen_websites.update(discovered.get("seen_websites", []))
     candidate_websites = list(discovered.get("websites", []))
+    stats["discovered_urls_count"] = len(candidate_websites)
+    for key in (
+        "final_query",
+        "query_variants_count",
+        "raw_results_count",
+        "filtered_results_count",
+        "rejected_bad_domain_count",
+        "rejected_irrelevant_count",
+        "duplicate_domain_count",
+    ):
+        stats[key] = discovered.get(key, 0 if key != "final_query" else "")
+    events.extend(list(discovered.get("events", []) or []))
 
     if not candidate_websites:
         LOGGER.warning("process_query('%s') produced zero candidate websites after discovery.", query)
+        LAST_PIPELINE_STATS = stats
+        LAST_PIPELINE_EVENTS = events
         return leads
 
     with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(1, len(candidate_websites)))) as executor:
@@ -2264,9 +2460,35 @@ def process_query(
                 lead = future.result()
             except Exception as error:
                 LOGGER.exception("Unexpected website processing failure for %s", website)
+                reason = type(error).__name__
+                stats["rejection_reasons"][reason] = int(stats["rejection_reasons"].get(reason, 0)) + 1
+                events.append({"stage": "scraping", "status": "failed", "domain": root_domain_from_url(website), "url": website, "reason": "rejected_scrape_failed", "message": "scrape_failed"})
                 continue
+            events.append({"stage": "scraping", "status": "success", "domain": root_domain_from_url(website), "url": website, "message": "scrape_success"})
+            stats["scraped_pages_count"] += 1
+            stats["cleaned_records_count"] += 1
+            stats["scored_leads_count"] += 1
+            if str(lead.get("email", "")).strip():
+                stats["extracted_emails_count"] += 1
+            events.append(
+                {
+                    "stage": "extracting",
+                    "status": "success",
+                    "domain": root_domain_from_url(website),
+                    "url": website,
+                    "message": "emails_extracted",
+                    "metadata": {
+                        "emails_found_count": 1 if str(lead.get("email", "")).strip() else 0,
+                        "phones_found_count": 1 if str(lead.get("phone", "")).strip() else 0,
+                        "contact_page_found": bool(str(lead.get("contact_page", "")).strip()),
+                    },
+                }
+            )
             if not bool(lead.get("qualified", False)) or str(lead.get("decision", "")).strip().lower() == "reject":
                 skipped_count += 1
+                stats["rejected_leads_count"] += 1
+                reason = str(lead.get("skip_reason") or lead.get("quality_reason") or lead.get("email_status") or "rejected").strip()
+                stats["rejection_reasons"][reason] = int(stats["rejection_reasons"].get(reason, 0)) + 1
                 LOGGER.info(
                     "Skipping rejected lead for %s (qualified=%s, decision=%s, reason=%s)",
                     website,
@@ -2274,8 +2496,11 @@ def process_query(
                     lead.get("decision", ""),
                     lead.get("skip_reason", lead.get("quality_reason", "")),
                 )
+                events.append({"stage": "scoring", "status": "rejected", "domain": root_domain_from_url(website), "url": website, "reason": reason, "message": "lead_rejected"})
                 continue
             leads.append(lead)
+            stats["accepted_leads_count"] += 1
+            events.append({"stage": "scoring", "status": "accepted", "domain": root_domain_from_url(website), "url": website, "message": "lead_accepted"})
             LOGGER.info(
                 "Lead stored: %s (score=%s, email=%s, total_saved=%s)",
                 website,
@@ -2292,6 +2517,8 @@ def process_query(
             len(candidate_websites),
         )
     LOGGER.info("process_query('%s') skipped %s rejected lead(s).", query, skipped_count)
+    LAST_PIPELINE_STATS = stats
+    LAST_PIPELINE_EVENTS = events
     return leads
 
 
