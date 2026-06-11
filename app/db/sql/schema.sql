@@ -192,6 +192,33 @@ CREATE TABLE IF NOT EXISTS jobs (
     )
 );
 
+CREATE TABLE IF NOT EXISTS payments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL DEFAULT '',
+    user_email TEXT NOT NULL DEFAULT '',
+    full_name TEXT NOT NULL DEFAULT '',
+    phone_number TEXT NOT NULL DEFAULT '',
+    whatsapp_number TEXT NOT NULL DEFAULT '',
+    plan TEXT NOT NULL DEFAULT '',
+    amount INTEGER NOT NULL DEFAULT 0,
+    currency TEXT NOT NULL DEFAULT 'PKR',
+    status TEXT NOT NULL DEFAULT 'pending',
+    payment_method TEXT NOT NULL DEFAULT '',
+    payment_reference_id TEXT NOT NULL UNIQUE,
+    transaction_reference TEXT NOT NULL DEFAULT '',
+    proof_url TEXT NOT NULL DEFAULT '',
+    user_note TEXT NOT NULL DEFAULT '',
+    admin_note TEXT NOT NULL DEFAULT '',
+    reviewed_by TEXT NOT NULL DEFAULT '',
+    reviewed_at TIMESTAMPTZ,
+    approved_at TIMESTAMPTZ,
+    rejected_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT valid_payment_status CHECK (status IN ('pending', 'approved', 'rejected', 'needs_review', 'pending_verification', 'verified'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_tenant_id ON users (tenant_id);
 CREATE INDEX IF NOT EXISTS idx_users_tenant_role ON users (tenant_id, role);
 
@@ -228,6 +255,9 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_id ON agent_runs (tenant_id);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_status ON agent_runs (tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_jobs_tenant_id ON jobs (tenant_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_tenant_status ON jobs (tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_payments_tenant_id ON payments (tenant_id);
+CREATE INDEX IF NOT EXISTS idx_payments_status ON payments (status);
+CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments (tenant_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_queue_status ON jobs (queue, status, created_at);
 
 CREATE TABLE IF NOT EXISTS gmail_credentials (

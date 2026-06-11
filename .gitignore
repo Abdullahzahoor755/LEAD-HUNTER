@@ -12,6 +12,7 @@ service_account.json
 *.db
 logs/
 screenshots/
+uploads/
 tmp/
 
 # Local/dev editor and scratch files

@@ -189,11 +189,25 @@ class Job(TenantScopedModel):
 
 @dataclass(slots=True)
 class Payment(TenantScopedModel):
+    user_id: str = ""
+    user_email: str = ""
+    full_name: str = ""
+    phone_number: str = ""
+    whatsapp_number: str = ""
     plan: str = ""
     amount: int = 0
+    currency: str = "PKR"
     status: str = "pending"
+    payment_method: str = ""
     payment_reference_id: str = ""
+    transaction_reference: str = ""
     proof_url: str = ""
+    user_note: str = ""
+    admin_note: str = ""
+    reviewed_by: str = ""
+    reviewed_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    rejected_at: Optional[datetime] = None
 
 
 @dataclass(slots=True)

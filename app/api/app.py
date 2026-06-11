@@ -209,6 +209,10 @@ class ApprovePaymentRequest(BaseModel):
     payment_reference_id: str
 
 
+class ReviewPaymentRequest(BaseModel):
+    admin_note: str = ""
+
+
 class EmailPersonalizationRequest(BaseModel):
     sender_name: str = ""
     brand_name: str = ""
@@ -287,6 +291,34 @@ def _serialize_job(job: Job) -> Dict[str, Any]:
         "message": str(result.get("message", "") or data.get("message", "") or "").strip(),
         "result": data,
         "result_summary": summary,
+    }
+
+
+def _serialize_payment(payment: Any) -> Dict[str, Any]:
+    return {
+        "id": str(payment.id or ""),
+        "tenant_id": str(payment.tenant_id or ""),
+        "user_id": str(getattr(payment, "user_id", "") or ""),
+        "user_email": str(getattr(payment, "user_email", "") or ""),
+        "full_name": str(getattr(payment, "full_name", "") or ""),
+        "phone_number": str(getattr(payment, "phone_number", "") or ""),
+        "selected_plan": str(payment.plan or ""),
+        "plan": str(payment.plan or ""),
+        "amount": int(payment.amount or 0),
+        "currency": str(getattr(payment, "currency", "") or "PKR"),
+        "status": str(payment.status or ""),
+        "payment_method": str(getattr(payment, "payment_method", "") or ""),
+        "payment_reference_id": str(payment.payment_reference_id or ""),
+        "transaction_reference": str(getattr(payment, "transaction_reference", "") or ""),
+        "user_note": str(getattr(payment, "user_note", "") or ""),
+        "admin_note": str(getattr(payment, "admin_note", "") or ""),
+        "reviewed_by": str(getattr(payment, "reviewed_by", "") or ""),
+        "created_at": payment.created_at.isoformat() if hasattr(payment.created_at, "isoformat") else str(payment.created_at or ""),
+        "updated_at": payment.updated_at.isoformat() if hasattr(payment.updated_at, "isoformat") else str(payment.updated_at or ""),
+        "reviewed_at": payment.reviewed_at.isoformat() if hasattr(getattr(payment, "reviewed_at", None), "isoformat") else str(getattr(payment, "reviewed_at", "") or ""),
+        "approved_at": payment.approved_at.isoformat() if hasattr(getattr(payment, "approved_at", None), "isoformat") else str(getattr(payment, "approved_at", "") or ""),
+        "rejected_at": payment.rejected_at.isoformat() if hasattr(getattr(payment, "rejected_at", None), "isoformat") else str(getattr(payment, "rejected_at", "") or ""),
+        "has_screenshot": bool(str(payment.proof_url or "").strip()),
     }
 
 
@@ -1157,6 +1189,80 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         tenant = request.state.tenant
         return await LeadService(db_session).dashboard_snapshot(tenant)
 
+    @app.get("/billing/plans")
+    async def billing_plans(
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        return BillingService(db_session).plans()
+
+    @app.post("/billing/payment-requests")
+    async def create_billing_payment_request(
+        request: Request,
+        full_name: str = Form(...),
+        phone_number: str = Form(""),
+        selected_plan: str = Form(...),
+        payment_method: str = Form(...),
+        transaction_reference: str = Form(""),
+        user_note: str = Form(""),
+        screenshot: UploadFile = File(...),
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        suffix = Path(screenshot.filename or "").suffix.lower()
+        allowed_suffixes = {".png", ".jpg", ".jpeg", ".webp"}
+        allowed_mimes = {"image/png", "image/jpeg", "image/webp"}
+        if suffix not in allowed_suffixes or str(screenshot.content_type or "").lower() not in allowed_mimes:
+            raise HTTPException(status_code=400, detail="Payment screenshot must be a PNG, JPG, JPEG, or WEBP image.")
+        content = await screenshot.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Payment screenshot is required.")
+        if len(content) > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Payment screenshot exceeds 5 MB limit.")
+        service = BillingService(db_session)
+        destination = service.proof_storage_path(tenant, "payment", screenshot.filename or "payment.png")
+        destination.write_bytes(content)
+        try:
+            payment = await service.create_payment_request(
+                tenant,
+                user_email=str(getattr(request, "state").user.get("email", "") or ""),
+                full_name=full_name,
+                phone_number=phone_number,
+                selected_plan=selected_plan,
+                payment_method=payment_method,
+                transaction_reference=transaction_reference,
+                screenshot_path=str(destination),
+                user_note=user_note,
+            )
+        except ValueError as error:
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"payment_request": _serialize_payment(payment)}
+
+    @app.get("/billing/payment-requests/me")
+    async def my_billing_payment_requests(
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        items = await BillingService(db_session).list_payment_requests(tenant)
+        return {"items": [_serialize_payment(item) for item in sorted(items, key=lambda item: item.created_at, reverse=True)]}
+
+    @app.get("/billing/payment-requests/{payment_id}")
+    async def get_billing_payment_request(
+        payment_id: str,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        try:
+            payment = await BillingService(db_session).get_payment_request(tenant, payment_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"payment_request": _serialize_payment(payment)}
+
     @app.post("/billing/subscribe")
     async def billing_subscribe(
         payload: SubscribeRequest,
@@ -1180,7 +1286,7 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         tenant = request.state.tenant
         service = BillingService(db_session)
         suffix = Path(proof_file.filename or "proof.bin").suffix.lower()
-        allowed_suffixes = {".png", ".jpg", ".jpeg", ".pdf"}
+        allowed_suffixes = {".png", ".jpg", ".jpeg", ".webp"}
         if suffix not in allowed_suffixes:
             raise HTTPException(status_code=400, detail="Unsupported proof file type.")
         content = await proof_file.read()
@@ -1195,8 +1301,66 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         return {
             "payment_reference_id": payment.payment_reference_id,
             "status": payment.status,
-            "proof_url": payment.proof_url,
+            "has_screenshot": bool(payment.proof_url),
         }
+
+    @app.get("/admin/payment-requests")
+    async def admin_payment_requests(
+        request: Request,
+        status: str = "",
+        plan: str = "",
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        require_admin(request)
+        items = await BillingService(db_session).list_admin_payment_requests()
+        if status:
+            items = [item for item in items if str(item.status).lower() == status.strip().lower()]
+        if plan:
+            items = [item for item in items if str(item.plan).lower() == plan.strip().lower()]
+        return {"items": [_serialize_payment(item) for item in sorted(items, key=lambda item: item.created_at, reverse=True)]}
+
+    @app.post("/admin/payment-requests/{payment_id}/approve")
+    async def admin_approve_payment_request(
+        payment_id: str,
+        payload: ReviewPaymentRequest,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        require_admin(request)
+        try:
+            payment = await BillingService(db_session).review_payment_request(payment_id, "approved", request.state.tenant, payload.admin_note)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        LOGGER.info("payment_request_approved tenant_id=%s plan=%s", payment.tenant_id, payment.plan)
+        return {"payment_request": _serialize_payment(payment)}
+
+    @app.post("/admin/payment-requests/{payment_id}/reject")
+    async def admin_reject_payment_request(
+        payment_id: str,
+        payload: ReviewPaymentRequest,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        require_admin(request)
+        try:
+            payment = await BillingService(db_session).review_payment_request(payment_id, "rejected", request.state.tenant, payload.admin_note)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"payment_request": _serialize_payment(payment)}
+
+    @app.post("/admin/payment-requests/{payment_id}/needs-review")
+    async def admin_needs_review_payment_request(
+        payment_id: str,
+        payload: ReviewPaymentRequest,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        require_admin(request)
+        try:
+            payment = await BillingService(db_session).review_payment_request(payment_id, "needs_review", request.state.tenant, payload.admin_note)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"payment_request": _serialize_payment(payment)}
 
     @app.post("/admin/payments/approve")
     async def admin_approve_payment(

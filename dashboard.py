@@ -2979,73 +2979,92 @@ def render_latest_subscription_response() -> None:
 
 
 def render_payment_history() -> None:
-    st.subheader("Payment History")
-    latest = st.session_state.get("latest_subscription", {}) or {}
-    if not latest:
-        st.info("No payment requests created in this session. Backend payment-history endpoint is not available yet.")
+    st.subheader("Payment Request History")
+    try:
+        response = api_request("GET", "/billing/payment-requests/me")
+        payload = parse_api_json(response)
+    except Exception as error:
+        st.error(f"Could not load payment requests: {error}")
         return
-    history_row = {
-        "Reference": latest.get("payment_reference_id", ""),
-        "Plan": latest.get("plan_name", ""),
-        "Amount": latest.get("price", ""),
-        "Status": latest.get("status", "pending"),
-    }
-    st.dataframe(pd.DataFrame([history_row]), use_container_width=True, hide_index=True)
+    items = payload.get("items", []) if response.is_success else []
+    if not items:
+        st.info("No payment requests yet.")
+        return
+    rows = []
+    for item in items:
+        rows.append(
+            {
+                "Plan": item.get("plan", ""),
+                "Status": str(item.get("status", "")).replace("_", " ").title(),
+                "Amount": f"{item.get('currency', 'PKR')} {item.get('amount', 0)}",
+                "Submitted": item.get("created_at", ""),
+                "Reviewed": item.get("reviewed_at", ""),
+                "Admin note": item.get("admin_note", ""),
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def render_subscribe_section() -> None:
-    st.subheader("Subscribe")
+    st.subheader("Request Upgrade")
     default_plan = current_plan()
-    with st.form("subscribe_form"):
-        plan = st.selectbox("Choose Plan", ["Free", "Pro", "Agency"], index=max(["Free", "Pro", "Agency"].index(default_plan) if default_plan in {"Free", "Pro", "Agency"} else 0, 0))
-        submitted = st.form_submit_button("Subscribe", use_container_width=True)
+    try:
+        plans_response = api_request("GET", "/billing/plans")
+        plans_payload = parse_api_json(plans_response)
+    except Exception:
+        plans_payload = {"items": [], "payment": {}}
+    plan_items = plans_payload.get("items", []) or []
+    if plan_items:
+        cols = st.columns(min(4, len(plan_items)))
+        for index, item in enumerate(plan_items):
+            with cols[index % len(cols)]:
+                st.metric(str(item.get("name", "")), f"{plans_payload.get('currency', 'PKR')} {item.get('price', 0)}")
+                limits = item.get("limits", {}) or {}
+                st.caption(f"Leads: {limits.get('monthly_leads', 0)} | Emails: {limits.get('monthly_emails', 0)}")
+                st.caption("Agency Mode included" if item.get("agency_mode") else "Standard workspace")
+    payment = plans_payload.get("payment", {}) or {}
+    with st.expander("Payment instructions", expanded=True):
+        st.write(f"Method: {payment.get('method_name', '')}")
+        st.write(f"Account title: {payment.get('account_title', '')}")
+        st.write(f"Account number: {payment.get('account_number', '')}")
+        qr_path = str(payment.get("qr_path") or DEFAULT_PAYMENT_QR_PATH)
+        if Path(qr_path).exists():
+            st.image(qr_path, caption="Payment QR", width=180)
+        elif payment.get("qr_code_url"):
+            st.image(str(payment.get("qr_code_url")), caption="Payment QR", width=180)
+    plan_names = [str(item.get("name", "")) for item in plan_items if str(item.get("name", "")) and str(item.get("name", "")) != "Free"] or ["Starter", "Pro", "Agency"]
+    default_index = plan_names.index(default_plan) if default_plan in plan_names else 0
+    with st.form("payment_request_form"):
+        plan = st.selectbox("Selected plan", plan_names, index=default_index)
+        full_name = st.text_input("Full name", value=str(st.session_state.get("auth", {}).get("full_name", "") or ""))
+        phone = st.text_input("Phone / WhatsApp number")
+        payment_method = st.selectbox("Payment method", ["JazzCash", "EasyPaisa", "Bank Transfer", "Nayapay", "Sadapay", "Other"])
+        transaction_reference = st.text_input("Transaction / reference ID (optional)")
+        screenshot = st.file_uploader("Payment screenshot", type=["png", "jpg", "jpeg", "webp"])
+        note = st.text_area("Optional note")
+        submitted = st.form_submit_button("Submit Payment Request", use_container_width=True)
     if submitted:
-        if plan == "Free":
-            st.session_state["auth"] = {**st.session_state.get("auth", {}), "subscription_plan": "Free"}
-            st.success("Free plan selected. Lead generation and CSV export are available.")
+        if screenshot is None or not phone.strip() or not full_name.strip():
+            st.error("Full name, phone number, and payment screenshot are required.")
             return
-        with st.spinner("Creating subscription request..."):
+        mime_type = screenshot.type or mimetypes.guess_type(screenshot.name)[0] or "application/octet-stream"
+        files = {"screenshot": (screenshot.name, screenshot.getvalue(), mime_type)}
+        data = {
+            "full_name": full_name.strip(),
+            "phone_number": phone.strip(),
+            "selected_plan": plan,
+            "payment_method": payment_method,
+            "transaction_reference": transaction_reference.strip(),
+            "user_note": note.strip(),
+        }
+        with st.spinner("Submitting payment request..."):
             try:
-                response = api_request("POST", "/billing/subscribe", json={"plan": plan})
-                payload = response.json()
+                response = api_request("POST", "/billing/payment-requests", data=data, files=files)
+                payload = parse_api_json(response)
                 if response.is_success:
-                    payload["status"] = "pending"
-                    st.session_state["latest_subscription"] = payload
-                    st.info("Upgrade request submitted. Admin will contact you.")
+                    st.success("Payment request submitted. Admin will review it soon.")
                 else:
-                    st.warning("Contact admin to activate this plan.")
-            except Exception as error:
-                st.error(str(error))
-    render_latest_subscription_response()
-
-
-def render_proof_upload() -> None:
-    st.subheader("Upload Payment Proof")
-    with st.form("proof_upload_form"):
-        reference_id = st.text_input("Payment Reference ID")
-        proof_file = st.file_uploader("Proof File", type=["png", "jpg", "jpeg", "pdf"])
-        submitted = st.form_submit_button("Submit Proof", use_container_width=True)
-    if submitted:
-        if not reference_id.strip() or proof_file is None:
-            st.error("Payment reference ID and proof file are required.")
-            return
-        mime_type = proof_file.type or mimetypes.guess_type(proof_file.name)[0] or "application/octet-stream"
-        files = {"proof_file": (proof_file.name, proof_file.getvalue(), mime_type)}
-        data = {"reference_id": reference_id.strip()}
-        with st.spinner("Uploading proof..."):
-            try:
-                response = api_request("POST", "/billing/upload-proof", data=data, files=files)
-                payload = response.json()
-                if response.is_success:
-                    st.session_state["latest_subscription"] = {
-                        **(st.session_state.get("latest_subscription", {}) or {}),
-                        "payment_reference_id": payload.get("payment_reference_id", reference_id.strip()),
-                        "status": payload.get("status", "pending_verification"),
-                        "proof_url": payload.get("proof_url", ""),
-                    }
-                    st.success("Proof submitted. Status: pending_verification")
-                else:
-                    st.error(str(payload.get("detail", "Proof upload failed.")))
+                    st.error(str(payload.get("detail", "Payment request failed.")))
             except Exception as error:
                 st.error(str(error))
 
@@ -3055,33 +3074,69 @@ def render_billing_page() -> None:
     st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">Billing</div>', unsafe_allow_html=True)
     st.markdown('<div class="section-caption">Plan selection, subscription requests, and payment proof uploads.</div>', unsafe_allow_html=True)
-    render_payment_history()
     render_subscribe_section()
-    render_proof_upload()
+    render_payment_history()
     st.markdown("</div></div>", unsafe_allow_html=True)
 
 
 def render_admin_payments() -> None:
-    st.subheader("Payments")
-    st.info("Admin payment list/reject endpoints are not available in the current backend. Approval remains available by reference ID.")
-    with st.form("approve_payment_form"):
-        reference_id = st.text_input("Payment Reference ID")
-        submitted = st.form_submit_button("Approve Payment", use_container_width=True)
-    if submitted:
-        if not reference_id.strip():
-            st.error("Payment reference ID is required.")
-            return
-        with st.spinner("Approving payment..."):
-            try:
-                response = api_request("POST", "/admin/payments/approve", json={"payment_reference_id": reference_id.strip()})
-                payload = response.json()
-                if response.is_success:
-                    st.success(f"Payment approved: {payload.get('payment_reference_id', '')}")
+    st.subheader("Payment Requests")
+    status_filter = st.selectbox(
+        "Payment status",
+        ["", "pending", "needs_review", "approved", "rejected"],
+        format_func=lambda value: "All" if not value else value.replace("_", " ").title(),
+    )
+    try:
+        response = api_request("GET", "/admin/payment-requests", params={"status": status_filter} if status_filter else None)
+        payload = parse_api_json(response)
+    except Exception as error:
+        st.error(f"Could not load payment requests: {error}")
+        return
+    items = payload.get("items", []) if response.is_success else []
+    if not items:
+        st.info("No payment requests found.")
+        return
+    for item in items[:50]:
+        label = f"{item.get('user_email', '')} - {item.get('plan', '')} - {str(item.get('status', '')).replace('_', ' ').title()}"
+        with st.expander(label, expanded=str(item.get("status", "")) in {"pending", "needs_review"}):
+            cols = st.columns(3)
+            cols[0].write(f"Tenant: {item.get('tenant_id', '')}")
+            cols[1].write(f"Phone: {item.get('phone_number', '')}")
+            cols[2].write(f"Amount: {item.get('currency', 'PKR')} {item.get('amount', 0)}")
+            st.write(f"Method: {item.get('payment_method', '')}")
+            st.write(f"Transaction ref: {item.get('transaction_reference', '') or 'Not provided'}")
+            if item.get("user_note"):
+                st.text_area("User note", value=str(item.get("user_note", "")), height=80, disabled=True, key=f"user_note_{item.get('id')}")
+            if item.get("admin_note"):
+                st.text_area("Admin note", value=str(item.get("admin_note", "")), height=80, disabled=True, key=f"admin_note_existing_{item.get('id')}")
+            st.caption("Screenshot uploaded." if item.get("has_screenshot") else "No screenshot attached.")
+            payment_id = str(item.get("id", ""))
+            note = st.text_input("Review note", key=f"payment_review_note_{payment_id}")
+            action_cols = st.columns(3)
+            if action_cols[0].button("Approve", key=f"approve_payment_{payment_id}", disabled=str(item.get("status")) == "approved"):
+                result = api_request("POST", f"/admin/payment-requests/{payment_id}/approve", json={"admin_note": note})
+                body = parse_api_json(result)
+                if result.is_success:
+                    st.success("Payment approved and tenant plan updated.")
+                    st.rerun()
                 else:
-                    st.error(str(payload.get("detail", "Payment approval failed.")))
-            except Exception as error:
-                st.error(str(error))
-    st.caption("Reject action requires `/admin/payments/reject`, which is not present in the current backend.")
+                    st.error(str(body.get("detail", "Approval failed.")))
+            if action_cols[1].button("Needs review", key=f"needs_review_payment_{payment_id}"):
+                result = api_request("POST", f"/admin/payment-requests/{payment_id}/needs-review", json={"admin_note": note})
+                body = parse_api_json(result)
+                if result.is_success:
+                    st.success("Payment marked needs review.")
+                    st.rerun()
+                else:
+                    st.error(str(body.get("detail", "Update failed.")))
+            if action_cols[2].button("Reject", key=f"reject_payment_{payment_id}"):
+                result = api_request("POST", f"/admin/payment-requests/{payment_id}/reject", json={"admin_note": note})
+                body = parse_api_json(result)
+                if result.is_success:
+                    st.success("Payment rejected.")
+                    st.rerun()
+                else:
+                    st.error(str(body.get("detail", "Rejection failed.")))
 
 
 def admin_get(path: str) -> Dict[str, Any]:

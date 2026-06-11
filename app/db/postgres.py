@@ -68,6 +68,20 @@ async def apply_additive_lead_migration(connection) -> None:
         service_reason_backfill_sql(),
         "UPDATE leads SET outreach_status = COALESCE(NULLIF(outreach_status, ''), NULLIF(status, ''), 'pending') WHERE outreach_status = ''",
         "UPDATE leads SET country = COALESCE(NULLIF(country, ''), NULLIF(location, ''), '') WHERE country = ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS user_email TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS phone_number TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS whatsapp_number TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'PKR'",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_method TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS transaction_reference TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS user_note TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS admin_note TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS reviewed_by TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ",
     ]
     for statement in statements:
         await connection.execute(text(statement))
