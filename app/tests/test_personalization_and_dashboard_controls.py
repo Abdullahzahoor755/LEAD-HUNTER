@@ -55,6 +55,13 @@ def test_sidebar_brand_html_is_rendered_safely_once() -> None:
     assert source.count("st.sidebar.markdown(sidebar_brand_html, unsafe_allow_html=True)") == 1
     assert "lhai-sidebar-brand" in source
     assert "sidebar-brand-title" not in source
+    assert "BOLT_LOGO_PATH" in source
+    assert "logo-bolt.png" in source
+    assert "lhai-sidebar-fallback-logo" not in source
+    assert "Lead Hunter AI finds targeted businesses" not in source
+    assert "Find better leads" not in source
+    assert "Send personalized outreach" not in source
+    assert "Track replies and follow-ups" not in source
 
 
 def test_lead_sort_newest_oldest_and_highest_score() -> None:

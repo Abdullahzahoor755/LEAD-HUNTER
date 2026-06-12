@@ -37,7 +37,7 @@ st.set_page_config(page_title=PRODUCT_NAME, page_icon="🔎", layout="wide", ini
 
 API_BASE_URL = os.getenv("APP_API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 DEFAULT_PAYMENT_QR_PATH = str(Path(__file__).resolve().parent / "assets" / "payment-qr.jpeg")
-LOGO_PATH = Path(__file__).resolve().parent / "assets" / "logo.png"
+BOLT_LOGO_PATH = Path(__file__).resolve().parent / "assets" / "logo-bolt.png"
 
 
 def resolve_local_asset_path(path_value: str) -> Path:
@@ -421,8 +421,8 @@ def render_landing_styles() -> None:
             color: #cbd5e1 !important;
         }
         .lhai-sidebar-brand {
-            padding: .25rem .1rem 1rem;
-            margin-bottom: .4rem;
+            padding: .15rem .1rem .85rem;
+            margin-bottom: .65rem;
             border-bottom: 1px solid #dceff6;
         }
         .lhai-sidebar-brand-inner {
@@ -437,8 +437,7 @@ def render_landing_styles() -> None:
             border-radius: 50%;
             display: grid;
             place-items: center;
-            background: #020617;
-            color: #ffffff;
+            background: transparent;
             overflow: hidden;
             box-shadow: 0 8px 22px rgba(7, 17, 31, .16);
         }
@@ -448,11 +447,6 @@ def render_landing_styles() -> None:
             border-radius: 50%;
             object-fit: cover;
             display: block;
-        }
-        .lhai-sidebar-fallback-logo {
-            font-size: 1rem;
-            font-weight: 900;
-            line-height: 1;
         }
         .lhai-sidebar-copy {
             min-width: 0;
@@ -469,30 +463,6 @@ def render_landing_styles() -> None:
             font-size: .78rem;
             line-height: 1.35;
             margin-top: .18rem;
-        }
-        .sidebar-demo {
-            padding: .72rem .1rem .9rem;
-            border-bottom: 1px solid rgba(148, 163, 184, .14);
-            margin-bottom: .65rem;
-        }
-        .sidebar-demo-copy {
-            font-size: .78rem;
-            line-height: 1.38;
-            color: #475569;
-            margin-bottom: .55rem;
-        }
-        .sidebar-benefits {
-            display: grid;
-            gap: .35rem;
-        }
-        .sidebar-benefit {
-            border: 1px solid #dceff6;
-            border-radius: 8px;
-            padding: .42rem .5rem;
-            background: #ffffff;
-            color: #0b2545;
-            font-size: .76rem;
-            font-weight: 750;
         }
         .app-shell {
             max-width: var(--page-max-width);
@@ -1040,9 +1010,6 @@ def render_landing_styles() -> None:
         .lhai-sidebar-brand {border-bottom-color: #dceff6;}
         .lhai-sidebar-title {color: var(--text-strong);}
         .lhai-sidebar-subtitle {color: var(--muted);}
-        .sidebar-demo-copy {
-            color: var(--muted);
-        }
         .page-card,
         .metric-card,
         .soft-card,
@@ -2525,7 +2492,7 @@ def render_agency_kit_panel(frame: pd.DataFrame) -> None:
     st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">AI Agency Kit</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="section-caption">Rule-based fallback kits. Free: 3/month, Pro: 100/month, Agency: 1000/month.</div>',
+        '<div class="section-caption">Rule-based fallback kits. Free: 3/month, Pro: 100/month, Agency: unlimited fair-use.</div>',
         unsafe_allow_html=True,
     )
     if frame.empty:
@@ -3027,10 +2994,12 @@ def render_subscribe_section() -> None:
             with cols[index % len(cols)]:
                 st.metric(str(item.get("name", "")), f"{plans_payload.get('currency', 'PKR')} {item.get('price', 0)}")
                 limits = item.get("limits", {}) or {}
-                st.caption(f"Leads: {limits.get('monthly_leads', 0)} | Emails: {limits.get('monthly_emails', 0)}")
+                lead_limit = "Unlimited" if int(limits.get("monthly_leads", 0) or 0) >= 999999999 else str(limits.get("monthly_leads", 0))
+                email_limit = "Unlimited" if int(limits.get("monthly_emails", 0) or 0) >= 999999999 else str(limits.get("monthly_emails", 0))
+                st.caption(f"Leads: {lead_limit} | Emails: {email_limit}")
                 st.caption("Agency Mode included" if item.get("agency_mode") else "Standard workspace")
     payment = plans_payload.get("payment", {}) or {}
-    plan_names = [str(item.get("name", "")) for item in plan_items if str(item.get("name", "")) and str(item.get("name", "")) != "Free"] or ["Starter", "Pro", "Agency"]
+    plan_names = [str(item.get("name", "")) for item in plan_items if str(item.get("name", "")) and str(item.get("name", "")) != "Free"] or ["Pro", "Agency"]
     default_index = plan_names.index(default_plan) if default_plan in plan_names else 0
     selected_plan = st.selectbox("Selected plan", plan_names, index=default_index, key="billing_selected_plan")
     selected_plan_item = next((item for item in plan_items if str(item.get("name", "")) == selected_plan), {})
@@ -3873,17 +3842,16 @@ def render_marketing_campaign_page(tenant: TenantContext, page: str = "Campaign 
 
 
 def render_sidebar_brand() -> None:
-    logo_uri = asset_data_uri(LOGO_PATH)
+    logo_uri = asset_data_uri(BOLT_LOGO_PATH)
     if logo_uri:
         logo_markup = f'<img class="lhai-sidebar-logo" src="{logo_uri}" alt="{html.escape(PRODUCT_NAME)} logo">'
     else:
-        logo_markup = '<span class="lhai-sidebar-fallback-logo">LH</span>'
+        logo_markup = ""
+    logo_block = f'<div class="lhai-sidebar-logo-wrap">{logo_markup}</div>' if logo_markup else ""
     sidebar_brand_html = (
         '<div class="lhai-sidebar-brand">'
         '<div class="lhai-sidebar-brand-inner">'
-        '<div class="lhai-sidebar-logo-wrap">'
-        f"{logo_markup}"
-        "</div>"
+        f"{logo_block}"
         '<div class="lhai-sidebar-copy">'
         '<div class="lhai-sidebar-title">Lead Hunter AI</div>'
         '<div class="lhai-sidebar-subtitle">AI Agency Operating System</div>'
@@ -3896,17 +3864,6 @@ def render_sidebar_brand() -> None:
 
 def render_sidebar_navigation() -> Dict[str, str]:
     render_sidebar_brand()
-    sidebar_demo_html = (
-        '<div class="sidebar-demo">'
-        '<div class="sidebar-demo-copy">Lead Hunter AI finds targeted businesses, extracts contacts, writes outreach, sends emails, and tracks replies.</div>'
-        '<div class="sidebar-benefits">'
-        '<div class="sidebar-benefit">Find better leads</div>'
-        '<div class="sidebar-benefit">Send personalized outreach</div>'
-        '<div class="sidebar-benefit">Track replies and follow-ups</div>'
-        "</div>"
-        "</div>"
-    )
-    st.sidebar.markdown(sidebar_demo_html, unsafe_allow_html=True)
     st.sidebar.markdown("### Workspace")
     if st.sidebar.button("Logout", use_container_width=True):
         st.session_state["auth"] = {}
