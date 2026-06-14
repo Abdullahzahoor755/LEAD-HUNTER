@@ -103,6 +103,74 @@ async def test_outreach_email_generation_works_without_anthropic_key(monkeypatch
     assert result["subject"]
     assert "quick" in result["body"].lower() or "chat" in result["body"].lower()
     assert "Acme Logistics" in result["body"]
+    assert result["human_score"] >= 85
+
+
+@pytest.mark.anyio
+async def test_outreach_email_generation_is_human_style(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-human-email")
+    db.tenants.save(_tenant_record(tenant.tenant_id))
+    lead = await _save_pending_lead(db, tenant)
+
+    result = await OutreachEmailService(db).generate_outreach_email(tenant, lead)
+    body = result["body"]
+    lowered = body.lower()
+    first_sentence = body.strip().split(".", 1)[0].lower()
+    words = body.replace("\n", " ").split()
+
+    assert first_sentence.startswith(("i noticed", "i saw", "i came across", "i was looking at"))
+    assert len(words) <= 90
+    assert result["human_score"] >= 85
+    assert result["company_summary"]
+    assert result["likely_service_category"]
+    assert result["personalized_observation"]
+    for banned in [
+        "search query",
+        "lead source",
+        "scraped data",
+        "target matching",
+        "target from search query",
+        "target from the search query",
+        "matches the search query",
+        "workflow automation may help",
+        "may need workflow automation",
+        "ai generated",
+        "we provide ai services",
+        "i'm our team",
+    ]:
+        assert banned not in lowered
+
+
+def test_human_score_rejects_banned_ai_phrases() -> None:
+    service = OutreachEmailService(build_memory_session())
+    body = (
+        "I noticed Acme matches the search query.\n\n"
+        "Workflow automation may help.\n\n"
+        "Open to a quick 10-minute call?"
+    )
+
+    assert service.human_score("Quick idea", body) < 85
+
+
+@pytest.mark.anyio
+async def test_followup_sequence_sounds_distinct(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-human-followups")
+    db.tenants.save(_tenant_record(tenant.tenant_id))
+    lead = await _save_pending_lead(db, tenant)
+    service = OutreachEmailService(db)
+
+    first = await service.generate_followup_email(tenant, lead, 1, "Initial", "Body")
+    second = await service.generate_followup_email(tenant, lead, 2, "Initial", "Body")
+    third = await service.generate_followup_email(tenant, lead, 3, "Initial", "Body")
+
+    assert "top of your inbox" in first["body"]
+    assert "short example" in second["body"]
+    assert "close the loop" in third["body"].lower()
+    assert len({first["body"], second["body"], third["body"]}) == 3
 
 
 @pytest.mark.anyio

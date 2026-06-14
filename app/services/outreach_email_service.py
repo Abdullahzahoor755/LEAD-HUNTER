@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import re
 from typing import Any, Dict
 from urllib.parse import urlparse
 
@@ -60,7 +61,7 @@ class OutreachEmailService:
         return {
             "sender_name": str(config.get("sender_name", "") or "").strip(),
             "brand_name": str(config.get("brand_name", "") or "").strip(),
-            "services_offered": str(config.get("services_offered", "") or "AI lead generation, website automation, chatbot development, marketing automation").strip(),
+            "services_offered": str(config.get("services_offered", "") or "").strip(),
             "target_customer_type": str(config.get("target_customer_type", "") or "businesses").strip(),
             "tone": str(config.get("tone", "") or "Professional").strip(),
             "email_goal": str(config.get("email_goal", "") or "Start conversation").strip(),
@@ -106,29 +107,30 @@ class OutreachEmailService:
     def _fallback_outreach(self, lead: Lead, config: Dict[str, Any] | None = None) -> Dict[str, Any]:
         config = dict(config or {})
         company = self._company_label(lead)
-        sender_name = str(config.get("sender_name", "") or "").strip()
-        brand_name = str(config.get("brand_name", "") or "our team").strip()
-        services = str(config.get("services_offered", "") or self._value_prop(lead)).strip()
-        target = str(config.get("target_customer_type", "") or "businesses").strip()
         tone = str(config.get("tone", "") or "Professional").strip()
         goal = str(config.get("email_goal", "") or "Start conversation").strip()
         language = str(config.get("language", "") or "English").strip()
-        cta = str(config.get("cta", "") or "a quick 10-minute call this week").strip()
-        signature = str(config.get("signature", "") or sender_name or brand_name).strip()
-        personalized_line = self._personalized_line(lead)
+        sender_name = str(config.get("sender_name", "") or "").strip()
+        signature = str(config.get("signature", "") or sender_name or config.get("brand_name", "") or "").strip()
+        if sender_name and sender_name.lower() not in signature.lower():
+            signature = f"{sender_name}\n{signature}".strip()
+        personalization = self._personalization_engine(lead)
+        cta = self._low_friction_cta(config)
+        problem = self._business_problem()
+        help_line = self._help_line()
+        services_focus = self._single_service_focus(str(config.get("services_offered", "") or "").strip())
+        if services_focus:
+            help_line = f"{help_line} For you, I would keep it focused on {services_focus}."
         subject = f"Quick idea for {company}"[:90]
-        context_note = ""
-        if tone or goal or language:
-            context_note = f"\nTone: {tone}. Goal: {goal}. Language: {language}."
         body = (
-            f"Hi {company} team,\n\n"
-            f"I'm {sender_name + ' from ' if sender_name else ''}{brand_name}. "
-            f"We help {target} with {services}.\n\n"
-            f"{personalized_line}\n\n"
-            f"Would you be open to {cta}?\n\n"
-            f"Best,\n{signature}"
-            f"{context_note if context_note and language.lower() != 'english' else ''}"
+            f"{personalization['personalized_observation']}\n\n"
+            f"{problem}\n\n"
+            f"{help_line}\n\n"
+            f"{cta}"
         )
+        if signature:
+            body = f"{body}\n\n{signature}"
+        score = self.human_score(subject, body)
         return {
             "subject": subject,
             "body": body,
@@ -136,6 +138,10 @@ class OutreachEmailService:
             "tone": tone,
             "email_goal": goal,
             "language": language,
+            "company_summary": personalization["company_summary"],
+            "likely_service_category": personalization["likely_service_category"],
+            "personalized_observation": personalization["personalized_observation"],
+            "human_score": score,
         }
 
     def _fallback_followup(
@@ -156,21 +162,23 @@ class OutreachEmailService:
         bodies = {
             1: (
                 f"Hi {company} team,\n\n"
-                f"Just following up on my note. {value_prop}\n\n"
-                "Open to a quick chat this week?"
+                "Just wanted to put this back near the top of your inbox.\n\n"
+                f"{value_prop}\n\n"
+                "Open to a quick 10-minute call?"
             ),
             2: (
                 f"Hi {company} team,\n\n"
-                "One practical starting point could be reviewing the current lead flow and finding the easiest automation win.\n\n"
-                "Would a short audit be useful?"
+                "A simple place to start is looking at where new inquiries slow down after someone visits the site.\n\n"
+                "I can share a short example of how we tighten that up. Worth seeing?"
             ),
             3: (
                 f"Hi {company} team,\n\n"
-                "I do not want to crowd your inbox, so I will close the loop here.\n\n"
-                "If improving lead capture or follow-up becomes a priority, happy to share a few ideas."
+                "I do not want to keep nudging if this is not relevant.\n\n"
+                "Should I close the loop for now?"
             ),
         }
-        return {"subject": subjects[sequence][:90], "body": bodies[sequence], "mode": "fallback"}
+        score = self.human_score(subjects[sequence], bodies[sequence])
+        return {"subject": subjects[sequence][:90], "body": bodies[sequence], "mode": "fallback", "human_score": score}
 
     async def _maybe_ai_refine(
         self,
@@ -199,11 +207,18 @@ class OutreachEmailService:
         body = str(payload.get("body", "") or "").strip()
         if not subject or not body:
             return {**fallback, "mode": "fallback", "ai_error": "AI provider failed; fallback used"}
+        score = self.human_score(subject, body)
+        if score < 85:
+            return {**fallback, "mode": "fallback", "ai_error": "AI provider output failed human quality gate"}
         return {
             "subject": subject[:100],
             "body": body,
             "mode": "ai_enhanced",
             "provider": str(status.get("provider", "") or "").strip(),
+            "human_score": score,
+            "company_summary": str(payload.get("company_summary", fallback.get("company_summary", "")) or "").strip(),
+            "likely_service_category": str(payload.get("likely_service_category", fallback.get("likely_service_category", "")) or "").strip(),
+            "personalized_observation": str(payload.get("personalized_observation", fallback.get("personalized_observation", "")) or "").strip(),
         }
 
     async def _tenant_can_use_ai(self, tenant: TenantContext) -> bool:
@@ -228,11 +243,13 @@ class OutreachEmailService:
 
     def _outreach_refinement_prompt(self, lead: Lead, fallback: Dict[str, Any], config: Dict[str, Any]) -> str:
         return (
-            "Refine this cold outreach email. Keep it under 120 words, professional, non-spammy, and specific.\n"
-            "Use the sender name, brand/company name, services, target customer type, tone, email goal, CTA, and language from the sender configuration.\n"
-            "Use the lead company name, website/domain, and business description when available.\n"
-            "Avoid fake claims, spammy wording, scraping mentions, or saying AI found their website. Avoid saying 'I noticed' unless supported by lead context.\n"
-            "Return strict JSON only: {\"subject\":\"\", \"body\":\"\"}\n\n"
+            "Rewrite this as human-written cold outreach from a founder, consultant, or agency owner.\n"
+            "Rules: under 90 words. Four short lines: personalized observation, business problem, how we help, low-friction CTA.\n"
+            "First sentence must start with I noticed, I saw, I came across, or I was looking at.\n"
+            "Never mention search query, lead source, scraped data, target matching, AI generated content, or automation process.\n"
+            "Do not list services. Focus on one problem and one outcome. Avoid corporate jargon and marketing fluff.\n"
+            "If company data is thin, use soft personalization without hallucinating details.\n"
+            "Return strict JSON only: {\"subject\":\"\", \"body\":\"\", \"company_summary\":\"\", \"likely_service_category\":\"\", \"personalized_observation\":\"\"}\n\n"
             f"Sender configuration: {json.dumps(config, ensure_ascii=True)}\n"
             f"Lead context: {json.dumps(self._lead_context(lead), ensure_ascii=True)}\n"
             f"Fallback email: {json.dumps({'subject': fallback.get('subject', ''), 'body': fallback.get('body', '')}, ensure_ascii=True)}"
@@ -247,7 +264,10 @@ class OutreachEmailService:
         fallback: Dict[str, Any],
     ) -> str:
         return (
-            "Refine this B2B follow-up email. Keep it short, helpful, and not pushy.\n"
+            "Refine this B2B follow-up email so it sounds manually written, short, helpful, and not pushy.\n"
+            "Follow-up 1 is a friendly reminder. Follow-up 2 shares value. Follow-up 3 is a breakup email.\n"
+            "Never mention search query, lead source, scraped data, target matching, AI generated content, or automation process.\n"
+            "Avoid generic service lists and corporate jargon.\n"
             "Return strict JSON only: {\"subject\":\"\", \"body\":\"\"}\n\n"
             f"Follow-up number: {followup_number}\n"
             f"Lead context: {json.dumps(self._lead_context(lead), ensure_ascii=True)}\n"
@@ -302,6 +322,143 @@ class OutreachEmailService:
         if lead.industry:
             return f"For {lead.industry.strip()} teams, a simpler lead capture and follow-up system can often turn more inquiries into conversations."
         return "A practical starting point could be improving lead capture, response speed, and follow-up consistency."
+
+    def _personalization_engine(self, lead: Lead) -> Dict[str, str]:
+        category = self._likely_service_category(lead)
+        summary = self._company_summary(lead, category)
+        observation = self._personalized_observation(lead, summary, category)
+        return {
+            "company_summary": summary,
+            "likely_service_category": category,
+            "personalized_observation": observation,
+        }
+
+    def _company_summary(self, lead: Lead, category: str) -> str:
+        company = self._company_label(lead)
+        if lead.industry:
+            return f"{company} appears to work in {lead.industry.strip()}."
+        if lead.country:
+            return f"{company} appears to serve customers in {lead.country.strip()}."
+        domain = self._domain(lead.company_url or lead.website)
+        if domain:
+            return f"{company} has a public website at {domain}."
+        return f"{company} appears to be a {category} provider."
+
+    def _likely_service_category(self, lead: Lead) -> str:
+        text = " ".join(
+            str(value or "")
+            for value in [lead.industry, lead.service_reason, lead.reason, lead.company, lead.company_name, lead.company_url]
+        ).lower()
+        if any(word in text for word in ("managed it", "cyber", "cloud", "software", "technology", "saas")):
+            return "IT services"
+        if any(word in text for word in ("real estate", "property", "broker")):
+            return "real estate services"
+        if any(word in text for word in ("school", "academy", "education", "training")):
+            return "education services"
+        if any(word in text for word in ("ecommerce", "retail", "shop", "store")):
+            return "online retail"
+        if lead.industry:
+            return lead.industry.strip()[:80]
+        return "service business"
+
+    def _personalized_observation(self, lead: Lead, summary: str, category: str) -> str:
+        company = self._company_label(lead)
+        reason = self._lead_reason_fragment(lead)
+        if reason:
+            if reason.lower().startswith(("their ", "its ")):
+                return f"I noticed {company}'s {reason.split(' ', 1)[1]}."
+            return f"I noticed {company} {reason}."
+        if lead.industry:
+            return f"I noticed {company} works in {lead.industry.strip()}."
+        if lead.company_url or lead.website:
+            return f"I was looking at {company}'s website and saw you are active in {category}."
+        if lead.country:
+            return f"I came across {company} while researching {category} providers in {lead.country.strip()}."
+        return f"I came across {company} while researching {category} providers."
+
+    def _lead_reason_fragment(self, lead: Lead) -> str:
+        reason = self._clean_ai_phrases(str(lead.service_reason or lead.reason or "").strip())
+        if not reason:
+            return ""
+        reason = re.sub(r"^this company\s+", "", reason, flags=re.IGNORECASE)
+        reason = re.sub(r"^appears to\s+", "appears to ", reason, flags=re.IGNORECASE)
+        return reason.strip(" .")[:150]
+
+    def _business_problem(self) -> str:
+        return "A few good-fit prospects can slip away when there is not a simple next step."
+
+    def _help_line(self) -> str:
+        return "I help founders turn that interest into booked conversations with a focused lead capture and follow-up flow."
+
+    def _low_friction_cta(self, config: Dict[str, Any]) -> str:
+        configured = str(config.get("cta", "") or "").strip()
+        blocked = ("discovery consultation", "synergies", "transform your business")
+        if configured and not any(item in configured.lower() for item in blocked):
+            if configured.endswith("?"):
+                return configured
+            return f"Open to {configured}?"
+        return "If this sounds relevant, open to a quick 10-minute call?"
+
+    def _single_service_focus(self, services: str) -> str:
+        value = str(services or "").strip()
+        if not value:
+            return ""
+        pieces = [piece.strip() for piece in re.split(r",|;|\n|\s+and\s+", value) if piece.strip()]
+        if len(pieces) > 4:
+            return ""
+        return value[:120]
+
+    def _clean_ai_phrases(self, value: str) -> str:
+        text = str(value or "")
+        replacements = {
+            "matches the search query": "appears relevant",
+            "target from search query": "business category",
+            "target from the search query": "business category",
+            "matches the technology target": "appears to offer technology services",
+            "workflow automation may help": "a clearer follow-up process may help",
+            "may need workflow automation": "may benefit from clearer follow-up",
+        }
+        for bad, good in replacements.items():
+            text = re.sub(re.escape(bad), good, text, flags=re.IGNORECASE)
+        return re.sub(r"\s+", " ", text).strip()
+
+    def human_score(self, subject: str, body: str) -> int:
+        text = f"{subject}\n{body}".lower()
+        score = 100
+        banned = (
+            "ai generated",
+            "search query",
+            "lead source",
+            "scraped data",
+            "target matching",
+            "target from search query",
+            "target from the search query",
+            "matches the technology target",
+            "matches the search query",
+            "we provide ai services",
+            "i'm our team",
+            "our ai detected",
+            "we identified",
+            "we analyzed",
+            "automation process",
+            "workflow automation may help",
+            "may need workflow automation",
+        )
+        score -= 25 * sum(1 for phrase in banned if phrase in text)
+        service_words = re.findall(r"\b(ai|websites?|chatbots?|automation|marketing|seo|apps?|crm|funnels?)\b", text)
+        if len(set(service_words)) >= 5:
+            score -= 25
+        if any(phrase in text for phrase in ("let's discuss synergies", "discovery consultation", "transform your business")):
+            score -= 20
+        words = re.findall(r"\b[\w'-]+\b", body)
+        if len(words) < 35 or len(words) > 90:
+            score -= 10
+        first_sentence = re.split(r"[.!?]", body.strip(), maxsplit=1)[0].lower()
+        if not first_sentence.startswith(("i noticed", "i saw", "i came across", "i was looking at")):
+            score -= 10
+        if "?\n" not in body and not body.rstrip().endswith("?"):
+            score -= 5
+        return max(0, min(100, score))
 
     def _value_prop(self, lead: Lead) -> str:
         metadata = dict(lead.metadata or {})
