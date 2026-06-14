@@ -318,10 +318,8 @@ class ScoringAgent(JsonAgent):
     def _service_reason(self, industry: str, query: str, company_name: str) -> str:
         subject = str(company_name or "").strip() or "This company"
         if industry and industry != "Other":
-            return f"{subject} matches the {industry.lower()} target from the search query and may need workflow automation or managed IT support."
-        if str(query or "").strip():
-            return f"{subject} matches the search query and may need workflow automation or managed IT support."
-        return f"{subject} may need workflow automation or managed IT support."
+            return f"{subject} appears to offer {industry.lower()} services and may benefit from a steadier flow of qualified prospects."
+        return f"{subject} appears to be a relevant business with public contact details."
 
     def _summary_from_text(self, website_text: str, company_name: str) -> str:
         text = re.sub(r"\s+", " ", str(website_text or "")).strip()

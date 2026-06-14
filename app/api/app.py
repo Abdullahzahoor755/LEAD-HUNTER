@@ -156,6 +156,7 @@ class LeadUpsertRequest(BaseModel):
     outreach_status: str = "pending"
     followup_count: int = 0
     reply_status: str = "no_reply"
+    bounce_status: str = ""
     last_reply_at: str = ""
     company: str = ""
     website: str = ""
@@ -168,6 +169,11 @@ class LeadUpsertRequest(BaseModel):
     status: str = "pending"
     source_query: str = ""
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class WhatsAppStatusRequest(BaseModel):
+    whatsapp_status: str
+    whatsapp_message: str = ""
 
 
 class JobRequest(BaseModel):
@@ -229,7 +235,7 @@ def _serialize_lead(lead: Lead, include_agency_kit: bool = False) -> Dict[str, A
     last_reply_at = lead.last_reply_at
     metadata = dict(lead.metadata or {})
     contact = metadata.get("contact", {}) if isinstance(metadata.get("contact", {}), dict) else {}
-    phone = str(lead.phone or metadata.get("phone", "") or metadata.get("Phone", "") or contact.get("phone", "") or "").strip()
+    phone = LeadService.normalize_phone(str(lead.phone or metadata.get("phone", "") or metadata.get("Phone", "") or contact.get("phone", "") or ""))
     likely_email = LeadService.likely_email_from_metadata(metadata)
     lead_readiness_score = metadata.get("lead_readiness_score")
     if lead_readiness_score is None:
@@ -260,6 +266,12 @@ def _serialize_lead(lead: Lead, include_agency_kit: bool = False) -> Dict[str, A
         "last_reply_at": last_reply_at.isoformat() if hasattr(last_reply_at, "isoformat") else str(last_reply_at or ""),
     }
     if include_agency_kit:
+        payload["bounce_status"] = str(metadata.get("BounceStatus", "") or "").strip().lower()
+        payload["lead_reason"] = str(lead.service_reason or "").strip()
+        payload["whatsapp_ready"] = LeadService.whatsapp_ready(phone)
+        payload["whatsapp_status"] = str(metadata.get("whatsapp_status", "not_contacted") or "not_contacted").strip().lower()
+        payload["whatsapp_message"] = str(metadata.get("whatsapp_message", "") or "").strip()
+        payload["whatsapp_last_contacted_at"] = str(metadata.get("whatsapp_last_contacted_at", "") or "").strip()
         payload["id"] = str(lead.id or "").strip()
         payload["company"] = str(lead.company or lead.company_name or "").strip()
         payload["company_name"] = str(lead.company_name or lead.company or "").strip()
@@ -670,6 +682,9 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
     ) -> Dict[str, Any]:
         tenant = request.state.tenant
         data = payload.model_dump()
+        metadata = dict(data.get("metadata") or {})
+        if data.get("bounce_status"):
+            metadata["BounceStatus"] = str(data.get("bounce_status") or "").strip()
         lead = Lead(
             tenant_id=tenant.tenant_id,
             company_url=str(data.get("company_url") or data.get("website") or "").strip(),
@@ -690,7 +705,7 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
             reason=str(data.get("reason") or data.get("service_reason") or "").strip(),
             status=str(data.get("status") or data.get("outreach_status") or "pending").strip(),
             source_query=str(data.get("source_query") or "").strip(),
-            metadata=dict(data.get("metadata") or {}),
+            metadata=metadata,
         )
         saved = await LeadService(db_session).upsert_lead(tenant, lead)
         return asdict(saved)
@@ -709,6 +724,23 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         except ValueError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         return {"tenant_id": tenant.tenant_id, "lead_id": lead_id, "agency_kit": kit}
+
+    @app.post("/leads/{lead_id}/reply-status")
+    async def update_lead_reply_status(
+        lead_id: str,
+        payload: Dict[str, str] = Body(default_factory=dict),
+        request: Request = None,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        status = str(payload.get("reply_status", "") or "").strip()
+        if status not in {"replied", "interested", "not_interested"}:
+            raise HTTPException(status_code=400, detail="Invalid reply_status.")
+        try:
+            lead = await OutreachService(db_session).mark_lead_reply_status(tenant, lead_id, status)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"tenant_id": tenant.tenant_id, "lead_id": lead.id, "reply_status": lead.reply_status}
 
     @app.post("/leads/agency-kit/bulk")
     async def generate_agency_kit_bulk(
@@ -790,6 +822,46 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         except ValueError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         return {"tenant_id": tenant.tenant_id, "lead_id": lead_id, "whatsapp_sales_kit": sales_kit}
+
+    @app.post("/leads/{lead_id}/whatsapp-message/preview")
+    async def preview_whatsapp_message(
+        lead_id: str,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        config = await OutreachEmailService(db_session).personalization_config(tenant)
+        try:
+            preview = await LeadService(db_session).generate_whatsapp_message_preview(tenant, lead_id, config)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"tenant_id": tenant.tenant_id, **preview}
+
+    @app.post("/leads/{lead_id}/whatsapp-status")
+    async def update_whatsapp_status(
+        lead_id: str,
+        payload: WhatsAppStatusRequest,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        try:
+            lead = await LeadService(db_session).update_whatsapp_status(
+                tenant,
+                lead_id,
+                payload.whatsapp_status,
+                payload.whatsapp_message,
+            )
+        except ValueError as error:
+            detail = str(error)
+            raise HTTPException(status_code=400 if "Invalid" in detail else 404, detail=detail) from error
+        metadata = dict(lead.metadata or {})
+        return {
+            "tenant_id": tenant.tenant_id,
+            "lead_id": lead.id,
+            "whatsapp_status": str(metadata.get("whatsapp_status", "not_contacted") or "not_contacted"),
+            "whatsapp_last_contacted_at": str(metadata.get("whatsapp_last_contacted_at", "") or ""),
+        }
 
     @app.post("/agency/mini-agency-plan")
     async def generate_mini_agency_plan(

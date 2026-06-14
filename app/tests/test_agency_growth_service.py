@@ -106,6 +106,75 @@ async def test_whatsapp_sales_kit_uses_phone_rule_and_stores_metadata(monkeypatc
 
 
 @pytest.mark.anyio
+async def test_whatsapp_crm_preview_uses_lead_reason_and_generates_link() -> None:
+    db = build_memory_session()
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        signup = await _signup(client, "tenant-whatsapp-crm")
+        lead = _lead(
+            db,
+            "tenant-whatsapp-crm",
+            company="AL Master IT Solutions",
+            phone="+92 300 000 0000",
+            service_reason="This company offers managed IT services and may benefit from a steadier flow of B2B prospects.",
+        )
+        response = await client.post(
+            f"/leads/{lead.id}/whatsapp-message/preview",
+            headers=_auth_headers(signup["token"]),
+            json={},
+        )
+
+    payload = response.json()
+    lowered = payload["whatsapp_message"].lower()
+    assert response.status_code == 200
+    assert payload["whatsapp_ready"] is True
+    assert payload["phone"] == "+923000000000"
+    assert "managed it services" in lowered
+    assert "search query" not in lowered
+    assert "scraped" not in lowered
+    assert "ai detected" not in lowered
+    assert payload["whatsapp_url"].startswith("https://wa.me/923000000000?text=")
+
+
+@pytest.mark.anyio
+async def test_whatsapp_crm_status_update_is_tenant_scoped() -> None:
+    db = build_memory_session()
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        first = await _signup(client, "tenant-whatsapp-a")
+        second = await _signup(client, "tenant-whatsapp-b")
+        lead = _lead(db, "tenant-whatsapp-a", company="Tenant A Lead", phone="+923000000000")
+
+        forbidden = await client.post(
+            f"/leads/{lead.id}/whatsapp-status",
+            headers=_auth_headers(second["token"]),
+            json={"whatsapp_status": "contacted"},
+        )
+        allowed = await client.post(
+            f"/leads/{lead.id}/whatsapp-status",
+            headers=_auth_headers(first["token"]),
+            json={"whatsapp_status": "contacted", "whatsapp_message": "Hello"},
+        )
+
+    saved = db.for_tenant(TenantContext(tenant_id="tenant-whatsapp-a")).get("leads", lead.id)
+    assert forbidden.status_code == 404
+    assert allowed.status_code == 200
+    assert saved.metadata["whatsapp_status"] == "contacted"
+    assert saved.metadata["whatsapp_message"] == "Hello"
+
+
+def test_phone_normalization_and_whatsapp_readiness() -> None:
+    from app.services.lead_service import LeadService
+
+    assert LeadService.normalize_phone("+92 300 000 0000") == "+923000000000"
+    assert LeadService.whatsapp_ready("+923000000000") is True
+    assert LeadService.whatsapp_ready("123") is False
+    assert LeadService.whatsapp_url("+92 300 000 0000", "Hello there").startswith("https://wa.me/923000000000?text=Hello")
+
+
+@pytest.mark.anyio
 async def test_unknown_offer_match_gets_useful_default() -> None:
     db = build_memory_session()
     app = create_fastapi_app(db=db)

@@ -1767,6 +1767,7 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
                 "lead_quality_grade": str(item.get("lead_quality_grade", "") or "").strip(),
                 "lead_readiness_score": item.get("lead_readiness_score", 0),
                 "service_reason": str(item.get("service_reason", "") or "").strip(),
+                "lead_reason": str(item.get("lead_reason", "") or item.get("service_reason", "") or "").strip(),
                 "industry": str(item.get("industry", "") or "").strip(),
                 "score": item.get("score", 0),
                 "outreach_status": str(item.get("outreach_status", "") or "").strip().lower(),
@@ -1775,6 +1776,10 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
                 "followup_count": item.get("followup_count", 0),
                 "reply_status": str(item.get("reply_status", "") or "").strip().lower(),
                 "bounce_status": str(item.get("bounce_status", "") or "").strip().lower(),
+                "whatsapp_ready": bool(item.get("whatsapp_ready", False)),
+                "whatsapp_status": str(item.get("whatsapp_status", "not_contacted") or "not_contacted").strip().lower(),
+                "whatsapp_message": str(item.get("whatsapp_message", "") or "").strip(),
+                "whatsapp_last_contacted_at": str(item.get("whatsapp_last_contacted_at", "") or "").strip(),
                 "last_reply_at": str(item.get("last_reply_at", "") or "").strip(),
                 "source_query": str(item.get("source_query", "") or "").strip(),
                 "agency_kit": item.get("agency_kit", {}) if isinstance(item.get("agency_kit", {}), dict) else {},
@@ -2287,6 +2292,13 @@ def apply_lead_table_controls(frame: pd.DataFrame) -> pd.DataFrame:
                 ],
                 key="lead_filter_sort",
             )
+            whatsapp_ready = st.selectbox("WhatsApp ready", ["All", "Ready", "Not ready"], key="lead_filter_whatsapp_ready")
+            whatsapp_status = st.selectbox(
+                "WhatsApp status",
+                ["All", "not_contacted", "opened", "contacted", "replied", "interested", "not_interested"],
+                key="lead_filter_whatsapp_status",
+            )
+            has_lead_reason = st.selectbox("Has lead reason", ["All", "Yes", "No"], key="lead_filter_has_reason")
 
     filtered = frame.copy()
     if search:
@@ -2307,6 +2319,13 @@ def apply_lead_table_controls(frame: pd.DataFrame) -> pd.DataFrame:
         filtered = filtered[filtered["email_quality"].astype(str).str.lower().eq(email_quality)]
     if source_query != "All" and "source_query" in filtered.columns:
         filtered = filtered[filtered["source_query"].astype(str).eq(source_query)]
+    if whatsapp_ready != "All" and "whatsapp_ready" in filtered.columns:
+        filtered = filtered[filtered["whatsapp_ready"].astype(bool).eq(whatsapp_ready == "Ready")]
+    if whatsapp_status != "All" and "whatsapp_status" in filtered.columns:
+        filtered = filtered[filtered["whatsapp_status"].astype(str).str.lower().eq(whatsapp_status)]
+    if has_lead_reason != "All":
+        reason_values = filtered.get("lead_reason", filtered.get("service_reason", pd.Series("", index=filtered.index))).astype(str).str.strip()
+        filtered = filtered[reason_values.ne("") if has_lead_reason == "Yes" else reason_values.eq("")]
     if "score" in filtered.columns:
         scores = pd.to_numeric(filtered["score"], errors="coerce").fillna(0)
         filtered = filtered[scores.between(score_range[0], score_range[1])]
@@ -2356,6 +2375,52 @@ def render_lead_action_cta(row: pd.Series) -> None:
         st.warning("No contact found yet. Enrich this lead before outreach.")
 
 
+def render_whatsapp_crm_controls(row: pd.Series, lead_id: str, index: int) -> None:
+    lead_reason = str(row.get("lead_reason", "") or row.get("service_reason", "") or "").strip()
+    phone = str(row.get("phone", "") or "").strip()
+    ready = bool(row.get("whatsapp_ready", False))
+    status = str(row.get("whatsapp_status", "not_contacted") or "not_contacted").strip().replace("_", " ").title()
+    st.markdown("**WhatsApp CRM**")
+    st.write(f"Lead Reason: {lead_reason or 'Not available'}")
+    st.write(f"Phone / WhatsApp: {phone or 'Not found'}")
+    st.write(f"WhatsApp Ready: {'Ready' if ready else 'Not ready'}")
+    preview_response = api_request("POST", f"/leads/{lead_id}/whatsapp-message/preview", json={})
+    preview = parse_api_json(preview_response, "WHATSAPP_PREVIEW_FAILED")
+    if not preview_response.is_success:
+        st.warning(str(preview.get("detail", "Could not generate WhatsApp preview.")))
+        return
+    message = str(preview.get("whatsapp_message", "") or row.get("whatsapp_message", "") or "").strip()
+    whatsapp_url = str(preview.get("whatsapp_url", "") or "").strip()
+    st.text_area("AI WhatsApp Message", value=message, height=140, key=f"whatsapp_message_preview_{lead_id}_{index}")
+    st.caption(f"Status: {status}")
+    action_cols = st.columns(3)
+    if ready and whatsapp_url:
+        with action_cols[0]:
+            if st.button("Open WhatsApp", key=f"open_whatsapp_{lead_id}_{index}", use_container_width=True):
+                api_request("POST", f"/leads/{lead_id}/whatsapp-status", json={"whatsapp_status": "opened", "whatsapp_message": message})
+                st.link_button("Continue to WhatsApp", whatsapp_url, use_container_width=True)
+        with action_cols[1]:
+            st.text_area("Copy Message", value=message, height=80, key=f"copy_whatsapp_{lead_id}_{index}")
+    else:
+        action_cols[0].button("No valid WhatsApp number", key=f"no_whatsapp_{lead_id}_{index}", disabled=True, use_container_width=True)
+    status_cols = st.columns(4)
+    for label, value, col in [
+        ("Mark Contacted", "contacted", status_cols[0]),
+        ("Mark Replied", "replied", status_cols[1]),
+        ("Mark Interested", "interested", status_cols[2]),
+        ("Mark Not Interested", "not_interested", status_cols[3]),
+    ]:
+        with col:
+            if st.button(label, key=f"whatsapp_status_{value}_{lead_id}_{index}", use_container_width=True):
+                response = api_request("POST", f"/leads/{lead_id}/whatsapp-status", json={"whatsapp_status": value, "whatsapp_message": message})
+                payload = parse_api_json(response, "WHATSAPP_STATUS_FAILED")
+                if response.is_success:
+                    st.success("WhatsApp status updated.")
+                    st.rerun()
+                else:
+                    st.error(str(payload.get("detail", "Could not update WhatsApp status.")))
+
+
 def render_lead_action_buttons(row: pd.Series, index: int) -> None:
     lead_id = str(row.get("id", "") or "").strip()
     if not lead_id:
@@ -2365,6 +2430,7 @@ def render_lead_action_buttons(row: pd.Series, index: int) -> None:
     agency_kit = row.get("agency_kit", {}) if isinstance(row.get("agency_kit", {}), dict) else {}
     offer_match = row.get("offer_match", {}) if isinstance(row.get("offer_match", {}), dict) else {}
     whatsapp_sales_kit = row.get("whatsapp_sales_kit", {}) if isinstance(row.get("whatsapp_sales_kit", {}), dict) else {}
+    render_whatsapp_crm_controls(row, lead_id, index)
 
     status_cols = st.columns(3)
     for label, status, col in [
@@ -2453,6 +2519,8 @@ def render_live_leads_page(frame: pd.DataFrame) -> None:
         "contact_readiness",
         "lead_readiness_score",
         "outreach_status",
+        "whatsapp_ready",
+        "whatsapp_status",
         "reply_status",
     ]
     render_table_page(frame, summary_columns, show_csv_export=False)

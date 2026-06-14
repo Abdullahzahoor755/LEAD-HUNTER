@@ -413,7 +413,37 @@ async def test_score_breakdown_is_not_service_reason() -> None:
         ),
     )
 
-    assert saved.service_reason == ""
+    assert saved.service_reason == "This appears to be a relevant business with public contact details."
+
+
+@pytest.mark.anyio
+async def test_lead_reason_fallback_is_saved_when_data_is_weak() -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-lead-reason-fallback")
+    saved = await LeadService(db).upsert_lead(
+        tenant,
+        Lead(tenant_id=tenant.tenant_id, company_url="https://weak-reason.test"),
+    )
+
+    assert saved.service_reason == "This appears to be a relevant business with public contact details."
+    assert "search query" not in saved.service_reason.lower()
+
+
+@pytest.mark.anyio
+async def test_lead_reason_sanitizes_forbidden_generation_words() -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-lead-reason-clean")
+    saved = await LeadService(db).upsert_lead(
+        tenant,
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company_url="https://clean-reason.test",
+            service_reason="Clean Co matches the search query and may need workflow automation.",
+        ),
+    )
+
+    assert "search query" not in saved.service_reason.lower()
+    assert "appears to be relevant" in saved.service_reason
 
 
 @pytest.mark.anyio
@@ -443,7 +473,7 @@ async def test_upsert_clears_existing_score_breakdown_service_reason() -> None:
     )
 
     assert saved.id == stale.id
-    assert saved.service_reason == ""
+    assert saved.service_reason == "This appears to be a relevant business with public contact details."
 
 
 @pytest.mark.anyio
@@ -855,7 +885,7 @@ async def test_valid_claude_industry_is_preserved_when_not_in_local_map() -> Non
 
 
 @pytest.mark.anyio
-async def test_missing_claude_industry_remains_other_and_reason_empty(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+async def test_missing_claude_industry_remains_other_and_reason_fallback(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     db = build_memory_session()
     tenant = TenantContext(tenant_id="tenant-missing-claude")
 
@@ -886,7 +916,7 @@ async def test_missing_claude_industry_remains_other_and_reason_empty(monkeypatc
         )
 
     saved = db.for_tenant(tenant).list("leads")[0]
-    assert saved.service_reason == ""
+    assert saved.service_reason == "This appears to be a relevant business with public contact details."
     assert saved.industry == "Other"
     assert saved.country == "Saudi Arabia"
     assert "missing_claude_reason_or_intent_summary" in caplog.text

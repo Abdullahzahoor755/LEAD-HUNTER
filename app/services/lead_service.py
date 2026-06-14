@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import fields
-from datetime import datetime
+from datetime import datetime, timezone
 import re
 from typing import Any, Sequence
+from urllib.parse import quote
 from urllib.parse import urlparse
 
 from app.core.models import Lead, TenantContext
@@ -74,6 +75,13 @@ class LeadService:
 
     async def list_leads(self, tenant: TenantContext) -> Sequence[Lead]:
         return await maybe_await(self.db.for_tenant(tenant).list("leads"))
+
+    async def lead_for_tenant(self, tenant: TenantContext, lead_id: str) -> Lead:
+        lead = await maybe_await(self.db.for_tenant(tenant).get("leads", lead_id))
+        if lead is None:
+            raise ValueError("Lead not found.")
+        assert_same_tenant(tenant.tenant_id, lead.tenant_id)
+        return lead
 
     async def upsert_lead(self, tenant: TenantContext, lead: Lead) -> Lead:
         assert_same_tenant(tenant.tenant_id, lead.tenant_id)
@@ -156,6 +164,7 @@ class LeadService:
         normalized.last_reply_at = self._normalize_last_reply_at(normalized.last_reply_at, normalized.metadata)
         normalized.email = normalized.verified_email
         normalized.website = normalized.company_url or normalized.website
+        normalized.service_reason = self._safe_lead_reason(normalized)
         normalized.reason = normalized.service_reason or normalized.reason
         normalized.status = normalized.outreach_status or normalized.status
         normalized.industry = self._normalize_industry(normalized.industry)
@@ -163,13 +172,118 @@ class LeadService:
         normalized.metadata["email_quality"] = email_result["email_quality"]
         normalized.metadata["email_confidence"] = email_result["email_confidence"]
         normalized.metadata["likely_email"] = email_result["likely_email"]
+        original_phone = normalized.phone or self.phone_from_metadata(normalized.metadata)
+        normalized_phone = self.normalize_phone(original_phone)
+        if original_phone and normalized_phone and original_phone != normalized_phone:
+            normalized.metadata["original_phone"] = original_phone
+        normalized.phone = normalized_phone
+        normalized.metadata["phone"] = normalized_phone
+        normalized.metadata["whatsapp_ready"] = self.whatsapp_ready(normalized_phone)
+        normalized.metadata.setdefault("whatsapp_status", "not_contacted")
         normalized.metadata["lead_readiness_score"] = self.lead_readiness_score(
             verified_email=normalized.verified_email,
             likely_email=email_result["likely_email"],
-            phone=normalized.phone or self.phone_from_metadata(normalized.metadata),
+            phone=normalized.phone,
         )
         normalized.metadata["rejected_emails"] = email_result["rejected_emails"]
         return normalized
+
+    async def generate_whatsapp_message_preview(self, tenant: TenantContext, lead_id: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+        lead = await self.lead_for_tenant(tenant, lead_id)
+        metadata = dict(lead.metadata or {})
+        phone = self.normalize_phone(lead.phone or self.phone_from_metadata(metadata))
+        message = self._whatsapp_message(lead, dict(config or {}))
+        whatsapp_ready = self.whatsapp_ready(phone)
+        return {
+            "lead_id": lead.id,
+            "whatsapp_ready": whatsapp_ready,
+            "phone": phone,
+            "whatsapp_message": message,
+            "whatsapp_url": self.whatsapp_url(phone, message) if whatsapp_ready else "",
+            "whatsapp_status": str(metadata.get("whatsapp_status", "not_contacted") or "not_contacted"),
+            "lead_reason": str(lead.service_reason or "").strip(),
+        }
+
+    async def update_whatsapp_status(self, tenant: TenantContext, lead_id: str, status: str, message: str = "") -> Lead:
+        allowed = {"not_contacted", "opened", "contacted", "replied", "interested", "not_interested"}
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status not in allowed:
+            raise ValueError("Invalid whatsapp_status.")
+        scoped = self.db.for_tenant(tenant)
+        lead = await self.lead_for_tenant(tenant, lead_id)
+        metadata = dict(lead.metadata or {})
+        metadata["whatsapp_status"] = normalized_status
+        if message:
+            metadata["whatsapp_message"] = str(message or "").strip()[:1000]
+        if normalized_status in {"opened", "contacted"}:
+            metadata["whatsapp_last_contacted_at"] = datetime.now(timezone.utc).isoformat()
+        lead.metadata = metadata
+        return await maybe_await(scoped.save("leads", lead))
+
+    def _whatsapp_message(self, lead: Lead, config: dict[str, Any]) -> str:
+        sender_name = str(config.get("sender_name", "") or "").strip()
+        brand_name = str(config.get("brand_name", "") or "").strip()
+        services = self._single_whatsapp_service(str(config.get("services_offered", "") or "").strip())
+        cta = str(config.get("cta", "") or "").strip() or "Would you be open to a quick 10-minute chat?"
+        if not cta.endswith("?"):
+            cta = f"{cta}?"
+        company = str(lead.company or lead.company_name or self._domain_label(lead.company_url or lead.website) or "your team").strip()
+        intro = f"Hi {company} team"
+        if sender_name and brand_name:
+            intro = f"{intro}, this is {sender_name} from {brand_name}."
+        elif sender_name:
+            intro = f"{intro}, this is {sender_name}."
+        else:
+            intro = f"{intro}, hope you're doing well."
+        reason = str(lead.service_reason or "").strip() or "This appears to be a relevant business with public contact details."
+        help_line = f"I noticed {reason[:220]}"
+        if services:
+            help_line = f"{help_line} I thought {services} might be relevant for your team."
+        else:
+            help_line = f"{help_line} I thought a simple lead generation and follow-up system might be relevant for your team."
+        message = f"{intro}\n\n{help_line}\n\n{cta}"
+        return self._clean_forbidden_reason(message)[:1000]
+
+    def _single_whatsapp_service(self, services: str) -> str:
+        value = str(services or "").strip()
+        if not value:
+            return ""
+        parts = [part.strip() for part in re.split(r",|;|\n", value) if part.strip()]
+        if len(parts) > 3:
+            return parts[0][:120]
+        return value[:160]
+
+    @classmethod
+    def whatsapp_url(cls, phone: str, message: str) -> str:
+        normalized = cls.normalize_phone(phone)
+        if not cls.whatsapp_ready(normalized):
+            return ""
+        return f"https://wa.me/{normalized.lstrip('+')}?text={quote(str(message or '').strip())}"
+
+    @classmethod
+    def normalize_phone(cls, phone: str) -> str:
+        raw = str(phone or "").strip()
+        if not raw:
+            return ""
+        candidate = re.sub(r"[^\d+]", "", raw)
+        if candidate.startswith("00"):
+            candidate = f"+{candidate[2:]}"
+        if candidate.count("+") > 1:
+            return ""
+        if "+" in candidate and not candidate.startswith("+"):
+            return ""
+        digits = re.sub(r"\D", "", candidate)
+        if not 8 <= len(digits) <= 15:
+            return ""
+        return f"+{digits}" if candidate.startswith("+") else digits
+
+    @classmethod
+    def whatsapp_ready(cls, phone: str) -> bool:
+        normalized = cls.normalize_phone(phone)
+        if not normalized:
+            return False
+        digits = re.sub(r"\D", "", normalized)
+        return 8 <= len(digits) <= 15 and len(set(digits)) > 2
 
     def _normalize_company_url(self, value: str) -> str:
         candidate = str(value or "").strip()
@@ -355,7 +469,46 @@ class LeadService:
         candidate = re.sub(r"^(reason|service_reason|why):\s*", "", candidate, flags=re.IGNORECASE)
         candidate = re.sub(r"\s*\|\s*(fallback_reason|quality_filter)=.*$", "", candidate, flags=re.IGNORECASE)
         candidate = candidate.strip(" -;")
-        return candidate[:220]
+        return self._clean_forbidden_reason(candidate)[:220]
+
+    def _safe_lead_reason(self, lead: Lead) -> str:
+        metadata = dict(lead.metadata or {})
+        for value in (
+            lead.service_reason,
+            lead.reason,
+            metadata.get("lead_reason", ""),
+            metadata.get("AIReason", ""),
+            metadata.get("Reason", ""),
+            metadata.get("intent_summary", ""),
+            metadata.get("company_summary", ""),
+        ):
+            cleaned = self._normalize_service_reason(str(value or ""))
+            if cleaned:
+                return cleaned[:280]
+        if lead.industry:
+            return f"This company appears to work in {lead.industry.strip()}, making it relevant for business outreach."
+        return "This appears to be a relevant business with public contact details."
+
+    def _clean_forbidden_reason(self, value: str) -> str:
+        text = str(value or "").strip()
+        replacements = {
+            "matches the technology target from the search query": "appears to offer technology services",
+            "matches the search query": "appears to be relevant",
+            "search query": "business category",
+            "scraped data": "public information",
+            "AI detected": "it appears",
+            "AI marked": "it appears",
+            "target matched": "appears relevant",
+            "target matching": "relevance",
+        }
+        for bad, good in replacements.items():
+            text = re.sub(re.escape(bad), good, text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip()
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        return " ".join(sentences[:2]).strip()
+
+    def _domain_label(self, url: str) -> str:
+        return self._domain_from_url(url).replace("www.", "")
 
     def _looks_like_score_breakdown(self, value: str) -> bool:
         lowered = str(value or "").lower()
@@ -385,13 +538,14 @@ class LeadService:
     def _normalize_reply_status(self, value: str, metadata: dict[str, Any]) -> str:
         candidate = str(value or metadata.get("ReplyStatus", "")).strip().lower()
         mapping = {
-            "received": "replied_positive",
+            "received": "replied",
             "no reply": "no_reply",
             "interested": "interested",
             "not interested": "not_interested",
+            "not_interested": "not_interested",
+            "replied": "replied",
             "replied_positive": "replied_positive",
             "replied_negative": "replied_negative",
-            "replied": "replied_positive",
         }
         return mapping.get(candidate, "no_reply")
 
@@ -490,6 +644,8 @@ class LeadService:
             "lead_count": total_leads,
             "sent_count": len([lead for lead in leads if str(lead.status or "").strip().lower() == "sent"]),
             "reply_count": len(replies),
+            "bounced_count": len([lead for lead in leads if str((lead.metadata or {}).get("BounceStatus", "")).strip().lower() == "bounced"]),
+            "scheduled_followup_count": len([lead for lead in leads if str((lead.metadata or {}).get("NextFollowupDue", "") or (lead.metadata or {}).get("ScheduledFollowupAt", "")).strip()]),
             "job_count": len(jobs),
             "leads_with_website": leads_with_website,
             "leads_with_phone": leads_with_phone,
