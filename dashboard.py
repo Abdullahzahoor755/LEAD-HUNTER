@@ -2243,6 +2243,13 @@ def render_table_page(frame: pd.DataFrame, columns: List[str], *, show_csv_expor
     st.markdown("</div></div>", unsafe_allow_html=True)
 
 
+def truncate_text(value: str, limit: int = 120) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(0, limit - 3)].rstrip()}..."
+
+
 def apply_lead_table_controls(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame
@@ -2252,53 +2259,13 @@ def apply_lead_table_controls(frame: pd.DataFrame) -> pd.DataFrame:
                 if str(key).startswith("lead_filter_"):
                     del st.session_state[key]
             st.rerun()
-        search = st.text_input("Search company, domain, or email", key="lead_filter_search")
         c1, c2, c3 = st.columns(3)
         with c1:
-            grade = st.selectbox("Lead quality grade", ["All", "A", "B", "C", "Rejected/Weak"], key="lead_filter_grade")
-            outreach = st.selectbox("Outreach status", ["All", "pending", "sent", "failed", "bounced", "skipped"], key="lead_filter_outreach")
+            search = st.text_input("Search company/domain/email/phone", key="lead_filter_search")
         with c2:
-            email_quality = st.selectbox(
-                "Email quality",
-                ["All", "business_same_domain", "business_generic", "public_email", "suspicious", "missing"],
-                key="lead_filter_email_quality",
-            )
-            source_values = ["All"]
-            if "source_query" in frame.columns:
-                source_values.extend(sorted(value for value in frame["source_query"].dropna().astype(str).unique() if value))
-            source_query = st.selectbox("Source query", source_values, key="lead_filter_source")
+            sort_by = st.selectbox("Sort by", ["Newest first", "Oldest first", "Highest score"], key="lead_filter_sort")
         with c3:
-            score_min = int(pd.to_numeric(frame.get("score", pd.Series([0])), errors="coerce").fillna(0).min())
-            score_max = int(max(pd.to_numeric(frame.get("score", pd.Series([10])), errors="coerce").fillna(0).max(), 10))
-            score_range = st.slider("Score range", score_min, score_max, (score_min, score_max), key="lead_filter_score")
-            date_range = None
-            if "created_at" in frame.columns:
-                created_dates = pd.to_datetime(frame["created_at"], errors="coerce", utc=True).dropna()
-                if not created_dates.empty:
-                    min_date = created_dates.min().date()
-                    max_date = created_dates.max().date()
-                    date_range = st.date_input("Created date range", value=(min_date, max_date), key="lead_filter_date")
-            sort_by = st.selectbox(
-                "Sort",
-                [
-                    "Newest first",
-                    "Oldest first",
-                    "Highest score first",
-                    "Lowest score first",
-                    "A-grade first",
-                    "Outreach ready first",
-                    "Email available first",
-                    "Company name A-Z",
-                ],
-                key="lead_filter_sort",
-            )
-            whatsapp_ready = st.selectbox("WhatsApp ready", ["All", "Ready", "Not ready"], key="lead_filter_whatsapp_ready")
-            whatsapp_status = st.selectbox(
-                "WhatsApp status",
-                ["All", "not_contacted", "opened", "contacted", "replied", "interested", "not_interested"],
-                key="lead_filter_whatsapp_status",
-            )
-            has_lead_reason = st.selectbox("Has lead reason", ["All", "Yes", "No"], key="lead_filter_has_reason")
+            readiness = st.radio("Quick toggle", ["All", "Email-ready", "Phone-ready"], horizontal=True, key="lead_filter_readiness")
 
     filtered = frame.copy()
     if search:
@@ -2308,32 +2275,14 @@ def apply_lead_table_controls(frame: pd.DataFrame) -> pd.DataFrame:
             + filtered.get("company_url", pd.Series("", index=filtered.index)).astype(str)
             + " "
             + filtered.get("verified_email", pd.Series("", index=filtered.index)).astype(str)
+            + " "
+            + filtered.get("phone", pd.Series("", index=filtered.index)).astype(str)
         ).str.lower()
         filtered = filtered[haystack.str.contains(str(search).lower(), na=False)]
-    if grade != "All" and "lead_quality_grade" in filtered.columns:
-        wanted = "Rejected" if grade == "Rejected/Weak" else grade
-        filtered = filtered[filtered["lead_quality_grade"].astype(str).str.lower().eq(wanted.lower())]
-    if outreach != "All" and "outreach_status" in filtered.columns:
-        filtered = filtered[filtered["outreach_status"].astype(str).str.lower().eq(outreach)]
-    if email_quality != "All" and "email_quality" in filtered.columns:
-        filtered = filtered[filtered["email_quality"].astype(str).str.lower().eq(email_quality)]
-    if source_query != "All" and "source_query" in filtered.columns:
-        filtered = filtered[filtered["source_query"].astype(str).eq(source_query)]
-    if whatsapp_ready != "All" and "whatsapp_ready" in filtered.columns:
-        filtered = filtered[filtered["whatsapp_ready"].astype(bool).eq(whatsapp_ready == "Ready")]
-    if whatsapp_status != "All" and "whatsapp_status" in filtered.columns:
-        filtered = filtered[filtered["whatsapp_status"].astype(str).str.lower().eq(whatsapp_status)]
-    if has_lead_reason != "All":
-        reason_values = filtered.get("lead_reason", filtered.get("service_reason", pd.Series("", index=filtered.index))).astype(str).str.strip()
-        filtered = filtered[reason_values.ne("") if has_lead_reason == "Yes" else reason_values.eq("")]
-    if "score" in filtered.columns:
-        scores = pd.to_numeric(filtered["score"], errors="coerce").fillna(0)
-        filtered = filtered[scores.between(score_range[0], score_range[1])]
-    if date_range and "created_at" in filtered.columns:
-        dates = pd.to_datetime(filtered["created_at"], errors="coerce", utc=True)
-        if isinstance(date_range, tuple) and len(date_range) == 2:
-            start, end = date_range
-            filtered = filtered[(dates.dt.date >= start) & (dates.dt.date <= end)]
+    if readiness == "Email-ready" and "verified_email" in filtered.columns:
+        filtered = filtered[filtered["verified_email"].astype(str).str.strip().ne("")]
+    if readiness == "Phone-ready" and "phone" in filtered.columns:
+        filtered = filtered[filtered["phone"].astype(str).str.strip().ne("")]
     filtered = sort_lead_frame(filtered, sort_by)
     if filtered.empty:
         st.info("No leads match these filters.")
@@ -2343,7 +2292,7 @@ def apply_lead_table_controls(frame: pd.DataFrame) -> pd.DataFrame:
 def sort_lead_frame(frame: pd.DataFrame, sort_by: str) -> pd.DataFrame:
     if frame.empty:
         return frame
-    if sort_by == "Highest score first" and "score" in frame.columns:
+    if sort_by in {"Highest score first", "Highest score"} and "score" in frame.columns:
         return frame.assign(_score=pd.to_numeric(frame["score"], errors="coerce").fillna(0)).sort_values("_score", ascending=False).drop(columns=["_score"])
     if sort_by == "Lowest score first" and "score" in frame.columns:
         return frame.assign(_score=pd.to_numeric(frame["score"], errors="coerce").fillna(0)).sort_values("_score", ascending=True).drop(columns=["_score"])
@@ -2375,24 +2324,33 @@ def render_lead_action_cta(row: pd.Series) -> None:
         st.warning("No contact found yet. Enrich this lead before outreach.")
 
 
-def render_whatsapp_crm_controls(row: pd.Series, lead_id: str, index: int) -> None:
+def render_whatsapp_crm_row(row: pd.Series, index: int) -> None:
+    lead_id = str(row.get("id", "") or "").strip()
+    if not lead_id:
+        return
     lead_reason = str(row.get("lead_reason", "") or row.get("service_reason", "") or "").strip()
     phone = str(row.get("phone", "") or "").strip()
     ready = bool(row.get("whatsapp_ready", False))
     status = str(row.get("whatsapp_status", "not_contacted") or "not_contacted").strip().replace("_", " ").title()
-    st.markdown("**WhatsApp CRM**")
-    st.write(f"Lead Reason: {lead_reason or 'Not available'}")
-    st.write(f"Phone / WhatsApp: {phone or 'Not found'}")
-    st.write(f"WhatsApp Ready: {'Ready' if ready else 'Not ready'}")
-    preview_response = api_request("POST", f"/leads/{lead_id}/whatsapp-message/preview", json={})
-    preview = parse_api_json(preview_response, "WHATSAPP_PREVIEW_FAILED")
-    if not preview_response.is_success:
-        st.warning(str(preview.get("detail", "Could not generate WhatsApp preview.")))
-        return
-    message = str(preview.get("whatsapp_message", "") or row.get("whatsapp_message", "") or "").strip()
-    whatsapp_url = str(preview.get("whatsapp_url", "") or "").strip()
-    st.text_area("AI WhatsApp Message", value=message, height=140, key=f"whatsapp_message_preview_{lead_id}_{index}")
+    st.markdown(f"**{row.get('company', '') or row.get('company_url', '') or 'Lead'}**")
+    st.write(f"Phone: {phone or 'Not found'}")
+    st.write(f"Lead reason: {lead_reason or 'Not available'}")
     st.caption(f"Status: {status}")
+    preview_key = f"whatsapp_preview_{lead_id}"
+    message = ""
+    whatsapp_url = ""
+    if st.button("Generate WhatsApp Message", key=f"generate_whatsapp_{lead_id}_{index}", use_container_width=True):
+        preview_response = api_request("POST", f"/leads/{lead_id}/whatsapp-message/preview", json={})
+        preview = parse_api_json(preview_response, "WHATSAPP_PREVIEW_FAILED")
+        if preview_response.is_success:
+            st.session_state[preview_key] = preview
+        else:
+            st.warning(str(preview.get("detail", "Could not generate WhatsApp preview.")))
+    cached = st.session_state.get(preview_key, {}) if isinstance(st.session_state.get(preview_key, {}), dict) else {}
+    if cached:
+        message = str(cached.get("whatsapp_message", "") or "").strip()
+        whatsapp_url = str(cached.get("whatsapp_url", "") or "").strip()
+        st.text_area("Message", value=message, height=120, key=f"whatsapp_message_preview_{lead_id}_{index}")
     action_cols = st.columns(3)
     if ready and whatsapp_url:
         with action_cols[0]:
@@ -2421,6 +2379,26 @@ def render_whatsapp_crm_controls(row: pd.Series, lead_id: str, index: int) -> No
                     st.error(str(payload.get("detail", "Could not update WhatsApp status.")))
 
 
+def render_whatsapp_crm_page(tenant: TenantContext) -> None:
+    render_module_header("WhatsApp CRM", "Work phone-ready leads and prepare WhatsApp outreach manually.")
+    frame = load_dashboard_data(tenant)
+    if not frame.empty:
+        frame = frame[frame.get("phone", pd.Series("", index=frame.index)).astype(str).str.strip().ne("")]
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Phone-Ready Leads</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-caption">Generate messages on demand, open WhatsApp, and update CRM status.</div>', unsafe_allow_html=True)
+    if frame.empty:
+        render_empty_state("No phone-ready leads", "Generate leads with public phone numbers to use WhatsApp CRM.", "Generate Leads")
+        st.markdown("</div></div>", unsafe_allow_html=True)
+        return
+    for index, row in frame.head(80).iterrows():
+        company = str(row.get("company", "") or row.get("company_url", "") or "Lead").strip()
+        status = str(row.get("whatsapp_status", "not_contacted") or "not_contacted").replace("_", " ").title()
+        with st.expander(f"{company[:80]} - {row.get('phone', '')} - {status}", expanded=False):
+            render_whatsapp_crm_row(row, int(index) if isinstance(index, int) else 0)
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
 def render_lead_action_buttons(row: pd.Series, index: int) -> None:
     lead_id = str(row.get("id", "") or "").strip()
     if not lead_id:
@@ -2430,7 +2408,6 @@ def render_lead_action_buttons(row: pd.Series, index: int) -> None:
     agency_kit = row.get("agency_kit", {}) if isinstance(row.get("agency_kit", {}), dict) else {}
     offer_match = row.get("offer_match", {}) if isinstance(row.get("offer_match", {}), dict) else {}
     whatsapp_sales_kit = row.get("whatsapp_sales_kit", {}) if isinstance(row.get("whatsapp_sales_kit", {}), dict) else {}
-    render_whatsapp_crm_controls(row, lead_id, index)
 
     status_cols = st.columns(3)
     for label, status, col in [
@@ -2491,8 +2468,8 @@ def render_live_leads_page(frame: pd.DataFrame) -> None:
     st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
     header_cols = st.columns([2, 1])
     with header_cols[0]:
-        st.markdown('<div class="section-title">Live Leads</div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-caption">Review saved leads, export CSV, and open advanced tools inside each lead.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Leads</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-caption">Review saved leads without CRM clutter.</div>', unsafe_allow_html=True)
     with header_cols[1]:
         if frame.empty:
             st.button("Export CSV", use_container_width=True, disabled=True)
@@ -2513,30 +2490,30 @@ def render_live_leads_page(frame: pd.DataFrame) -> None:
     st.caption(f"Showing {len(frame)} lead rows.")
     summary_columns = [
         "company_url",
-        "country",
         "verified_email",
         "phone",
-        "contact_readiness",
-        "lead_readiness_score",
+        "score",
         "outreach_status",
-        "whatsapp_ready",
-        "whatsapp_status",
-        "reply_status",
+        "lead_reason",
     ]
-    render_table_page(frame, summary_columns, show_csv_export=False)
+    list_frame = frame.copy()
+    if "lead_reason" in list_frame.columns:
+        list_frame["lead_reason"] = list_frame["lead_reason"].astype(str).map(lambda value: truncate_text(value, 120))
+    render_table_page(list_frame, summary_columns, show_csv_export=False)
 
     for index, row in frame.head(50).iterrows():
-        company = str(row.get("company_url", "") or row.get("verified_email", "") or row.get("phone", "") or "Lead").strip()
-        readiness = str(row.get("contact_readiness", "") or "").strip()
-        score = int(row.get("lead_readiness_score", 0) or 0)
-        with st.expander(f"{company[:90]} - {readiness or 'Lead'} - Score {score}", expanded=False):
-            render_lead_action_cta(row)
-            lead_cols = st.columns(3)
-            lead_cols[0].write(f"Email: {row.get('verified_email', '') or row.get('likely_email', '') or 'Not found'}")
-            lead_cols[1].write(f"Phone: {row.get('phone', '') or 'Not found'}")
-            lead_cols[2].write(f"Industry: {row.get('industry', '') or 'Unknown'}")
-            st.write(f"Service reason: {row.get('service_reason', '') or 'Not available'}")
-            render_lead_action_buttons(row, int(index) if isinstance(index, int) else 0)
+        company = str(row.get("company", "") or row.get("company_url", "") or row.get("verified_email", "") or row.get("phone", "") or "Lead").strip()
+        score = int(row.get("score", 0) or 0)
+        reason = str(row.get("lead_reason", "") or row.get("service_reason", "") or "").strip()
+        with st.expander(f"{company[:90]} - Score {score}", expanded=False):
+            lead_cols = st.columns(4)
+            lead_cols[0].write(f"Domain: {row.get('company_url', '') or 'Not available'}")
+            lead_cols[1].write(f"Email: {row.get('verified_email', '') or row.get('likely_email', '') or 'Not found'}")
+            lead_cols[2].write(f"Phone: {row.get('phone', '') or 'Not found'}")
+            lead_cols[3].write(f"Outreach: {row.get('outreach_status', '') or 'pending'}")
+            st.write(f"Lead reason: {truncate_text(reason, 120) or 'Not available'}")
+            if reason and len(reason) > 120 and st.checkbox("Show full reason", key=f"full_reason_{index}"):
+                st.write(reason)
     st.markdown("</div></div>", unsafe_allow_html=True)
 
 
@@ -3485,7 +3462,7 @@ def render_whatsapp_sales_kit_page(tenant: TenantContext) -> None:
 def render_email_crm_page(tenant: TenantContext, page: str) -> None:
     render_module_header(
         "Email CRM",
-        "Find leads, manage contacts, generate agency kits, and automate outreach.",
+        "Work email-ready leads, outreach status, and reply state.",
     )
     normalized_page = str(page or "Generate Leads")
     if normalized_page == "Generate Leads":
@@ -3502,6 +3479,49 @@ def render_email_crm_page(tenant: TenantContext, page: str) -> None:
     if normalized_page == "Live Leads":
         frame = filtered_frame(load_dashboard_data(tenant))
         render_live_leads_page(frame)
+        return
+    if normalized_page in {"Email CRM", "Email"}:
+        frame = load_dashboard_data(tenant)
+        if not frame.empty:
+            frame = frame[frame.get("verified_email", pd.Series("", index=frame.index)).astype(str).str.strip().ne("")]
+        st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Email-Ready Leads</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-caption">Preview email content, queue outreach, and manually update reply status.</div>', unsafe_allow_html=True)
+        if frame.empty:
+            render_empty_state("No email-ready leads", "Generate leads with verified email addresses to use Email CRM.", "Generate Leads")
+            st.markdown("</div></div>", unsafe_allow_html=True)
+            return
+        st.dataframe(frame[[column for column in ["company_url", "verified_email", "outreach_status", "reply_status"] if column in frame.columns]], use_container_width=True, hide_index=True)
+        for index, row in frame.head(50).iterrows():
+            lead_id = str(row.get("id", "") or "").strip()
+            company = str(row.get("company", "") or row.get("company_url", "") or "Lead").strip()
+            with st.expander(f"{company[:90]} - {row.get('verified_email', '')}", expanded=False):
+                st.write(f"Outreach status: {row.get('outreach_status', '') or 'pending'}")
+                st.write(f"Reply status: {row.get('reply_status', '') or 'no_reply'}")
+                cols = st.columns(2)
+                with cols[0]:
+                    if st.button("Generate/Preview Email", key=f"email_preview_{lead_id}_{index}", use_container_width=True):
+                        st.info("Email preview uses the configured outreach profile when outreach is queued.")
+                with cols[1]:
+                    if st.button("Send Email", key=f"email_send_{lead_id}_{index}", use_container_width=True):
+                        enqueue_job("outreach")
+                        st.success("Email outreach queued.")
+                status_cols = st.columns(3)
+                for label, status, col in [
+                    ("Mark Replied", "replied", status_cols[0]),
+                    ("Mark Interested", "interested", status_cols[1]),
+                    ("Mark Not Interested", "not_interested", status_cols[2]),
+                ]:
+                    with col:
+                        if st.button(label, key=f"email_reply_status_{status}_{lead_id}_{index}", use_container_width=True):
+                            response = api_request("POST", f"/leads/{lead_id}/reply-status", json={"reply_status": status})
+                            payload = parse_api_json(response)
+                            if response.is_success:
+                                st.success("Reply status updated.")
+                                st.rerun()
+                            else:
+                                st.error(str(payload.get("detail", "Could not update reply status.")))
+        st.markdown("</div></div>", unsafe_allow_html=True)
         return
     if normalized_page == "Outreach":
         render_pro_action_page(
@@ -3967,43 +3987,20 @@ def render_sidebar_navigation() -> Dict[str, str]:
     if refresh_enabled and st_autorefresh:
         st_autorefresh(interval=30_000, key="dashboard_refresh")
 
-    modules = ["Dashboard", "Email CRM", "Marketing Kit", "Settings"]
+    modules = ["Dashboard", "Generate Leads", "Leads", "Email CRM", "WhatsApp CRM", "Marketing Kit", "Billing", "Settings"]
     if is_admin_user():
-        modules.append("Admin")
+        modules.append("Admin Panel")
     if st.session_state.get("sidebar_module") not in modules:
         st.session_state["sidebar_module"] = "Dashboard"
     st.sidebar.markdown("### Modules")
     module = st.sidebar.radio("Module", modules, key="sidebar_module", label_visibility="collapsed")
 
-    page = ""
-    if module == "Dashboard":
-        page = "Dashboard"
-    elif module == "Email CRM":
-        crm_pages = [
-            "Generate Leads",
-            "Live Leads",
-            "Outreach",
-            "Replies",
-        ]
-        if st.session_state.get("email_crm_page") not in crm_pages:
-            st.session_state["email_crm_page"] = "Generate Leads"
-        st.sidebar.markdown("### Email CRM")
-        page = st.sidebar.radio("Email CRM", crm_pages, key="email_crm_page", label_visibility="collapsed")
-    elif module == "Marketing Kit":
-        marketing_pages = [
-            "Campaign Generator",
-        ]
-        if st.session_state.get("marketing_kit_page") not in marketing_pages:
-            st.session_state["marketing_kit_page"] = "Campaign Generator"
-        st.sidebar.markdown("### Marketing Kit")
-        page = st.sidebar.radio("Marketing Kit", marketing_pages, key="marketing_kit_page", label_visibility="collapsed")
+    page = module
+    if module == "Marketing Kit":
+        page = "Campaign Generator"
     elif module == "Settings":
-        settings_pages = ["Workspace Settings", "Billing & Plan"]
-        if st.session_state.get("settings_page") not in settings_pages:
-            st.session_state["settings_page"] = "Workspace Settings"
-        st.sidebar.markdown("### Settings")
-        page = st.sidebar.radio("Settings", settings_pages, key="settings_page", label_visibility="collapsed")
-    elif module == "Admin":
+        page = "Workspace Settings"
+    elif module == "Admin Panel":
         page = "Admin Dashboard"
     return {"module": module, "page": page}
 
@@ -4033,18 +4030,23 @@ def main() -> None:
 
     if module == "Dashboard":
         render_dashboard_home(tenant)
+    elif module == "Generate Leads":
+        render_email_crm_page(tenant, "Generate Leads")
+    elif module == "Leads":
+        render_live_leads_page(load_dashboard_data(tenant))
     elif module == "Email CRM":
-        render_email_crm_page(tenant, page)
+        render_email_crm_page(tenant, "Email CRM")
+    elif module == "WhatsApp CRM":
+        render_whatsapp_crm_page(tenant)
     elif module == "Marketing Kit":
         render_marketing_campaign_page(tenant, page)
+    elif module == "Billing":
+        render_module_header("Billing", "Manage plans, billing, and workspace access.")
+        render_billing_page()
     elif module == "Settings":
-        if page == "Billing & Plan":
-            render_module_header("Settings", "Manage plans, billing, and workspace preferences.")
-            render_billing_page()
-        else:
-            render_module_header("Settings", "Manage workspace integrations and automation setup.")
-            render_settings_page()
-    elif module == "Admin":
+        render_module_header("Settings", "Manage workspace integrations and automation setup.")
+        render_settings_page()
+    elif module == "Admin Panel":
         render_admin_page()
     else:
         render_email_crm_page(tenant, "Generate Leads")

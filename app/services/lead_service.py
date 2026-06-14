@@ -493,6 +493,7 @@ class LeadService:
         text = str(value or "").strip()
         replacements = {
             "matches the technology target from the search query": "appears to offer technology services",
+            "target from the search query": "business category",
             "matches the search query": "appears to be relevant",
             "search query": "business category",
             "scraped data": "public information",

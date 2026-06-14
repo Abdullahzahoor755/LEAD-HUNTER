@@ -76,6 +76,43 @@ def test_lead_sort_newest_oldest_and_highest_score() -> None:
     assert list(dashboard.sort_lead_frame(frame, "Newest first")["company"]) == ["Alpha", "Beta", "Gamma"]
     assert list(dashboard.sort_lead_frame(frame, "Oldest first")["company"]) == ["Gamma", "Beta", "Alpha"]
     assert list(dashboard.sort_lead_frame(frame, "Highest score first")["company"]) == ["Alpha", "Beta", "Gamma"]
+    assert list(dashboard.sort_lead_frame(frame, "Highest score")["company"]) == ["Alpha", "Beta", "Gamma"]
+
+
+def test_leads_page_is_clean_and_whatsapp_crm_is_separate() -> None:
+    source = dashboard.Path(dashboard.__file__).read_text(encoding="utf-8")
+    live_start = source.index("def render_live_leads_page")
+    live_end = source.index("def render_agency_kit_details")
+    live_source = source[live_start:live_end]
+
+    assert "render_whatsapp_crm_row" not in live_source
+    assert "whatsapp-message/preview" not in live_source
+    assert "AI WhatsApp Message" not in live_source
+    assert "def render_whatsapp_crm_page" in source
+    assert '"WhatsApp CRM"' in source
+
+
+def test_leads_filters_are_simple() -> None:
+    source = dashboard.Path(dashboard.__file__).read_text(encoding="utf-8")
+    controls_start = source.index("def apply_lead_table_controls")
+    controls_end = source.index("def sort_lead_frame")
+    controls_source = source[controls_start:controls_end]
+
+    assert "Search company/domain/email/phone" in controls_source
+    assert "Sort by" in controls_source
+    assert "Quick toggle" in controls_source
+    assert "Lead quality grade" not in controls_source
+    assert "WhatsApp status" not in controls_source
+    assert "Has lead reason" not in controls_source
+
+
+def test_lead_reason_truncates_for_leads_page() -> None:
+    long_reason = "This company appears to offer AI and technology services with public contact details and a clear services page for B2B prospects."
+    truncated = dashboard.truncate_text(long_reason, 120)
+
+    assert len(truncated) <= 120
+    assert truncated.endswith("...")
+    assert "search query" not in truncated.lower()
 
 
 def test_lead_sort_quality_email_ready_and_company() -> None:
