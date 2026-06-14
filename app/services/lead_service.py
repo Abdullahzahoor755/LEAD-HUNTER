@@ -258,7 +258,11 @@ class LeadService:
         normalized = cls.normalize_phone(phone)
         if not cls.whatsapp_ready(normalized):
             return ""
-        return f"https://wa.me/{normalized.lstrip('+')}?text={quote(str(message or '').strip())}"
+        base_url = f"https://wa.me/{normalized.lstrip('+')}"
+        text = str(message or "").strip()
+        if not text:
+            return base_url
+        return f"{base_url}?text={quote(text)}"
 
     @classmethod
     def normalize_phone(cls, phone: str) -> str:

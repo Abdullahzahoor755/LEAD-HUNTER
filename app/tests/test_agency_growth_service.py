@@ -171,6 +171,7 @@ def test_phone_normalization_and_whatsapp_readiness() -> None:
     assert LeadService.normalize_phone("+92 300 000 0000") == "+923000000000"
     assert LeadService.whatsapp_ready("+923000000000") is True
     assert LeadService.whatsapp_ready("123") is False
+    assert LeadService.whatsapp_url("+92 300 000 0000", "") == "https://wa.me/923000000000"
     assert LeadService.whatsapp_url("+92 300 000 0000", "Hello there").startswith("https://wa.me/923000000000?text=Hello")
 
 

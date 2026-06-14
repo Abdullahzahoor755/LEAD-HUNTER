@@ -126,6 +126,19 @@ def test_whatsapp_phone_badge_logic() -> None:
     assert dashboard.whatsapp_phone_badge("123") == "❌ Invalid"
     assert dashboard.whatsapp_phone_is_valid("+923000000000") is True
     assert dashboard.whatsapp_phone_is_valid("123") is False
+    assert dashboard.whatsapp_link_for_phone("+92 300 000 0000") == "https://wa.me/923000000000"
+    assert dashboard.whatsapp_link_for_phone("+92 300 000 0000", "Hello there") == "https://wa.me/923000000000?text=Hello%20there"
+    assert dashboard.whatsapp_link_for_phone("123") == ""
+
+
+def test_whatsapp_open_button_does_not_require_preview() -> None:
+    source = dashboard.Path(dashboard.__file__).read_text(encoding="utf-8")
+    row_start = source.index("def render_whatsapp_crm_row")
+    row_end = source.index("def render_whatsapp_crm_page")
+    row_source = source[row_start:row_end]
+
+    assert "whatsapp_link_for_phone(phone, message)" in row_source
+    assert "Invalid or missing phone number." in row_source
 
 
 def test_leads_filters_are_simple() -> None:

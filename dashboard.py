@@ -2264,6 +2264,18 @@ def whatsapp_phone_is_valid(phone: str) -> bool:
     return whatsapp_phone_badge(phone).startswith("✅")
 
 
+def whatsapp_link_for_phone(phone: str, message: str = "") -> str:
+    digits = "".join(char for char in str(phone or "") if char.isdigit())
+    if not whatsapp_phone_is_valid(phone):
+        return ""
+    text = str(message or "").strip()
+    if not text:
+        return f"https://wa.me/{digits}"
+    from urllib.parse import quote
+
+    return f"https://wa.me/{digits}?text={quote(text)}"
+
+
 def sort_whatsapp_frame(frame: pd.DataFrame, sort_by: str) -> pd.DataFrame:
     if sort_by == "Highest Score" and "score" in frame.columns:
         return frame.assign(_score=pd.to_numeric(frame["score"], errors="coerce").fillna(0)).sort_values("_score", ascending=False).drop(columns=["_score"])
@@ -2368,6 +2380,8 @@ def render_whatsapp_crm_row(row: pd.Series, index: int) -> None:
     if cached:
         message = str(cached.get("whatsapp_message", "") or "").strip()
         whatsapp_url = str(cached.get("whatsapp_url", "") or "").strip()
+    if valid:
+        whatsapp_url = whatsapp_url or whatsapp_link_for_phone(phone, message)
     st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
     cols = st.columns([1.3, 1.4, 1, 0.9, 0.6, 1.7, 1, 1.9])
     cols[0].write(company or "Lead")
@@ -2384,7 +2398,7 @@ def render_whatsapp_crm_row(row: pd.Series, index: int) -> None:
             if preview_response.is_success:
                 st.session_state[preview_key] = preview
                 message = str(preview.get("whatsapp_message", "") or "").strip()
-                whatsapp_url = str(preview.get("whatsapp_url", "") or "").strip()
+                whatsapp_url = str(preview.get("whatsapp_url", "") or "").strip() or whatsapp_link_for_phone(phone, message)
             else:
                 st.warning(str(preview.get("detail", "Could not generate WhatsApp preview.")))
     if cached or message:
@@ -2399,6 +2413,7 @@ def render_whatsapp_crm_row(row: pd.Series, index: int) -> None:
                 st.link_button("Continue", whatsapp_url, use_container_width=True)
         else:
             st.button("Open WhatsApp", key=f"open_whatsapp_disabled_{lead_id}_{index}", disabled=True, use_container_width=True)
+            st.caption("Invalid or missing phone number.")
     for label, value, col in [
         ("Mark Contacted", "contacted", action_cols[2]),
         ("Mark Replied", "replied", action_cols[3]),
