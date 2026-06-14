@@ -92,6 +92,42 @@ def test_leads_page_is_clean_and_whatsapp_crm_is_separate() -> None:
     assert '"WhatsApp CRM"' in source
 
 
+def test_whatsapp_crm_table_workflow_exists() -> None:
+    source = dashboard.Path(dashboard.__file__).read_text(encoding="utf-8")
+    start = source.index("def render_whatsapp_crm_page")
+    end = source.index("def render_lead_action_buttons")
+    crm_source = source[start:end]
+
+    assert "Manage phone-ready leads and open WhatsApp manually. No auto-sending." in crm_source
+    for label in ["Total phone leads", "Valid numbers", "Invalid/missing numbers", "Contacted", "Replied / Interested"]:
+        assert label in crm_source
+    for label in ["Company", "Website / Domain", "Phone", "Number Valid?", "Score", "Lead Reason", "WhatsApp Status", "Actions"]:
+        assert label in crm_source
+    for action in ["Generate Message", "Copy Message", "Open WhatsApp", "Mark Contacted", "Mark Replied", "Mark Interested", "Mark Not Interested"]:
+        assert action in source
+    assert "with st.expander" not in crm_source
+
+
+def test_whatsapp_preview_is_only_generated_after_button() -> None:
+    source = dashboard.Path(dashboard.__file__).read_text(encoding="utf-8")
+    row_start = source.index("def render_whatsapp_crm_row")
+    row_end = source.index("def render_whatsapp_crm_page")
+    row_source = source[row_start:row_end]
+    button_index = row_source.index('st.button("Generate Message"')
+    preview_index = row_source.index('"/leads/{lead_id}/whatsapp-message/preview"')
+
+    assert button_index < preview_index
+    assert "whatsapp_preview_{lead_id}" in row_source
+
+
+def test_whatsapp_phone_badge_logic() -> None:
+    assert dashboard.whatsapp_phone_badge("+92 300 000 0000") == "✅ Valid"
+    assert dashboard.whatsapp_phone_badge("") == "⚠️ Missing"
+    assert dashboard.whatsapp_phone_badge("123") == "❌ Invalid"
+    assert dashboard.whatsapp_phone_is_valid("+923000000000") is True
+    assert dashboard.whatsapp_phone_is_valid("123") is False
+
+
 def test_leads_filters_are_simple() -> None:
     source = dashboard.Path(dashboard.__file__).read_text(encoding="utf-8")
     controls_start = source.index("def apply_lead_table_controls")

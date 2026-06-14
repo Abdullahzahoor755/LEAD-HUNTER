@@ -2250,6 +2250,31 @@ def truncate_text(value: str, limit: int = 120) -> str:
     return f"{text[: max(0, limit - 3)].rstrip()}..."
 
 
+def whatsapp_phone_badge(phone: str) -> str:
+    value = str(phone or "").strip()
+    if not value:
+        return "⚠️ Missing"
+    digits = "".join(char for char in value if char.isdigit())
+    if 8 <= len(digits) <= 15 and len(set(digits)) > 2:
+        return "✅ Valid"
+    return "❌ Invalid"
+
+
+def whatsapp_phone_is_valid(phone: str) -> bool:
+    return whatsapp_phone_badge(phone).startswith("✅")
+
+
+def sort_whatsapp_frame(frame: pd.DataFrame, sort_by: str) -> pd.DataFrame:
+    if sort_by == "Highest Score" and "score" in frame.columns:
+        return frame.assign(_score=pd.to_numeric(frame["score"], errors="coerce").fillna(0)).sort_values("_score", ascending=False).drop(columns=["_score"])
+    if sort_by in {"Newest", "Oldest"} and "created_at" in frame.columns:
+        created = pd.to_datetime(frame["created_at"], errors="coerce", utc=True)
+        return frame.assign(_created_at=created).sort_values("_created_at", ascending=sort_by == "Oldest").drop(columns=["_created_at"])
+    if sort_by == "Oldest":
+        return frame.iloc[::-1]
+    return frame
+
+
 def apply_lead_table_controls(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame
@@ -2328,45 +2353,57 @@ def render_whatsapp_crm_row(row: pd.Series, index: int) -> None:
     lead_id = str(row.get("id", "") or "").strip()
     if not lead_id:
         return
+    company = str(row.get("company", "") or row.get("company_url", "") or "Lead").strip()
+    website = str(row.get("company_url", "") or "").strip()
     lead_reason = str(row.get("lead_reason", "") or row.get("service_reason", "") or "").strip()
     phone = str(row.get("phone", "") or "").strip()
-    ready = bool(row.get("whatsapp_ready", False))
-    status = str(row.get("whatsapp_status", "not_contacted") or "not_contacted").strip().replace("_", " ").title()
-    st.markdown(f"**{row.get('company', '') or row.get('company_url', '') or 'Lead'}**")
-    st.write(f"Phone: {phone or 'Not found'}")
-    st.write(f"Lead reason: {lead_reason or 'Not available'}")
-    st.caption(f"Status: {status}")
+    valid = whatsapp_phone_is_valid(phone)
+    status_raw = str(row.get("whatsapp_status", "not_contacted") or "not_contacted").strip().lower()
+    status = status_raw.replace("_", " ").title()
+    score = int(row.get("score", 0) or 0)
     preview_key = f"whatsapp_preview_{lead_id}"
     message = ""
     whatsapp_url = ""
-    if st.button("Generate WhatsApp Message", key=f"generate_whatsapp_{lead_id}_{index}", use_container_width=True):
-        preview_response = api_request("POST", f"/leads/{lead_id}/whatsapp-message/preview", json={})
-        preview = parse_api_json(preview_response, "WHATSAPP_PREVIEW_FAILED")
-        if preview_response.is_success:
-            st.session_state[preview_key] = preview
-        else:
-            st.warning(str(preview.get("detail", "Could not generate WhatsApp preview.")))
     cached = st.session_state.get(preview_key, {}) if isinstance(st.session_state.get(preview_key, {}), dict) else {}
     if cached:
         message = str(cached.get("whatsapp_message", "") or "").strip()
         whatsapp_url = str(cached.get("whatsapp_url", "") or "").strip()
-        st.text_area("Message", value=message, height=120, key=f"whatsapp_message_preview_{lead_id}_{index}")
-    action_cols = st.columns(3)
-    if ready and whatsapp_url:
-        with action_cols[0]:
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    cols = st.columns([1.3, 1.4, 1, 0.9, 0.6, 1.7, 1, 1.9])
+    cols[0].write(company or "Lead")
+    cols[1].write(website or "-")
+    cols[2].write(phone or "-")
+    cols[3].write(whatsapp_phone_badge(phone))
+    cols[4].write(score)
+    cols[5].write(truncate_text(lead_reason, 120) or "-")
+    cols[6].write(status)
+    with cols[7]:
+        if st.button("Generate Message", key=f"generate_whatsapp_{lead_id}_{index}", use_container_width=True):
+            preview_response = api_request("POST", f"/leads/{lead_id}/whatsapp-message/preview", json={})
+            preview = parse_api_json(preview_response, "WHATSAPP_PREVIEW_FAILED")
+            if preview_response.is_success:
+                st.session_state[preview_key] = preview
+                message = str(preview.get("whatsapp_message", "") or "").strip()
+                whatsapp_url = str(preview.get("whatsapp_url", "") or "").strip()
+            else:
+                st.warning(str(preview.get("detail", "Could not generate WhatsApp preview.")))
+    if cached or message:
+        st.text_area("Message preview", value=message, height=96, key=f"whatsapp_message_preview_{lead_id}_{index}")
+    action_cols = st.columns(6)
+    with action_cols[0]:
+        st.text_area("Copy Message", value=message, height=80, key=f"copy_whatsapp_{lead_id}_{index}", disabled=not bool(message))
+    with action_cols[1]:
+        if valid and whatsapp_url:
             if st.button("Open WhatsApp", key=f"open_whatsapp_{lead_id}_{index}", use_container_width=True):
                 api_request("POST", f"/leads/{lead_id}/whatsapp-status", json={"whatsapp_status": "opened", "whatsapp_message": message})
-                st.link_button("Continue to WhatsApp", whatsapp_url, use_container_width=True)
-        with action_cols[1]:
-            st.text_area("Copy Message", value=message, height=80, key=f"copy_whatsapp_{lead_id}_{index}")
-    else:
-        action_cols[0].button("No valid WhatsApp number", key=f"no_whatsapp_{lead_id}_{index}", disabled=True, use_container_width=True)
-    status_cols = st.columns(4)
+                st.link_button("Continue", whatsapp_url, use_container_width=True)
+        else:
+            st.button("Open WhatsApp", key=f"open_whatsapp_disabled_{lead_id}_{index}", disabled=True, use_container_width=True)
     for label, value, col in [
-        ("Mark Contacted", "contacted", status_cols[0]),
-        ("Mark Replied", "replied", status_cols[1]),
-        ("Mark Interested", "interested", status_cols[2]),
-        ("Mark Not Interested", "not_interested", status_cols[3]),
+        ("Mark Contacted", "contacted", action_cols[2]),
+        ("Mark Replied", "replied", action_cols[3]),
+        ("Mark Interested", "interested", action_cols[4]),
+        ("Mark Not Interested", "not_interested", action_cols[5]),
     ]:
         with col:
             if st.button(label, key=f"whatsapp_status_{value}_{lead_id}_{index}", use_container_width=True):
@@ -2377,26 +2414,70 @@ def render_whatsapp_crm_row(row: pd.Series, index: int) -> None:
                     st.rerun()
                 else:
                     st.error(str(payload.get("detail", "Could not update WhatsApp status.")))
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
 def render_whatsapp_crm_page(tenant: TenantContext) -> None:
-    render_module_header("WhatsApp CRM", "Work phone-ready leads and prepare WhatsApp outreach manually.")
+    render_module_header("WhatsApp CRM", "Manage phone-ready leads and open WhatsApp manually. No auto-sending.")
     frame = load_dashboard_data(tenant)
-    if not frame.empty:
-        frame = frame[frame.get("phone", pd.Series("", index=frame.index)).astype(str).str.strip().ne("")]
     st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">Phone-Ready Leads</div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-caption">Generate messages on demand, open WhatsApp, and update CRM status.</div>', unsafe_allow_html=True)
     if frame.empty:
-        render_empty_state("No phone-ready leads", "Generate leads with public phone numbers to use WhatsApp CRM.", "Generate Leads")
+        render_empty_state("No phone-ready leads yet", "Generate leads with phone numbers first.", "Generate Leads")
         st.markdown("</div></div>", unsafe_allow_html=True)
         return
-    for index, row in frame.head(80).iterrows():
-        company = str(row.get("company", "") or row.get("company_url", "") or "Lead").strip()
-        status = str(row.get("whatsapp_status", "not_contacted") or "not_contacted").replace("_", " ").title()
-        with st.expander(f"{company[:80]} - {row.get('phone', '')} - {status}", expanded=False):
-            render_whatsapp_crm_row(row, int(index) if isinstance(index, int) else 0)
+    frame = frame.copy()
+    frame["phone_badge"] = frame.get("phone", pd.Series("", index=frame.index)).astype(str).map(whatsapp_phone_badge)
+    frame["phone_valid"] = frame["phone_badge"].str.startswith("✅")
+    total_phone = int(frame.get("phone", pd.Series("", index=frame.index)).astype(str).str.strip().ne("").sum())
+    valid_count = int(frame["phone_valid"].sum())
+    invalid_count = int(len(frame) - valid_count)
+    contacted_count = int(frame.get("whatsapp_status", pd.Series("", index=frame.index)).astype(str).str.lower().isin(["contacted", "opened"]).sum())
+    replied_interested_count = int(frame.get("whatsapp_status", pd.Series("", index=frame.index)).astype(str).str.lower().isin(["replied", "interested"]).sum())
+    cards = [
+        ("Total phone leads", total_phone, "Rows with any phone value"),
+        ("Valid numbers", valid_count, "Ready for wa.me"),
+        ("Invalid/missing numbers", invalid_count, "Needs cleanup"),
+        ("Contacted", contacted_count, "Opened or contacted"),
+        ("Replied / Interested", replied_interested_count, "Positive conversation state"),
+    ]
+    st.markdown('<div class="metric-card-grid">' + "".join(render_metric_card(label, value, hint) for label, value, hint in cards) + "</div>", unsafe_allow_html=True)
+    filter_cols = st.columns([1.6, 1, 1.2, 1])
+    with filter_cols[0]:
+        search = st.text_input("Search company/domain/phone", key="whatsapp_crm_search")
+    with filter_cols[1]:
+        sort_by = st.selectbox("Sort", ["Newest", "Oldest", "Highest Score"], key="whatsapp_crm_sort")
+    with filter_cols[2]:
+        status_filter = st.selectbox("Status", ["All", "Not Contacted", "Contacted", "Replied", "Interested", "Not Interested"], key="whatsapp_crm_status")
+    with filter_cols[3]:
+        phone_filter = st.selectbox("Phone", ["All", "Valid only", "Invalid only"], key="whatsapp_crm_phone")
+    filtered = frame.copy()
+    if search:
+        haystack = (
+            filtered.get("company", pd.Series("", index=filtered.index)).astype(str)
+            + " "
+            + filtered.get("company_url", pd.Series("", index=filtered.index)).astype(str)
+            + " "
+            + filtered.get("phone", pd.Series("", index=filtered.index)).astype(str)
+        ).str.lower()
+        filtered = filtered[haystack.str.contains(str(search).lower(), na=False)]
+    if status_filter != "All":
+        wanted = status_filter.lower().replace(" ", "_")
+        filtered = filtered[filtered.get("whatsapp_status", pd.Series("", index=filtered.index)).astype(str).str.lower().eq(wanted)]
+    if phone_filter == "Valid only":
+        filtered = filtered[filtered["phone_valid"]]
+    if phone_filter == "Invalid only":
+        filtered = filtered[~filtered["phone_valid"]]
+    filtered = sort_whatsapp_frame(filtered, sort_by)
+    if filtered.empty:
+        render_empty_state("No phone-ready leads yet", "Generate leads with phone numbers first.", "Generate Leads")
+        st.markdown("</div></div>", unsafe_allow_html=True)
+        return
+    header_cols = st.columns([1.3, 1.4, 1, 0.9, 0.6, 1.7, 1, 1.9])
+    for col, label in zip(header_cols, ["Company", "Website / Domain", "Phone", "Number Valid?", "Score", "Lead Reason", "WhatsApp Status", "Actions"]):
+        col.markdown(f"**{label}**")
     st.markdown("</div></div>", unsafe_allow_html=True)
+    for index, row in filtered.head(100).iterrows():
+        render_whatsapp_crm_row(row, int(index) if isinstance(index, int) else 0)
 
 
 def render_lead_action_buttons(row: pd.Series, index: int) -> None:

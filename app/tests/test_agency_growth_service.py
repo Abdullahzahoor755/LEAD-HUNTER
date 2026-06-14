@@ -175,6 +175,26 @@ def test_phone_normalization_and_whatsapp_readiness() -> None:
 
 
 @pytest.mark.anyio
+async def test_whatsapp_preview_invalid_phone_has_no_link() -> None:
+    db = build_memory_session()
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        signup = await _signup(client, "tenant-whatsapp-invalid")
+        lead = _lead(db, "tenant-whatsapp-invalid", company="Invalid Phone Co", phone="123")
+        response = await client.post(
+            f"/leads/{lead.id}/whatsapp-message/preview",
+            headers=_auth_headers(signup["token"]),
+            json={},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["whatsapp_ready"] is False
+    assert payload["whatsapp_url"] == ""
+
+
+@pytest.mark.anyio
 async def test_unknown_offer_match_gets_useful_default() -> None:
     db = build_memory_session()
     app = create_fastapi_app(db=db)
