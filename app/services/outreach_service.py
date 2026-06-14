@@ -243,13 +243,22 @@ class OutreachService:
     async def list_followup_candidates(self, tenant: TenantContext, blocked_domains: set[str], now_value: datetime, parse_datetime) -> List[Dict[str, Any]]:
         scoped = self.db.for_tenant(tenant)
         items: List[Dict[str, Any]] = []
+        followups = await maybe_await(scoped.list("followups"))
         for lead in await self.lead_service.list_leads(tenant):
             if lead.status.lower() != "sent" or lead.status.lower() == "unsubscribed":
                 continue
             if self._email_domain(lead.email) in blocked_domains:
                 continue
             metadata = dict(lead.metadata or {})
-            if str(metadata.get("ReplyStatus", "")).strip().lower() == "received":
+            reply_status = str(lead.reply_status or metadata.get("ReplyStatus", "")).strip().lower()
+            if reply_status in {"interested", "replied", "not_interested", "replied_positive", "replied_negative", "received"}:
+                continue
+            if str(metadata.get("BounceStatus", "")).strip().lower() == "bounced":
+                continue
+            if str(metadata.get("ScheduledFollowupAt", "") or metadata.get("NextFollowupDue", "")).strip():
+                if any(item.lead_id == lead.id and str(item.status or "").strip().lower() == "scheduled" for item in followups):
+                    continue
+            elif any(item.lead_id == lead.id and str(item.status or "").strip().lower() == "scheduled" for item in followups):
                 continue
             followup_count = int(metadata.get("FollowupCount", 0) or 0)
             if followup_count >= 3:
@@ -382,6 +391,9 @@ class OutreachService:
         metadata = dict(existing.metadata or {})
         metadata.update(updates)
         existing.metadata = metadata
+        existing.reply_status = self.lead_service._normalize_reply_status(str(updates.get("ReplyStatus", "")), metadata)
+        if updates.get("LastReplyAt"):
+            existing.last_reply_at = self.lead_service._normalize_last_reply_at(existing.last_reply_at, metadata)
         await self.lead_service.upsert_lead(tenant, existing)
         audit_log(
             LOGGER,
@@ -425,6 +437,19 @@ class OutreachService:
             reply.provider_message_id,
             reply.classification,
         )
+
+    async def mark_lead_reply_status(self, tenant: TenantContext, lead_id: str, reply_status: str) -> Lead:
+        scoped = self.db.for_tenant(tenant)
+        lead = await maybe_await(scoped.get("leads", lead_id))
+        if lead is None:
+            raise ValueError("Lead not found.")
+        metadata = dict(lead.metadata or {})
+        normalized = self.lead_service._normalize_reply_status(reply_status, metadata)
+        metadata["ReplyStatus"] = normalized
+        metadata["NextFollowupDue"] = ""
+        lead.metadata = metadata
+        lead.reply_status = normalized
+        return await self.lead_service.upsert_lead(tenant, lead)
 
     def _email_domain(self, email: str) -> str:
         return str(email or "").strip().lower().split("@")[-1]

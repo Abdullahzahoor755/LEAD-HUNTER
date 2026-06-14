@@ -161,8 +161,63 @@ async def test_reply_monitor_persists_replies_with_tenant_oauth(monkeypatch: pyt
     assert result["checked"] == 1
     assert len(replies) == 1
     assert replies[0].classification == "Interested"
-    assert updated_lead.metadata["ReplyStatus"] == "Received"
+    assert updated_lead.metadata["ReplyStatus"] == "interested"
+    assert updated_lead.reply_status == "interested"
     assert updated_lead.metadata["LastReplyFrom"] == "lead@example.com"
+
+
+@pytest.mark.anyio
+async def test_reply_monitor_marks_bounces_and_ignores_auto_replies(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-bounces")
+    monkeypatch.setattr("app.configs.settings.settings.secret_encryption_key", "test-key")
+    db.tenants.save(Tenant(tenant_id=tenant.tenant_id, name="Tenant", slug="tenant-bounces", subscription_plan="Pro"))
+    await ProviderCredentialService(db).save_gmail_credentials(
+        tenant,
+        {
+            "client_id": "client",
+            "client_secret": "secret",
+            "refresh_token": "refresh-token",
+            "access_token": "access-token",
+            "email_address": "sender@tenant.test",
+            "scopes": ["gmail.readonly"],
+        },
+    )
+    lead = db.for_tenant(tenant).save(
+        "leads",
+        Lead(tenant_id=tenant.tenant_id, company="Bounce Co", email="lead@example.com", status="sent", metadata={"GmailThreadId": "thread-1"}),
+    )
+    db.for_tenant(tenant).save("emails", Email(tenant_id=tenant.tenant_id, lead_id=lead.id, provider_thread_id="thread-1", status="sent"))
+
+    class BounceProvider(_FakeGmailProvider):
+        async def fetch_replies(self, account, cursor: str = ""):
+            return [
+                ProviderReply(
+                    from_address="mailer-daemon@googlemail.com",
+                    subject="Delivery Status Notification (Failure)",
+                    body="Message not delivered.",
+                    message_id="bounce-1",
+                    thread_id=cursor,
+                    metadata={"internal_date": "1710000000000", "raw": {"id": "bounce-1", "threadId": cursor, "internalDate": "1710000000000"}},
+                ),
+                ProviderReply(
+                    from_address="Lead <lead@example.com>",
+                    subject="Automatic reply",
+                    body="I am out of office.",
+                    message_id="auto-1",
+                    thread_id=cursor,
+                    metadata={"internal_date": "1710000000001", "raw": {"id": "auto-1", "threadId": cursor, "internalDate": "1710000000001"}},
+                ),
+            ]
+
+    monkeypatch.setattr(reply_monitor_module, "build_provider_registry", lambda: {"gmail": BounceProvider()})
+
+    result = await ReplyMonitorAgent().run(AgentRequest(tenant=tenant, payload={"mode": "once"}), db)
+
+    updated_lead = db.for_tenant(tenant).get("leads", lead.id)
+    assert result["checked"] == 1
+    assert updated_lead.metadata["BounceStatus"] == "bounced"
+    assert updated_lead.reply_status == "no_reply"
 
 
 @pytest.mark.anyio

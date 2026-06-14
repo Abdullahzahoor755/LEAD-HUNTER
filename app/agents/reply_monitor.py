@@ -98,6 +98,37 @@ class ReplyMonitorAgent(BaseAgent):
                     len(replies),
                 )
                 continue
+            bounces = [reply for reply in inbound if _is_bounce(reply)]
+            if bounces:
+                latest_bounce = bounces[-1]
+                updates = {
+                    "BounceStatus": "bounced",
+                    "BounceReason": latest_bounce.subject or latest_bounce.body[:200],
+                    "BounceDetectedAt": legacy_leads.parse_gmail_internal_date(dict(latest_bounce.metadata.get("raw", {}))),
+                    "NextFollowupDue": "",
+                }
+                await service.save_reply_result(
+                    tenant=request.tenant,
+                    lead=lead,
+                    email_id=getattr(item["last_email"], "id", ""),
+                    message=dict(latest_bounce.metadata.get("raw", {})),
+                    updates=updates,
+                    received_at=legacy_leads.parse_datetime(str(updates.get("BounceDetectedAt", ""))),
+                )
+                processed += 1
+                continue
+            inbound = [reply for reply in inbound if not _is_auto_reply(reply)]
+            if not inbound:
+                audit_log(
+                    LOGGER,
+                    logging.INFO,
+                    "OUTREACH_AUDIT reply.auto_reply_skipped tenant_id=%s lead_id=%s email=%s thread_id=%s",
+                    request.tenant.tenant_id,
+                    lead.id,
+                    lead.email,
+                    thread_id,
+                )
+                continue
             inbound.sort(key=lambda reply: int(str(reply.metadata.get("internal_date", "0")) or "0"))
             latest_reply = inbound[-1]
             last_reply_at = legacy_leads.parse_gmail_internal_date(dict(latest_reply.metadata.get("raw", {})))
@@ -130,7 +161,7 @@ class ReplyMonitorAgent(BaseAgent):
                 analysis.get("sentiment", ""),
             )
             updates: Dict[str, Any] = {
-                "ReplyStatus": "Received",
+                "ReplyStatus": _reply_status_from_classification(str(analysis.get("classification", ""))),
                 "ReplyClassification": str(analysis.get("classification", "")),
                 "Sentiment": str(analysis.get("sentiment", "")),
                 "LeadTemperature": str(analysis.get("lead_temperature", "")),
@@ -176,3 +207,35 @@ class ReplyMonitorAgent(BaseAgent):
         )
         await AgentRunService(db).record_run(request.tenant, run)
         return run.output_payload
+
+
+def _reply_status_from_classification(classification: str) -> str:
+    value = str(classification or "").strip().lower()
+    if value == "interested":
+        return "interested"
+    if value in {"not interested", "not_interested"}:
+        return "not_interested"
+    return "replied"
+
+
+def _is_bounce(reply) -> bool:
+    sender = legacy_leads.extract_email_address(getattr(reply, "from_address", "")).lower()
+    subject = str(getattr(reply, "subject", "") or "").lower()
+    body = str(getattr(reply, "body", "") or "").lower()
+    return (
+        "mailer-daemon" in sender
+        or "postmaster" in sender
+        or "delivery status notification" in subject
+        or "undeliverable" in subject
+        or "delivery has failed" in body
+        or "message not delivered" in body
+    )
+
+
+def _is_auto_reply(reply) -> bool:
+    subject = str(getattr(reply, "subject", "") or "").lower()
+    body = str(getattr(reply, "body", "") or "").lower()
+    return any(
+        marker in f"{subject}\n{body}"
+        for marker in ("out of office", "automatic reply", "auto-reply", "autoreply", "vacation responder")
+    )

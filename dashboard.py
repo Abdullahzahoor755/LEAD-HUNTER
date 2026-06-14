@@ -468,6 +468,14 @@ def render_landing_styles() -> None:
             max-width: var(--page-max-width);
             margin: 0 auto;
         }
+        .app-footer {
+            margin: 1.4rem 0 .45rem;
+            padding: .85rem 0 0;
+            border-top: 1px solid var(--line);
+            color: var(--muted);
+            font-size: .78rem;
+            text-align: center;
+        }
         .page-section {
             margin-top: .9rem;
         }
@@ -1645,6 +1653,7 @@ def require_login() -> TenantContext | None:
                 except Exception as error:
                     st.error(str(error))
         st.markdown('</div>', unsafe_allow_html=True)
+    render_app_footer()
     st.markdown('</div>', unsafe_allow_html=True)
     return None
 
@@ -1765,6 +1774,7 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
                 "save_reason": str(item.get("save_reason", "") or "").strip(),
                 "followup_count": item.get("followup_count", 0),
                 "reply_status": str(item.get("reply_status", "") or "").strip().lower(),
+                "bounce_status": str(item.get("bounce_status", "") or "").strip().lower(),
                 "last_reply_at": str(item.get("last_reply_at", "") or "").strip(),
                 "source_query": str(item.get("source_query", "") or "").strip(),
                 "agency_kit": item.get("agency_kit", {}) if isinstance(item.get("agency_kit", {}), dict) else {},
@@ -2184,12 +2194,11 @@ def render_generation_status_card(snapshot: Dict[str, Any]) -> None:
 def render_dashboard_page(frame: pd.DataFrame, snapshot: Dict[str, Any]) -> None:
     st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">Pipeline Overview</div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-caption">A compact view of output, sends, replies, and current workload.</div>', unsafe_allow_html=True)
-    metrics = st.columns(4)
-    metrics[0].metric("Leads", int(snapshot.get("lead_count", 0)))
-    metrics[1].metric("Sent", int(snapshot.get("sent_count", 0)))
-    metrics[2].metric("Replies", int(snapshot.get("reply_count", 0)))
-    metrics[3].metric("Jobs", int(snapshot.get("job_count", 0)))
+    st.markdown('<div class="section-caption">A compact view of replies, bounces, and scheduled follow-ups.</div>', unsafe_allow_html=True)
+    metrics = st.columns(3)
+    metrics[0].metric("Replies", int(snapshot.get("reply_count", 0)))
+    metrics[1].metric("Bounced", int(snapshot.get("bounced_count", 0)))
+    metrics[2].metric("Scheduled Follow-ups", int(snapshot.get("scheduled_followup_count", 0)))
     if frame.empty:
         render_empty_state("No leads yet", "Enter a niche and country to generate your first leads.", "Generate Leads")
         st.markdown("</div></div>", unsafe_allow_html=True)
@@ -2356,6 +2365,22 @@ def render_lead_action_buttons(row: pd.Series, index: int) -> None:
     agency_kit = row.get("agency_kit", {}) if isinstance(row.get("agency_kit", {}), dict) else {}
     offer_match = row.get("offer_match", {}) if isinstance(row.get("offer_match", {}), dict) else {}
     whatsapp_sales_kit = row.get("whatsapp_sales_kit", {}) if isinstance(row.get("whatsapp_sales_kit", {}), dict) else {}
+
+    status_cols = st.columns(3)
+    for label, status, col in [
+        ("Mark as Replied", "replied", status_cols[0]),
+        ("Mark as Interested", "interested", status_cols[1]),
+        ("Mark as Not Interested", "not_interested", status_cols[2]),
+    ]:
+        with col:
+            if st.button(label, key=f"reply_status_{status}_{lead_id}_{index}", use_container_width=True):
+                response = api_request("POST", f"/leads/{lead_id}/reply-status", json={"reply_status": status})
+                payload = parse_api_json(response)
+                if response.is_success:
+                    st.success("Reply status updated.")
+                    st.rerun()
+                else:
+                    st.error(str(payload.get("detail", "Could not update reply status.")))
 
     cols = st.columns(3)
     with cols[0]:
@@ -3915,6 +3940,13 @@ def render_sidebar_navigation() -> Dict[str, str]:
     return {"module": module, "page": page}
 
 
+def render_app_footer() -> None:
+    st.markdown(
+        '<div class="app-footer">Designed &amp; Built with ❤ by Abdullah Zahoor | © 2026 All Rights Reserved</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def main() -> None:
     bootstrap_dashboard_state()
     tenant = require_login()
@@ -3924,6 +3956,7 @@ def main() -> None:
     st.markdown('<div class="app-shell">', unsafe_allow_html=True)
     navigation = render_sidebar_navigation()
     if render_plan_onboarding():
+        render_app_footer()
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
@@ -3947,6 +3980,7 @@ def main() -> None:
         render_admin_page()
     else:
         render_email_crm_page(tenant, "Generate Leads")
+    render_app_footer()
     st.markdown("</div>", unsafe_allow_html=True)
 
 
