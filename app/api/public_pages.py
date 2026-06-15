@@ -7,13 +7,17 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
+
+from app.configs.settings import settings
 
 
 router = APIRouter()
 
 PRODUCT_NAME = "Lead Hunter AI"
-SUPPORT_EMAIL = "support@leadhunterai.app"
+SUPPORT_EMAIL = "abdullahzahoorsdk130@gmail.com"
+SUPPORT_PHONE = "03180745230"
+PUBLIC_STYLES_PATH = "/public/homepage.css"
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,10 @@ def _nav() -> str:
         ("/gmail-access", "Gmail Access"),
     )
     return " | ".join(f'<a href="{href}">{html.escape(label)}</a>' for href, label in links)
+
+
+def _frontend_url() -> str:
+    return str(settings.frontend_base_url or "/").strip() or "/"
 
 
 def _paragraphs(items: Iterable[str]) -> str:
@@ -67,6 +75,471 @@ def _render_page(page: Page) -> HTMLResponse:
     return HTMLResponse(body)
 
 
+def _render_homepage() -> HTMLResponse:
+    app_url = html.escape(_frontend_url(), quote=True)
+    sections = {
+        "preview": (
+            ("Lead Generation", "Find prospects by niche and location, then organize them into a workspace-ready pipeline."),
+            ("Email CRM", "Review contacts, readiness, outreach state, follow-ups, and reply status from one place."),
+            ("Gmail Outreach", "Connect Gmail only when you want to send user-authorized outreach and check replies."),
+            ("WhatsApp CRM", "Work phone-ready leads manually with WhatsApp-first status tracking and scripts."),
+            ("Marketing Kit", "Turn leads or business ideas into offers, ad copy, scripts, and campaign plans."),
+        ),
+        "steps": (
+            ("Generate Leads", "Search for companies that match your niche, market, and service offer."),
+            ("Review Contacts", "Filter email-ready and phone-ready leads before starting outreach."),
+            ("Send Outreach", "Use connected Gmail for user-authorized email outreach when you choose."),
+            ("Track Replies", "Monitor reply status so your CRM stays focused on real opportunities."),
+            ("Grow Faster", "Create sales scripts, offers, and campaign assets from your best leads."),
+        ),
+        "pricing": (
+            ("Free", "$0", "Start with lead workflow and CSV-ready contact management.", "Lead generation workflow, basic CRM views, CSV export"),
+            ("Pro", "$20/month", "Add Gmail outreach and reply tracking for active sales work.", "Email CRM, Gmail automation, follow-ups, reply checking"),
+            ("Agency", "$30/month", "Use higher limits and agency workflow tools for larger pipelines.", "Everything in Pro, higher limits, agency operating tools"),
+        ),
+        "trust": (
+            ("Gmail Optional", "Create an account and use core features without connecting Gmail."),
+            ("Google Login Separate", "Google sign-in uses basic profile scopes and does not grant Gmail access."),
+            ("Encrypted Credentials", "Connected provider credentials are stored securely and are not exposed in status APIs."),
+            ("Tenant Isolation", "Workspace data is scoped by tenant-aware access controls."),
+            ("Disconnect Anytime", "Users can disconnect Gmail in Settings or revoke access from Google."),
+        ),
+    }
+    preview_cards = "\n".join(
+        f'<article class="lh-card"><h3>{html.escape(title)}</h3><p>{html.escape(body)}</p></article>'
+        for title, body in sections["preview"]
+    )
+    steps = "\n".join(
+        (
+            '<li class="lh-step">'
+            f'<span class="lh-step-index">{index}</span>'
+            f'<div><h3>{html.escape(title)}</h3><p>{html.escape(body)}</p></div>'
+            "</li>"
+        )
+        for index, (title, body) in enumerate(sections["steps"], start=1)
+    )
+    pricing_cards = "\n".join(
+        (
+            '<article class="lh-price-card">'
+            f'<h3>{html.escape(name)}</h3>'
+            f'<p class="lh-price">{html.escape(price)}</p>'
+            f'<p>{html.escape(description)}</p>'
+            f'<p class="lh-includes">{html.escape(includes)}</p>'
+            "</article>"
+        )
+        for name, price, description, includes in sections["pricing"]
+    )
+    trust_cards = "\n".join(
+        f'<article class="lh-trust-card"><h3>{html.escape(title)}</h3><p>{html.escape(body)}</p></article>'
+        for title, body in sections["trust"]
+    )
+    body = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{PRODUCT_NAME} | Lead generation and Gmail outreach CRM</title>
+  <meta name="description" content="Find leads, send Gmail outreach, track replies, and create marketing assets from one Lead Hunter AI workspace.">
+  <link rel="stylesheet" href="{PUBLIC_STYLES_PATH}">
+</head>
+<body class="lh-page">
+  <header class="lh-header">
+    <a class="lh-brand" href="/" aria-label="{PRODUCT_NAME} home">{PRODUCT_NAME}</a>
+    <nav class="lh-nav" aria-label="Public pages">
+      <a href="/privacy">Privacy</a>
+      <a href="/terms">Terms</a>
+      <a href="/contact">Contact</a>
+      <a href="/gmail-access">Gmail Access</a>
+    </nav>
+  </header>
+  <main>
+    <section class="lh-hero" aria-labelledby="hero-title">
+      <div class="lh-hero-copy">
+        <p class="lh-eyebrow">AI sales workspace for agencies and growing businesses</p>
+        <h1 id="hero-title">Find leads, send Gmail outreach, and track replies.</h1>
+        <p class="lh-subheadline">Lead Hunter AI helps you discover prospects, manage email-ready and phone-ready contacts, send user-authorized Gmail outreach, and create marketing assets from one focused workspace.</p>
+        <div class="lh-actions">
+          <a class="lh-button lh-button-primary" href="{app_url}">Open App</a>
+          <a class="lh-button lh-button-secondary" href="/gmail-access">Gmail Access</a>
+        </div>
+        <p class="lh-hero-note">Gmail connection is optional. Google Login is separate and does not grant Gmail access.</p>
+      </div>
+      <aside class="lh-preview-panel" aria-label="Product preview">
+        <div class="lh-window-bar"><span></span><span></span><span></span></div>
+        <div class="lh-preview-row"><strong>Generate Leads</strong><span>niche + location</span></div>
+        <div class="lh-preview-row"><strong>Email CRM</strong><span>review contacts</span></div>
+        <div class="lh-preview-row"><strong>Gmail Outreach</strong><span>optional connect</span></div>
+        <div class="lh-preview-row"><strong>Reply Tracking</strong><span>CRM status</span></div>
+        <div class="lh-preview-row"><strong>Marketing Kit</strong><span>offers + scripts</span></div>
+      </aside>
+    </section>
+
+    <section class="lh-section" aria-labelledby="preview-title">
+      <div class="lh-section-heading">
+        <p class="lh-eyebrow">Product Preview</p>
+        <h2 id="preview-title">One workspace for lead generation and outreach momentum.</h2>
+      </div>
+      <div class="lh-grid lh-grid-five">{preview_cards}</div>
+    </section>
+
+    <section class="lh-section" aria-labelledby="workflow-title">
+      <div class="lh-section-heading">
+        <p class="lh-eyebrow">How It Works</p>
+        <h2 id="workflow-title">Move from search to reply tracking without losing context.</h2>
+      </div>
+      <ol class="lh-steps">{steps}</ol>
+    </section>
+
+    <section class="lh-section" aria-labelledby="pricing-title">
+      <div class="lh-section-heading">
+        <p class="lh-eyebrow">Pricing Preview</p>
+        <h2 id="pricing-title">Start free, then add outreach automation when you need it.</h2>
+      </div>
+      <div class="lh-pricing">{pricing_cards}</div>
+    </section>
+
+    <section class="lh-section lh-trust-section" aria-labelledby="trust-title">
+      <div class="lh-section-heading">
+        <p class="lh-eyebrow">Trust And Control</p>
+        <h2 id="trust-title">Built for safer Gmail-connected workflows.</h2>
+      </div>
+      <div class="lh-grid lh-grid-five">{trust_cards}</div>
+    </section>
+  </main>
+  <footer class="lh-footer">
+    <p>{PRODUCT_NAME} &copy; 2026</p>
+    <nav aria-label="Footer">
+      <a href="/privacy">Privacy</a>
+      <a href="/terms">Terms</a>
+      <a href="/contact">Contact</a>
+      <a href="/gmail-access">Gmail Access</a>
+    </nav>
+  </footer>
+</body>
+</html>"""
+    return HTMLResponse(body)
+
+
+HOMEPAGE_CSS = """
+:root {
+  color-scheme: light;
+  --bg: #f6fbfd;
+  --surface: #ffffff;
+  --surface-soft: #eff9fc;
+  --ink: #102033;
+  --muted: #52677a;
+  --line: #d7e9ef;
+  --line-strong: #b9d9e3;
+  --accent: #0e7490;
+  --accent-strong: #155e75;
+  --accent-soft: #e6f7fb;
+  --danger-soft: #fff1f3;
+  --shadow: 0 18px 50px rgba(16, 32, 51, .09);
+}
+* { box-sizing: border-box; }
+body.lh-page {
+  margin: 0;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.5;
+  color: var(--ink);
+  background: linear-gradient(180deg, #edf9fd 0, var(--bg) 380px, #ffffff 100%);
+}
+a {
+  color: var(--accent-strong);
+  text-decoration: none;
+}
+a:hover { text-decoration: underline; }
+a:focus-visible {
+  outline: 3px solid rgba(14, 116, 144, .35);
+  outline-offset: 4px;
+  border-radius: 8px;
+}
+.lh-header,
+.lh-hero,
+.lh-section,
+.lh-footer {
+  width: min(1160px, calc(100% - 40px));
+  margin-left: auto;
+  margin-right: auto;
+}
+.lh-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 24px 0;
+}
+.lh-brand {
+  font-weight: 850;
+  color: var(--ink);
+  font-size: 1.05rem;
+}
+.lh-nav,
+.lh-footer nav {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: .95rem;
+}
+.lh-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(320px, .72fr);
+  gap: 42px;
+  align-items: center;
+  padding: 66px 0 58px;
+}
+.lh-eyebrow {
+  margin: 0 0 14px;
+  color: var(--accent-strong);
+  font-size: .84rem;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+h1,
+h2,
+h3,
+p {
+  overflow-wrap: anywhere;
+}
+h1 {
+  margin: 0;
+  max-width: 820px;
+  font-size: clamp(2.45rem, 6vw, 5rem);
+  line-height: .96;
+  letter-spacing: 0;
+}
+h2 {
+  margin: 0;
+  font-size: clamp(1.65rem, 3.4vw, 2.7rem);
+  line-height: 1.06;
+  letter-spacing: 0;
+}
+h3 {
+  margin: 0 0 8px;
+  font-size: 1.02rem;
+  line-height: 1.25;
+}
+.lh-subheadline {
+  max-width: 740px;
+  margin: 24px 0 0;
+  color: var(--muted);
+  font-size: 1.16rem;
+}
+.lh-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 30px;
+}
+.lh-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 46px;
+  padding: 0 20px;
+  border-radius: 8px;
+  border: 1px solid var(--line-strong);
+  font-weight: 800;
+}
+.lh-button-primary {
+  color: #ffffff;
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  box-shadow: 0 12px 28px rgba(21, 94, 117, .2);
+}
+.lh-button-primary:hover {
+  color: #ffffff;
+  text-decoration: none;
+  background: #0f4d61;
+}
+.lh-button-secondary {
+  background: #ffffff;
+  color: var(--accent-strong);
+}
+.lh-button-secondary:hover { text-decoration: none; background: var(--accent-soft); }
+.lh-hero-note {
+  margin: 18px 0 0;
+  color: var(--muted);
+  font-size: .95rem;
+}
+.lh-preview-panel {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .86);
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+.lh-window-bar {
+  display: flex;
+  gap: 7px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+.lh-window-bar span {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--line-strong);
+}
+.lh-preview-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 0;
+  border-bottom: 1px solid #e9f3f6;
+}
+.lh-preview-row:last-child { border-bottom: 0; }
+.lh-preview-row span {
+  color: var(--muted);
+  text-align: right;
+}
+.lh-section {
+  padding: 56px 0;
+}
+.lh-section-heading {
+  max-width: 760px;
+  margin-bottom: 24px;
+}
+.lh-grid {
+  display: grid;
+  gap: 16px;
+}
+.lh-grid-five {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+.lh-card,
+.lh-trust-card,
+.lh-price-card,
+.lh-step {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 10px 28px rgba(16, 32, 51, .045);
+}
+.lh-card,
+.lh-trust-card,
+.lh-price-card {
+  padding: 20px;
+}
+.lh-card p,
+.lh-trust-card p,
+.lh-price-card p,
+.lh-step p {
+  margin: 0;
+  color: var(--muted);
+}
+.lh-steps {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 16px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.lh-step {
+  padding: 18px;
+}
+.lh-step-index {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  margin-bottom: 14px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 850;
+}
+.lh-pricing {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+.lh-price {
+  margin: 4px 0 12px !important;
+  color: var(--ink) !important;
+  font-size: 1.7rem;
+  font-weight: 850;
+}
+.lh-includes {
+  margin-top: 16px !important;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-size: .93rem;
+}
+.lh-trust-section {
+  margin-top: 24px;
+  padding: 46px 28px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, var(--surface-soft), #ffffff);
+  border: 1px solid var(--line);
+}
+.lh-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: center;
+  padding: 32px 0 42px;
+  margin-top: 32px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+}
+.lh-footer p { margin: 0; }
+@media (max-width: 1040px) {
+  .lh-grid-five,
+  .lh-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .lh-hero {
+    grid-template-columns: 1fr;
+    padding-top: 42px;
+  }
+}
+@media (max-width: 720px) {
+  .lh-header,
+  .lh-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .lh-header,
+  .lh-hero,
+  .lh-section,
+  .lh-footer {
+    width: min(100% - 28px, 1160px);
+  }
+  .lh-hero {
+    gap: 26px;
+    padding: 32px 0 38px;
+  }
+  .lh-section {
+    padding: 38px 0;
+  }
+  .lh-grid-five,
+  .lh-steps,
+  .lh-pricing {
+    grid-template-columns: 1fr;
+  }
+  .lh-actions,
+  .lh-button {
+    width: 100%;
+  }
+  .lh-preview-row {
+    flex-direction: column;
+    gap: 4px;
+  }
+  .lh-preview-row span {
+    text-align: left;
+  }
+  .lh-trust-section {
+    padding: 30px 16px;
+  }
+}
+"""
+
+
 HOME_PAGE = Page(
     title=PRODUCT_NAME,
     description="AI lead generation, outreach CRM, Gmail-connected email workflow, WhatsApp CRM, and marketing tools for agencies and businesses.",
@@ -89,7 +562,7 @@ HOME_PAGE = Page(
             "Trust And Support",
             (
                 "Public privacy, terms, contact, and Gmail access details are available from the links on this page.",
-                f"For support, contact {SUPPORT_EMAIL}.",
+                f"For support, contact {SUPPORT_EMAIL} or {SUPPORT_PHONE}.",
             ),
         ),
     ),
@@ -141,7 +614,7 @@ PRIVACY_PAGE = Page(
             "User Controls And Contact",
             (
                 "Users can disconnect Gmail in Settings and can revoke access from their Google Account permissions page.",
-                f"To request support, access, correction, or deletion, contact {SUPPORT_EMAIL}.",
+                f"To request support, access, correction, or deletion, contact {SUPPORT_EMAIL} or {SUPPORT_PHONE}.",
             ),
         ),
     ),
@@ -190,7 +663,7 @@ TERMS_PAGE = Page(
         (
             "Contact",
             (
-                f"Questions about these terms can be sent to {SUPPORT_EMAIL}.",
+                f"Questions about these terms can be sent to {SUPPORT_EMAIL} or {SUPPORT_PHONE}.",
             ),
         ),
     ),
@@ -204,7 +677,7 @@ CONTACT_PAGE = Page(
         (
             "Support",
             (
-                f"For account, billing, privacy, Gmail access, or technical support, contact {SUPPORT_EMAIL}.",
+                f"For account, billing, privacy, Gmail access, or technical support, contact {SUPPORT_EMAIL} or {SUPPORT_PHONE}.",
                 "Please include your workspace name, account email, and a short description of the issue when requesting support.",
             ),
         ),
@@ -255,7 +728,7 @@ GMAIL_ACCESS_PAGE = Page(
             "Related Policies",
             (
                 "Read the Privacy Policy and Terms of Service for more detail about data use, security, acceptable use, and support.",
-                f"For help with Gmail access, contact {SUPPORT_EMAIL}.",
+                f"For help with Gmail access, contact {SUPPORT_EMAIL} or {SUPPORT_PHONE}.",
             ),
         ),
     ),
@@ -264,7 +737,12 @@ GMAIL_ACCESS_PAGE = Page(
 
 @router.get("/", response_class=HTMLResponse)
 async def home() -> HTMLResponse:
-    return _render_page(HOME_PAGE)
+    return _render_homepage()
+
+
+@router.get(PUBLIC_STYLES_PATH)
+async def homepage_styles() -> Response:
+    return Response(HOMEPAGE_CSS, media_type="text/css")
 
 
 @router.get("/privacy", response_class=HTMLResponse)

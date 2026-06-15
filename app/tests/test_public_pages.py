@@ -47,6 +47,49 @@ async def test_public_pages_include_required_trust_links_and_gmail_disclosure() 
 
 
 @pytest.mark.anyio
+async def test_homepage_has_saas_landing_sections() -> None:
+    app = create_fastapi_app(db=build_memory_session())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/")
+        styles = await client.get("/public/homepage.css")
+
+    assert response.status_code == 200
+    assert 'href="/public/homepage.css"' in response.text
+    assert "Find leads, send Gmail outreach, and track replies." in response.text
+    assert "Open App" in response.text
+    assert "Gmail Access" in response.text
+    for section in ("Product Preview", "How It Works", "Pricing Preview", "Trust And Control"):
+        assert section in response.text
+    for label in (
+        "Lead Generation",
+        "Email CRM",
+        "Gmail Outreach",
+        "WhatsApp CRM",
+        "Marketing Kit",
+        "Generate Leads",
+        "Review Contacts",
+        "Send Outreach",
+        "Track Replies",
+        "Grow Faster",
+        "Free",
+        "Pro",
+        "Agency",
+        "Gmail Optional",
+        "Google Login Separate",
+        "Encrypted Credentials",
+        "Tenant Isolation",
+        "Disconnect Anytime",
+    ):
+        assert label in response.text
+
+    assert styles.status_code == 200
+    assert "text/css" in styles.headers["content-type"]
+    assert ".lh-hero" in styles.text
+    assert "@media" in styles.text
+
+
+@pytest.mark.anyio
 async def test_public_pages_do_not_expose_secret_markers() -> None:
     app = create_fastapi_app(db=build_memory_session())
     transport = httpx.ASGITransport(app=app)

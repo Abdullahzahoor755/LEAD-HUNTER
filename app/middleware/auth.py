@@ -21,6 +21,7 @@ class AuthTenantMiddleware(BaseHTTPMiddleware):
             "/terms",
             "/contact",
             "/gmail-access",
+            "/public/homepage.css",
             "/healthz",
             "/readyz",
             "/signup",
