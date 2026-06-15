@@ -129,7 +129,7 @@ class LeadGenerationAgent(BaseAgent):
                     country=str(item.get("country", "") or target_country),
                     verified_email=str(item.get("email", "")),
                     service_reason=self._service_reason_from_raw(item),
-                    outreach_status=str(item.get("email_status", "pending")),
+                    outreach_status="pending",
                     website=str(item.get("website", "")),
                     email=str(item.get("email", "")),
                     phone=str(item.get("phone", "")),
@@ -137,7 +137,7 @@ class LeadGenerationAgent(BaseAgent):
                     industry=str(item.get("industry", "")),
                     score=int(item.get("lead_score", 0) or 0),
                     reason=str(item.get("reason", "")),
-                    status=str(item.get("email_status", "pending")),
+                    status="pending",
                     source_query=query,
                     metadata=self._metadata_from_raw(item),
                 )
@@ -319,6 +319,8 @@ class LeadGenerationAgent(BaseAgent):
 
     def _metadata_from_raw(self, item: Dict[str, Any]) -> Dict[str, Any]:
         metadata = dict(item)
+        if item.get("email_status"):
+            metadata["raw_email_status"] = str(item.get("email_status", "")).strip()
         if item.get("ai_mode"):
             metadata["ai_mode"] = str(item.get("ai_mode", "")).strip()
         score_breakdown = str(item.get("score_breakdown", "") or item.get("reason", "")).strip()

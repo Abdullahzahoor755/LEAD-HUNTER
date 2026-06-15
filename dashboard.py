@@ -78,6 +78,7 @@ def bootstrap_dashboard_state() -> None:
     st.session_state.setdefault("latest_subscription", {})
     st.session_state.setdefault("plan_onboarding_seen", "")
     st.session_state.setdefault("lead_generation_busy", False)
+    st.session_state.setdefault("active_lead_generation_job_id", "")
     st.session_state.setdefault("marketing_campaign_kit", {})
     st.session_state.setdefault("marketing_campaign_source", "")
     st.session_state.setdefault("offer_match", {})
@@ -1894,6 +1895,82 @@ def enqueue_job(agent_name: str, payload: Dict[str, Any] | None = None, *, run_n
     return result
 
 
+def start_lead_generation_job(payload: Dict[str, Any]) -> Dict[str, Any]:
+    result = enqueue_job("lead_generation", payload, run_now=False)
+    queued = dict(result.get("queued", {}) or {})
+    job_id = str(queued.get("job_id", "") or "").strip()
+    if job_id:
+        st.session_state["active_lead_generation_job_id"] = job_id
+    return result
+
+
+def load_job_status(job_id: str) -> Dict[str, Any]:
+    if not job_id:
+        return {}
+    response = api_request("GET", f"/jobs/{job_id}/status")
+    body = parse_api_json(response)
+    return body if response.is_success else {}
+
+
+def load_job_events(job_id: str) -> List[Dict[str, Any]]:
+    if not job_id:
+        return []
+    response = api_request("GET", f"/jobs/{job_id}/events")
+    body = parse_api_json(response)
+    if not response.is_success:
+        return []
+    return list(body.get("events", []) or [])
+
+
+def render_active_lead_generation_job() -> bool:
+    job_id = str(st.session_state.get("active_lead_generation_job_id", "") or "").strip()
+    if not job_id:
+        return False
+    status = load_job_status(job_id)
+    if not status:
+        st.session_state["active_lead_generation_job_id"] = ""
+        st.session_state["lead_generation_busy"] = False
+        return False
+
+    normalized_status = str(status.get("status", "") or "").strip().lower()
+    active = normalized_status in {"queued", "running"}
+    progress = int(status.get("progress_percentage", 0) or 0)
+    current_stage = str(status.get("current_stage", "") or normalized_status or "queued").strip()
+    st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Lead Generation Progress</div>', unsafe_allow_html=True)
+    st.caption(f"Job: {job_id} | Status: {normalized_status.title() or 'Queued'} | Stage: {current_stage.title()} | Progress: {progress}%")
+    st.progress(max(0, min(100, progress)))
+
+    events = load_job_events(job_id)
+    if events:
+        rows = []
+        for event in list(events)[-8:]:
+            rows.append(
+                {
+                    "stage": str(event.get("stage", "")),
+                    "status": str(event.get("status", "")),
+                    "domain": str(event.get("domain", "")),
+                    "message": str(event.get("message", "")),
+                    "reason": str(event.get("reason", "")),
+                }
+            )
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    if normalized_status == "completed":
+        render_lead_generation_result({"data": dict(status.get("result", {}) or {}), "message": str(status.get("message", "") or "")})
+        st.session_state["active_lead_generation_job_id"] = ""
+        st.session_state["lead_generation_busy"] = False
+    elif normalized_status == "failed":
+        st.error(str(status.get("message") or status.get("error") or "Lead generation failed safely."))
+        st.session_state["active_lead_generation_job_id"] = ""
+        st.session_state["lead_generation_busy"] = False
+    elif active:
+        st.info("Lead generation is running in the background. You can keep using the app while it works.")
+        st.session_state["lead_generation_busy"] = True
+    st.markdown("</div></div>", unsafe_allow_html=True)
+    return active
+
+
 def render_lead_generation_result(run_body: Dict[str, Any]) -> None:
     data = dict(run_body.get("data", {}) or {}) if isinstance(run_body.get("data", {}), dict) else {}
     saved = int(data.get("saved_leads", data.get("lead_count", 0)) or 0)
@@ -2033,31 +2110,32 @@ def render_actions(tenant: TenantContext) -> None:
     if search_preview:
         st.caption(f"Search query: {search_preview}")
 
-    busy = bool(st.session_state.get("lead_generation_busy", False))
-    st.caption("This may take 1-3 minutes.")
+    active_generation = render_active_lead_generation_job()
+    busy = active_generation or bool(st.session_state.get("lead_generation_busy", False))
+    st.caption("This may take 1-3 minutes. You can keep the page open while the job runs.")
     if st.button("Generate Leads", use_container_width=True, disabled=busy):
         search_query = build_dashboard_search_query(target_industry, target_country)
 
         st.session_state["lead_generation_busy"] = True
-        with st.spinner("AI agent is finding leads... this may take 1-3 minutes."):
-            st.info("AI agent is finding leads... this may take 1-3 minutes.")
-            for step in ["Searching businesses...", "Scanning websites...", "Extracting contacts...", "Saving leads..."]:
-                st.write(step)
-            try:
-                job_result = enqueue_job(
-                    "lead_generation",
-                    {
-                        "limit": 10,
-                        "query": search_query,
-                        "niche": target_industry.strip(),
-                        "country": target_country.strip(),
-                        "location": target_country.strip(),
-                    },
-                    run_now=True,
-                )
-                render_lead_generation_result(dict(job_result.get("run", {}) or {}))
-            finally:
-                st.session_state["lead_generation_busy"] = False
+        try:
+            job_result = start_lead_generation_job(
+                {
+                    "limit": 10,
+                    "query": search_query,
+                    "niche": target_industry.strip(),
+                    "country": target_country.strip(),
+                    "location": target_country.strip(),
+                }
+            )
+            queued = dict(job_result.get("queued", {}) or {})
+            if queued.get("existing"):
+                st.info("Lead generation is already running. Showing the active job.")
+            else:
+                st.success("Lead generation started.")
+            st.rerun()
+        except Exception as error:
+            st.session_state["lead_generation_busy"] = False
+            st.error(str(error))
 
     outreach_preflight: Dict[str, Any] = {}
     if pro_enabled:

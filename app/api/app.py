@@ -12,7 +12,7 @@ from typing import Any, Dict, Sequence
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -879,14 +879,31 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
     async def enqueue_job(
         payload: JobRequest,
         request: Request,
+        background_tasks: BackgroundTasks,
         db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
     ) -> Dict[str, Any]:
         tenant = request.state.tenant
         if is_plan_gated_agent(payload.agent_name):
             await require_pro_features(tenant, db_session, "Outreach is available in Pro plan.")
+        if str(payload.agent_name or "").strip() == "lead_generation":
+            jobs = await maybe_await(db_session.jobs.list(tenant.tenant_id))
+            for existing in sorted(jobs, key=lambda item: item.created_at, reverse=True):
+                if str(existing.name or existing.job_type or "").strip() != "lead_generation":
+                    continue
+                if str(existing.status or "").strip().lower() not in {"queued", "running"}:
+                    continue
+                return {
+                    "job_id": existing.id,
+                    "tenant_id": tenant.tenant_id,
+                    "agent_name": payload.agent_name,
+                    "existing": True,
+                    "status": str(existing.status or "").strip().lower(),
+                }
         job = await JobService(db_session).enqueue(tenant, name=payload.agent_name, payload=payload.payload)
         await app.state.queue.register(job.id)
-        return {"job_id": job.id, "tenant_id": tenant.tenant_id, "agent_name": payload.agent_name}
+        if str(payload.agent_name or "").strip() == "lead_generation":
+            background_tasks.add_task(app.state.queue.run_once_for_tenant, tenant, "lead_generation")
+        return {"job_id": job.id, "tenant_id": tenant.tenant_id, "agent_name": payload.agent_name, "existing": False, "status": job.status}
 
     @app.get("/outreach/preflight")
     async def outreach_preflight(

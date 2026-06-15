@@ -370,6 +370,81 @@ async def test_free_plan_allows_lead_generation_job_and_blocks_outreach_jobs() -
 
 
 @pytest.mark.anyio
+async def test_lead_generation_enqueue_returns_existing_active_job_for_same_tenant() -> None:
+    db = build_memory_session()
+    auth = await AuthService(db).signup(
+        tenant_id="tenant-existing-lead-job",
+        tenant_name="Tenant Existing Lead Job",
+        tenant_slug="tenant-existing-lead-job",
+        email="owner@existing-lead-job.test",
+        password="secret123",
+        full_name="Owner",
+        plan="Agency",
+    )
+    tenant = TenantContext(tenant_id=auth.tenant_id)
+    existing = db.for_tenant(tenant).save("jobs", Job(tenant_id=auth.tenant_id, name="lead_generation", status="running"))
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/jobs",
+            headers=_auth_headers(auth.token),
+            json={"agent_name": "lead_generation", "payload": {"query": "new query"}},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["job_id"] == existing.id
+    assert response.json()["existing"] is True
+    jobs = db.for_tenant(tenant).list("jobs")
+    assert len([job for job in jobs if job.name == "lead_generation"]) == 1
+
+
+@pytest.mark.anyio
+async def test_lead_generation_active_job_guard_is_tenant_scoped_and_type_specific() -> None:
+    db = build_memory_session()
+    first = await AuthService(db).signup(
+        tenant_id="tenant-active-job-a",
+        tenant_name="Tenant Active Job A",
+        tenant_slug="tenant-active-job-a",
+        email="owner@active-job-a.test",
+        password="secret123",
+        full_name="Owner A",
+        plan="Agency",
+    )
+    second = await AuthService(db).signup(
+        tenant_id="tenant-active-job-b",
+        tenant_name="Tenant Active Job B",
+        tenant_slug="tenant-active-job-b",
+        email="owner@active-job-b.test",
+        password="secret123",
+        full_name="Owner B",
+        plan="Agency",
+    )
+    first_tenant = TenantContext(tenant_id=first.tenant_id)
+    db.for_tenant(first_tenant).save("jobs", Job(tenant_id=first.tenant_id, name="lead_generation", status="running"))
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        second_response = await client.post(
+            "/jobs",
+            headers=_auth_headers(second.token),
+            json={"agent_name": "lead_generation", "payload": {"query": "tenant b query"}},
+        )
+        other_type = await client.post(
+            "/jobs",
+            headers=_auth_headers(first.token),
+            json={"agent_name": "reply_monitor", "payload": {"mode": "once"}},
+        )
+
+    assert second_response.status_code == 200
+    assert second_response.json()["tenant_id"] == second.tenant_id
+    assert second_response.json()["existing"] is False
+    assert other_type.status_code == 200
+    assert other_type.json()["agent_name"] == "reply_monitor"
+    assert other_type.json()["existing"] is False
+
+
+@pytest.mark.anyio
 async def test_readyz_is_accessible_without_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_verify_async_database():
         return {"ok": True, "backend": "postgres"}

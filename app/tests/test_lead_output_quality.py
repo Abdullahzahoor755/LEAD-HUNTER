@@ -752,6 +752,60 @@ async def test_lead_generation_uses_claude_reason_and_keeps_score_breakdown_in_m
 
 
 @pytest.mark.anyio
+async def test_lead_generation_defaults_new_outreach_status_to_pending_and_does_not_send(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-generation-pending-status")
+
+    monkeypatch.setattr(legacy_leads, "load_environment", lambda: None)
+    monkeypatch.setattr(
+        legacy_leads,
+        "process_query",
+        lambda query, seen_websites, limit, ai_mode="", niche="", location="": [
+            {
+                "qualified": True,
+                "decision": "accepted",
+                "company_name": "Failed Raw Co",
+                "website": "https://failed-raw.test",
+                "email": "hello@failed-raw.test",
+                "phone": "",
+                "address": "",
+                "industry": "Technology",
+                "lead_score": 70,
+                "analysis_reason": "The company appears relevant for outreach.",
+                "email_status": "failed",
+            },
+            {
+                "qualified": True,
+                "decision": "accepted",
+                "company_name": "No Email Raw Co",
+                "website": "https://no-email-raw.test",
+                "email": "",
+                "phone": "+923001234567",
+                "address": "",
+                "industry": "Technology",
+                "lead_score": 45,
+                "analysis_reason": "The company can be contacted manually.",
+                "email_status": "no_email",
+            },
+        ],
+    )
+
+    result = await LeadGenerationAgent().run(
+        AgentRequest(tenant=tenant, payload={"query": "technology companies", "limit": 2}),
+        db,
+    )
+
+    saved = db.for_tenant(tenant).list("leads")
+    emails = db.for_tenant(tenant).list("emails")
+    assert result["status"] == "SUCCESS"
+    assert len(saved) == 2
+    assert emails == []
+    assert {lead.outreach_status for lead in saved} == {"pending"}
+    assert {lead.status for lead in saved} == {"pending"}
+    assert {lead.metadata.get("raw_email_status") for lead in saved} == {"failed", "no_email"}
+
+
+@pytest.mark.anyio
 async def test_free_plan_lead_generation_uses_fallback_without_anthropic_key(monkeypatch: pytest.MonkeyPatch) -> None:
     db = build_memory_session()
     tenant = TenantContext(tenant_id="tenant-free-fallback")

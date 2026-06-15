@@ -115,6 +115,26 @@ def test_dashboard_run_once_sends_job_type(monkeypatch) -> None:
     assert run_calls[1][2]["json"] == {"job_type": "outreach"}
 
 
+def test_start_lead_generation_enqueues_without_run_once(monkeypatch) -> None:
+    import dashboard
+
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(dashboard, "st", fake_st)
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def fake_api_request(method: str, path: str, **kwargs: Any) -> _FakeResponse:
+        calls.append((method, path, kwargs))
+        return _FakeResponse(payload={"job_id": "job-123", "tenant_id": "tenant-ui", "agent_name": "lead_generation"})
+
+    monkeypatch.setattr(dashboard, "api_request", fake_api_request)
+
+    dashboard.start_lead_generation_job({"query": "software companies", "limit": 10})
+
+    assert fake_st.session_state["active_lead_generation_job_id"] == "job-123"
+    assert [call[1] for call in calls] == ["/jobs"]
+    assert calls[0][2]["json"]["agent_name"] == "lead_generation"
+
+
 def test_auth_forms_do_not_prefill_admin_credentials(monkeypatch) -> None:
     import dashboard
 
