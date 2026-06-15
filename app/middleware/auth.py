@@ -16,6 +16,11 @@ from app.core.tenant import reset_current_tenant, set_current_tenant
 class AuthTenantMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         public_paths = {
+            "/",
+            "/privacy",
+            "/terms",
+            "/contact",
+            "/gmail-access",
             "/healthz",
             "/readyz",
             "/signup",

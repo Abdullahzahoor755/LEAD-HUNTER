@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from app.configs.settings import settings
+from app.api.public_pages import router as public_pages_router
 from app.middleware.auth import AuthTenantMiddleware
 from app.middleware.security import InMemoryRateLimitMiddleware, SecurityHeadersMiddleware
 from app.core.auth import create_jwt_token, decode_jwt_token, get_plan_limits, is_plan_gated_agent, validate_production_jwt_secret
@@ -532,6 +533,7 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
     app.add_middleware(AuthTenantMiddleware)
     app.add_middleware(InMemoryRateLimitMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
+    app.include_router(public_pages_router)
 
     @app.get("/healthz")
     async def healthz() -> Dict[str, str]:

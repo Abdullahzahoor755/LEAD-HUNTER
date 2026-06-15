@@ -4102,8 +4102,17 @@ def render_sidebar_navigation() -> Dict[str, str]:
 
 
 def render_app_footer() -> None:
+    public_base_url = html.escape(API_BASE_URL, quote=True)
     st.markdown(
-        '<div class="app-footer">Designed &amp; Built with ❤ by Abdullah Zahoor | © 2026 All Rights Reserved</div>',
+        f"""
+        <div class="app-footer">
+            Lead Hunter AI &copy; 2026 |
+            <a href="{public_base_url}/privacy" target="_blank" rel="noopener">Privacy Policy</a> |
+            <a href="{public_base_url}/terms" target="_blank" rel="noopener">Terms of Service</a> |
+            <a href="{public_base_url}/contact" target="_blank" rel="noopener">Contact</a> |
+            <a href="{public_base_url}/gmail-access" target="_blank" rel="noopener">Gmail Access</a>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
