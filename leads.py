@@ -574,7 +574,7 @@ def search_google(query: str, num: int = 10) -> List[Dict[str, str]]:
         return []
 
     results = []
-    for item in data.get("organic", [])[:10]:
+    for item in data.get("organic", [])[:40]:
         results.append(
             {"title": item.get("title", ""), "link": item.get("link", ""), "snippet": item.get("snippet", "")}
         )
@@ -1755,7 +1755,7 @@ def score_lead(
 
     return {
         "lead_score": total_score,
-        "reason": " | ".join(score_reasons),
+        "score_breakdown": " | ".join(score_reasons),
         "email_status": "Pending" if email_score else "no_email",
     }
 
