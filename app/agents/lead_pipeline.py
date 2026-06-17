@@ -278,12 +278,17 @@ class ScoringAgent(JsonAgent):
             "email_status": scored["email_status"] if scored["email_status"] == "no_email" else lead_status,
             "scraping_method": str(input_json.get("scraping_method", "")).strip(),
             "scrape_status": str(input_json.get("scrape_status", "")).strip() or lead_status,
+            "lead_status": lead_status,
             "ai_mode": ai_mode,
         }
         lead["qualified"] = legacy.is_qualified_lead(lead)
         lead["decision"] = "accepted" if lead["qualified"] else "stored_partial"
         if not lead["qualified"]:
-            lead["skip_reason"] = f"stored with low fit score ({lead['lead_score']})"
+            scrape_status = lead.get("scrape_status", "")
+            if scrape_status and scrape_status != "Pending":
+                lead["skip_reason"] = f"scrape_failed: {scrape_status}"
+            else:
+                lead["skip_reason"] = f"stored with low fit score ({lead['lead_score']})"
 
         return {"lead": lead, "analysis": analysis, "quality_filter": quality_filter}
 

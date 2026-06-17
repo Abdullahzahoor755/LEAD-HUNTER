@@ -2543,7 +2543,13 @@ def process_query(
             if not bool(lead.get("qualified", False)) or str(lead.get("decision", "")).strip().lower() == "reject":
                 skipped_count += 1
                 stats["rejected_leads_count"] += 1
-                reason = str(lead.get("skip_reason") or lead.get("quality_reason") or lead.get("email_status") or "rejected").strip()
+                reason = str(
+                    lead.get("skip_reason")
+                    or lead.get("quality_reason")
+                    or lead.get("scrape_status")
+                    or lead.get("email_status")
+                    or "rejected"
+                ).strip()
                 stats["rejection_reasons"][reason] = int(stats["rejection_reasons"].get(reason, 0)) + 1
                 LOGGER.info(
                     "Skipping rejected lead for %s (qualified=%s, decision=%s, reason=%s)",
