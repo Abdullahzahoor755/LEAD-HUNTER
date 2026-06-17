@@ -1561,6 +1561,76 @@ def extract_intent_signals(website_text: str) -> Dict[str, Any]:
     }
 
 
+def build_human_readable_save_reason(
+    *,
+    domain_type: str,
+    real_business_signal_count: int,
+    intent_signal_count: int,
+    email: str,
+    phone: str,
+    company_name: str,
+    website_text: str,
+) -> str:
+    email_present = bool(str(email or "").strip())
+    email_verified = email_present and is_valid_email(email)
+    phone_present = bool(str(phone or "").strip())
+
+    if intent_signal_count >= 6 and email_verified:
+        return "High-intent company with verified contact - strong outreach candidate."
+    if intent_signal_count >= 3 and email_present:
+        return "Moderate buying intent detected with available contact - worth reaching out."
+    if not email_present and phone_present:
+        return "No email found but phone number available - consider WhatsApp outreach."
+    if intent_signal_count < 3:
+        return "Low intent signals - saved for reference only."
+    return "Moderate buying intent detected - worth reviewing before outreach."
+
+
+def blocklisted_lead_reason(lead: Dict[str, Any], query: str) -> str:
+    website = str(lead.get("website", "") or lead.get("Website", "") or "").strip()
+    company_name = str(lead.get("company_name", "") or lead.get("Company", "") or "").strip()
+    industry = str(lead.get("industry", "") or lead.get("Industry", "") or "").strip().lower()
+    parsed_host = urlparse(website if "://" in website else f"https://{website}").netloc.lower()
+    root_domain = root_domain_from_url(website)
+    domain_parts = [part for part in parsed_host.replace("www.", "").split(".") if part]
+    root_parts = [part for part in root_domain.split(".") if part]
+    blocked_suffixes = {"gov", "edu", "mil", "int"}
+    if any(part in blocked_suffixes for part in [*domain_parts, *root_parts]):
+        return "blocked_domain_extension"
+
+    combined = f"{company_name} {website}".lower()
+    blocked_keywords = (
+        "embassy",
+        "consulate",
+        "ambassador",
+        "professor",
+        "prof.",
+        "dr.",
+        "personal",
+        "university",
+        "college",
+        "school",
+        "institute",
+        "magazine",
+        "journal",
+        "newsletter",
+        "blog",
+        "wikipedia",
+        "facebook",
+        "linkedin",
+        "twitter",
+        "instagram",
+    )
+    if any(keyword in combined for keyword in blocked_keywords):
+        return "blocked_entity_keyword"
+
+    query_has_it_intent = bool(re.search(r"\b(it|software|automation|ai)\b", str(query or "").lower()))
+    industry_mismatch = industry in {"retail", "fashion", "food"}
+    if query_has_it_intent and industry_mismatch:
+        return "blocked_industry_mismatch"
+    return ""
+
+
 def apply_lead_quality_filter(website: str, website_text: str, company_name: str, contact_info: Dict[str, str]) -> Dict[str, Any]:
     lowered_text = website_text.lower()
     reasons: List[str] = []
@@ -1629,7 +1699,15 @@ def apply_lead_quality_filter(website: str, website_text: str, company_name: str
 
     return {
         "score": final_score,
-        "reason": " | ".join(reasons),
+        "reason": build_human_readable_save_reason(
+            domain_type=domain_type,
+            real_business_signal_count=len(real_business_hits),
+            intent_signal_count=signal_count,
+            email=str(contact_info.get("email", "") or "").strip(),
+            phone=str(contact_info.get("phone", "") or "").strip(),
+            company_name=company_name,
+            website_text=website_text,
+        ),
         "category": category,
         "is_directory": is_directory,
         "domain_type": domain_type,
@@ -2405,6 +2483,7 @@ def process_query(
     location: str = "",
 ) -> List[Dict[str, Any]]:
     global LAST_PIPELINE_EVENTS, LAST_PIPELINE_STATS
+    import logging as _lg; _lg.getLogger("TRACE").info("TRACE process_query called query=%s limit=%s niche=%s location=%s ai_mode=%s", query, limit, niche, location, ai_mode)
     leads = []
     skipped_count = 0
     events: List[Dict[str, Any]] = []
@@ -2434,6 +2513,7 @@ def process_query(
     seen_websites.update(discovered.get("seen_websites", []))
     candidate_websites = list(discovered.get("websites", []))
     stats["discovered_urls_count"] = len(candidate_websites)
+    _lg.getLogger("TRACE").info("TRACE DiscoveryAgent returned candidate_websites=%s raw_results=%s filtered=%s rejected_bad=%s rejected_irrelevant=%s", len(candidate_websites), discovered.get("raw_results_count"), discovered.get("filtered_results_count"), discovered.get("rejected_bad_domain_count"), discovered.get("rejected_irrelevant_count"))
     for key in (
         "final_query",
         "query_variants_count",
@@ -2497,6 +2577,10 @@ def process_query(
                     lead.get("skip_reason", lead.get("quality_reason", "")),
                 )
                 events.append({"stage": "scoring", "status": "rejected", "domain": root_domain_from_url(website), "url": website, "reason": reason, "message": "lead_rejected"})
+                continue
+            block_reason = blocklisted_lead_reason(lead, query)
+            if block_reason:
+                LOGGER.debug("Skipping blocklisted lead for %s: %s", website, block_reason)
                 continue
             leads.append(lead)
             stats["accepted_leads_count"] += 1
