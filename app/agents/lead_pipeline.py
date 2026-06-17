@@ -241,12 +241,11 @@ class ScoringAgent(JsonAgent):
         )
         intent_analysis = analysis.get("intent_analysis", {}) if isinstance(analysis.get("intent_analysis", {}), dict) else {}
 
-        reason = scored["reason"]
-        score_breakdown = reason
+        reason = quality_filter["reason"]
+        score_breakdown = scored["score_breakdown"]
         fallback_reason = str(input_json.get("fallback_reason", "")).strip()
         if fallback_reason:
-            reason = f"{reason} | fallback_reason={fallback_reason}"
-        reason = f"{reason} | quality_filter={quality_filter['reason']}"
+            score_breakdown = f"{score_breakdown} | fallback_reason={fallback_reason}"
 
         lead = {
             "website": website,
