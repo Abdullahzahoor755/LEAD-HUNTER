@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -56,9 +57,9 @@ DEFAULT_SHEET_RANGE = "Sheet1!A1"
 LOCAL_TIMEZONE = timezone.utc
 UTC = timezone.utc
 REQUEST_CONNECT_TIMEOUT = 5
-REQUEST_READ_TIMEOUT = 5
+REQUEST_READ_TIMEOUT = 20
 SEARCH_TIMEOUT = 8
-MAX_RETRIES_PER_REQUEST = 2
+MAX_RETRIES_PER_REQUEST = 3
 MAX_PAGES_PER_DOMAIN = 8
 MAX_WORKERS = 4
 MAX_HTML_BYTES = 250_000
@@ -239,6 +240,18 @@ HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/118.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+]
+SCRAPE_REFERERS = [
+    "https://www.google.com/",
+    "https://www.google.com.pk/",
+    "https://www.bing.com/",
+]
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_FILE = BASE_DIR / ".env"
@@ -720,16 +733,20 @@ def should_skip_url(url: str) -> bool:
 
 def build_scrape_headers() -> Dict[str, str]:
     return {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/125.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9,ar;q=0.7",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
+        "Sec-Ch-Ua": '"Chromium";v="120", "Google Chrome";v="120"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Referer": "https://www.google.com/",
     }
 
 
@@ -841,9 +858,12 @@ def fetch_page(url: str, context: Optional[CrawlContext] = None) -> Dict[str, An
         context.visited_urls.add(normalized_url)
         context.page_count_by_domain[domain_key] = context.page_count_by_domain.get(domain_key, 0) + 1
 
-    headers = build_scrape_headers()
     timeout = httpx.Timeout(connect=REQUEST_CONNECT_TIMEOUT, read=REQUEST_READ_TIMEOUT, write=REQUEST_READ_TIMEOUT, pool=REQUEST_READ_TIMEOUT)
     for attempt in range(MAX_RETRIES_PER_REQUEST + 1):
+        headers = build_scrape_headers()
+        if attempt:
+            headers["Referer"] = random.choice(SCRAPE_REFERERS)
+            time.sleep(random.uniform(1.5, 3.5))
         started_at = time.perf_counter()
         http2_failed = False
         try:
@@ -856,6 +876,7 @@ def fetch_page(url: str, context: Optional[CrawlContext] = None) -> Dict[str, An
                     timeout=timeout,
                     follow_redirects=True,
                     http2=True,
+                    verify=False,
                 ) as client:
                     response = client.get(normalized_url)
             except Exception as client_err:
@@ -868,65 +889,16 @@ def fetch_page(url: str, context: Optional[CrawlContext] = None) -> Dict[str, An
                         timeout=timeout,
                         follow_redirects=True,
                         http2=False,
+                        verify=False,
                     ) as client:
                         response = client.get(normalized_url)
                 except Exception as fallback_err:
                     LOGGER.warning("HTTPX HTTP1 failed for %s: %s", normalized_url, fallback_err)
-                    method_used = "requests"
-                    try:
-                        req_timeout = (REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT)
-                        req_resp = requests.get(
-                            normalized_url,
-                            headers=headers,
-                            timeout=req_timeout,
-                            allow_redirects=True,
-                        )
-                    except requests.RequestException as request_err:
-                        LOGGER.exception("Requests fallback failed for %s", normalized_url)
-                        if context is not None:
-                            code = getattr(getattr(request_err, "response", None), "status_code", None)
-                            if code in (401, 403):
-                                failure = "FAILED_BLOCKED"
-                            elif isinstance(request_err, requests.Timeout):
-                                failure = "FAILED_TIMEOUT"
-                            else:
-                                failure = "FAILED_REQUEST_ERROR"
-                            _set_scrape_failure(context, "request_failed", f"{failure}:{request_err}", method_used)
-                        return build_scrape_result(
-                            content=None,
-                            status="FAILED",
-                            failure_reason=(
-                                "FAILED_HTTP2"
-                                if http2_failed and not isinstance(request_err, requests.Timeout)
-                                and getattr(getattr(request_err, "response", None), "status_code", None) not in (401, 403)
-                                else "FAILED_BLOCKED"
-                                if isinstance(request_err, requests.RequestException)
-                                and getattr(getattr(request_err, "response", None), "status_code", None) in (401, 403)
-                                else "FAILED_TIMEOUT"
-                                if isinstance(request_err, requests.Timeout)
-                                else "FAILED_REQUEST_ERROR"
-                            ),
-                            method_used=method_used,
-                        )
-                    class PseudoHttpxResponse:
-                        def __init__(self, r):
-                            self.text = r.text
-                            self.content = r.content
-                            self.status_code = r.status_code
-                            self.headers = r.headers
-                            self.encoding = r.encoding or "utf-8"
-
-                        def close(self):
-                            pass
-
-                        def raise_for_status(self):
-                            if self.status_code >= 400:
-                                raise httpx.HTTPStatusError(f"Status {self.status_code}", request=None, response=self)
-
-                    response = PseudoHttpxResponse(req_resp)
+                    raise fallback_err
 
             elapsed = time.perf_counter() - started_at
             LOGGER.info("Response time %.2fs for %s using %s", elapsed, normalized_url, method_used)
+            LOGGER.info("HTTP status %s for %s using %s", response.status_code, normalized_url, method_used)
             if elapsed > REQUEST_READ_TIMEOUT and context is not None:
                 context.last_status = "slow_site"
                 context.last_method = method_used
@@ -976,6 +948,7 @@ def fetch_page(url: str, context: Optional[CrawlContext] = None) -> Dict[str, An
             )
         except httpx.HTTPError as error:
             elapsed = time.perf_counter() - started_at
+            LOGGER.error("Scrape failed for %s: %s: %s", normalized_url, type(error).__name__, str(error))
             LOGGER.warning("Fetch failed for %s after %.2fs via %s: %s", normalized_url, elapsed, method_used, error)
             status_code = getattr(getattr(error, "response", None), "status_code", None)
             if status_code in (401, 403):
@@ -1000,13 +973,16 @@ def fetch_page(url: str, context: Optional[CrawlContext] = None) -> Dict[str, An
                     ),
                     method_used=method_used,
                 )
-            time.sleep(1 + attempt)
-    _set_scrape_failure(context, "request_failed", "FAILED_UNKNOWN:exhausted retries", "requests")
+            if status_code == 403:
+                time.sleep(5 * (attempt + 1))
+            else:
+                time.sleep(2**attempt)
+    _set_scrape_failure(context, "request_failed", "FAILED_UNKNOWN:exhausted retries", "httpx")
     return build_scrape_result(
         content=None,
         status="FAILED",
         failure_reason="FAILED_UNKNOWN",
-        method_used="requests",
+        method_used="httpx",
     )
 
 
@@ -1020,16 +996,16 @@ def scrape_website(url: str, context: Optional[CrawlContext] = None) -> Tuple[st
         result.get("failure_reason", ""),
     )
     if result.get("status") != "SUCCESS":
-        return "", str(result.get("method_used", "requests")), str(result.get("failure_reason", "FAILED_UNKNOWN"))
+        return "", str(result.get("method_used", "httpx")), str(result.get("failure_reason", "FAILED_UNKNOWN"))
     html = str(result.get("content", "") or "")[:MAX_HTML_BYTES]
     if any(keyword in html.lower() for keyword in LOW_QUALITY_PAGE_KEYWORDS):
         LOGGER.info("Skipping low-quality or blocked page content: %s", url)
-        _set_scrape_failure(context, "js_site", "FAILED_EMPTY_CONTENT:blocked or placeholder content", "requests")
-        return "", "requests", "FAILED_EMPTY_CONTENT:blocked or placeholder content"
+        _set_scrape_failure(context, "js_site", "FAILED_EMPTY_CONTENT:blocked or placeholder content", "httpx")
+        return "", "httpx", "FAILED_EMPTY_CONTENT:blocked or placeholder content"
 
     primary_text = clean_visible_text(html)[:3000]
     if primary_text:
-        return primary_text, "requests_bs4", ""
+        return primary_text, "httpx_bs4", ""
 
     readable_text = extract_readable_text(html)
     if readable_text:
