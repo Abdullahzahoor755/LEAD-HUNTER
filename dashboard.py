@@ -1960,6 +1960,7 @@ def render_active_lead_generation_job() -> bool:
         render_lead_generation_result({"data": dict(status.get("result", {}) or {}), "message": str(status.get("message", "") or "")})
         st.session_state["active_lead_generation_job_id"] = ""
         st.session_state["lead_generation_busy"] = False
+        st.rerun()
     elif normalized_status == "failed":
         st.error(str(status.get("message") or status.get("error") or "Lead generation failed safely."))
         st.session_state["active_lead_generation_job_id"] = ""

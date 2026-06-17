@@ -124,6 +124,7 @@ class LeadGenerationAgent(BaseAgent):
                     continue
                 lead = Lead(
                     tenant_id=tenant_id,
+                    job_id=job_id,
                     company=str(item.get("company_name", "")),
                     company_url=str(item.get("website", "")),
                     country=str(item.get("country", "") or target_country),

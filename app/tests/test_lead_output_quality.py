@@ -806,6 +806,43 @@ async def test_lead_generation_defaults_new_outreach_status_to_pending_and_does_
 
 
 @pytest.mark.anyio
+async def test_lead_generation_links_saved_leads_to_background_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-generation-job-link")
+
+    monkeypatch.setattr(legacy_leads, "load_environment", lambda: None)
+    monkeypatch.setattr(
+        legacy_leads,
+        "process_query",
+        lambda query, seen_websites, limit, ai_mode="", niche="", location="": [
+            {
+                "qualified": True,
+                "decision": "accepted",
+                "company_name": "Linked Job Co",
+                "website": "https://linked-job.test",
+                "email": "hello@linked-job.test",
+                "phone": "",
+                "address": "",
+                "industry": "Technology",
+                "lead_score": 72,
+                "analysis_reason": "The company appears relevant for outreach.",
+                "email_status": "pending",
+            }
+        ],
+    )
+
+    result = await LeadGenerationAgent().run(
+        AgentRequest(tenant=tenant, payload={"query": "technology companies", "limit": 1, "_job_id": "job-linked-123"}),
+        db,
+    )
+
+    saved = db.for_tenant(tenant).list("leads")
+    assert result["status"] == "SUCCESS"
+    assert len(saved) == 1
+    assert saved[0].job_id == "job-linked-123"
+
+
+@pytest.mark.anyio
 async def test_free_plan_lead_generation_uses_fallback_without_anthropic_key(monkeypatch: pytest.MonkeyPatch) -> None:
     db = build_memory_session()
     tenant = TenantContext(tenant_id="tenant-free-fallback")

@@ -42,6 +42,7 @@ class _FakeStreamlit:
     def __init__(self) -> None:
         self.session_state: dict[str, Any] = {}
         self.text_input_calls: list[tuple[str, dict[str, Any]]] = []
+        self.rerun_count = 0
         self.sidebar = _FakeSidebar(self)
 
     def markdown(self, *args: Any, **kwargs: Any) -> None:
@@ -67,10 +68,25 @@ class _FakeStreamlit:
         return None
 
     def rerun(self) -> None:
-        return None
+        self.rerun_count += 1
 
     def button(self, *args: Any, **kwargs: Any) -> bool:
         return False
+
+    def caption(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def progress(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def success(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def info(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def dataframe(self, *args: Any, **kwargs: Any) -> None:
+        return None
 
 
 class _FakeSidebar:
@@ -136,6 +152,38 @@ def test_start_lead_generation_enqueues_without_run_once(monkeypatch) -> None:
     assert fake_st.session_state["active_lead_generation_job_id"] == "job-123"
     assert [call[1] for call in calls] == ["/jobs"]
     assert calls[0][2]["json"]["agent_name"] == "lead_generation"
+
+
+def test_completed_lead_generation_job_triggers_dashboard_refresh(monkeypatch) -> None:
+    import dashboard
+
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["active_lead_generation_job_id"] = "job-completed"
+    fake_st.session_state["lead_generation_busy"] = True
+    monkeypatch.setattr(dashboard, "st", fake_st)
+
+    def fake_api_request(method: str, path: str, **kwargs: Any) -> _FakeResponse:
+        if path == "/jobs/job-completed/status":
+            return _FakeResponse(
+                payload={
+                    "job_id": "job-completed",
+                    "status": "completed",
+                    "progress_percentage": 100,
+                    "result": {"saved_leads": 1},
+                }
+            )
+        if path == "/jobs/job-completed/events":
+            return _FakeResponse(payload={"events": []})
+        raise AssertionError(f"unexpected request {method} {path}")
+
+    monkeypatch.setattr(dashboard, "api_request", fake_api_request)
+
+    active = dashboard.render_active_lead_generation_job()
+
+    assert active is False
+    assert fake_st.session_state["active_lead_generation_job_id"] == ""
+    assert fake_st.session_state["lead_generation_busy"] is False
+    assert fake_st.rerun_count == 1
 
 
 @pytest.mark.anyio
