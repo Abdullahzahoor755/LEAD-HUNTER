@@ -180,6 +180,11 @@ class LeadService:
         normalized.metadata["phone"] = normalized_phone
         normalized.metadata["whatsapp_ready"] = self.whatsapp_ready(normalized_phone)
         normalized.metadata.setdefault("whatsapp_status", "not_contacted")
+        normalized.metadata["readiness"] = self.lead_readiness(
+            verified_email=normalized.verified_email,
+            phone=normalized.phone,
+            company_url=normalized.company_url or normalized.website,
+        )
         normalized.metadata["lead_readiness_score"] = self.lead_readiness_score(
             verified_email=normalized.verified_email,
             likely_email=email_result["likely_email"],
@@ -627,6 +632,16 @@ class LeadService:
         if str(phone or "").strip():
             return 40
         return 0
+
+    @classmethod
+    def lead_readiness(cls, verified_email: str, phone: str, company_url: str = "") -> str:
+        if str(verified_email or "").strip():
+            return "email_ready"
+        if cls.whatsapp_ready(phone):
+            return "phone_ready"
+        if str(company_url or "").strip():
+            return "research_needed"
+        return ""
 
     async def dashboard_snapshot(self, tenant: TenantContext) -> dict[str, int | str]:
         scoped = self.db.for_tenant(tenant)

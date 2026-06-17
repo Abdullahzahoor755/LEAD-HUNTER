@@ -240,6 +240,14 @@ def _serialize_lead(lead: Lead, include_agency_kit: bool = False) -> Dict[str, A
     contact = metadata.get("contact", {}) if isinstance(metadata.get("contact", {}), dict) else {}
     phone = LeadService.normalize_phone(str(lead.phone or metadata.get("phone", "") or metadata.get("Phone", "") or contact.get("phone", "") or ""))
     likely_email = LeadService.likely_email_from_metadata(metadata)
+    readiness = str(metadata.get("readiness", "") or "").strip().lower()
+    if not readiness:
+        readiness = LeadService.lead_readiness(lead.verified_email, phone, lead.company_url or lead.website)
+    readiness_label = {
+        "email_ready": "Email Ready",
+        "phone_ready": "Phone Ready",
+        "research_needed": "Research Needed",
+    }.get(readiness, "")
     lead_readiness_score = metadata.get("lead_readiness_score")
     if lead_readiness_score is None:
         lead_readiness_score = LeadService.lead_readiness_score(lead.verified_email, likely_email, phone)
@@ -254,6 +262,8 @@ def _serialize_lead(lead: Lead, include_agency_kit: bool = False) -> Dict[str, A
         "phone": phone,
         "likely_email": likely_email,
         "email_confidence": email_confidence,
+        "readiness": readiness,
+        "readiness_label": readiness_label,
         "lead_readiness_score": int(lead_readiness_score or 0),
         "service_reason": str(lead.service_reason or "").strip(),
         "industry": str(lead.industry or "").strip(),
@@ -683,6 +693,7 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
                     "verified_email": str(lead.verified_email or lead.email or "").strip().lower(),
                     "status": str(lead.status or "").strip().lower(),
                     "outreach_status": str(lead.outreach_status or "").strip().lower(),
+                    "readiness": str((lead.metadata or {}).get("readiness", "") or LeadService.lead_readiness(lead.verified_email, lead.phone, lead.company_url or lead.website)).strip(),
                     "score": int(lead.score or lead.lead_score or 0),
                     "reason": str(lead.service_reason or lead.reason or "").strip(),
                 }

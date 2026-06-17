@@ -525,6 +525,7 @@ async def test_lead_quality_export_returns_standard_report_fields() -> None:
         "verified_email": "lead@quality.test",
         "status": "pending",
         "outreach_status": "pending",
+        "readiness": "email_ready",
         "score": 88,
         "reason": "Strong lead fit with verified email.",
     }

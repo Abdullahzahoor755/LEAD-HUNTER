@@ -275,12 +275,15 @@ class ScoringAgent(JsonAgent):
             "quality_score": quality_filter["score"],
             "quality_reason": quality_filter["reason"],
             "quality_category": quality_filter["category"],
+            "is_directory": bool(quality_filter.get("is_directory", False)),
+            "domain_type": str(quality_filter.get("domain_type", "")).strip(),
             "email_status": scored["email_status"] if scored["email_status"] == "no_email" else lead_status,
             "scraping_method": str(input_json.get("scraping_method", "")).strip(),
             "scrape_status": str(input_json.get("scrape_status", "")).strip() or lead_status,
             "lead_status": lead_status,
             "ai_mode": ai_mode,
         }
+        lead["readiness"] = legacy.beta_lead_readiness(lead)
         lead["qualified"] = legacy.is_qualified_lead(lead)
         lead["decision"] = "accepted" if lead["qualified"] else "stored_partial"
         if not lead["qualified"]:

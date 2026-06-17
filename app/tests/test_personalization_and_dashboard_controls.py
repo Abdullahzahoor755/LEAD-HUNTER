@@ -177,6 +177,8 @@ def test_dashboard_save_reason_falls_back_to_service_reason(monkeypatch: pytest.
                         "service_reason": "Reason Co has verified contact details and clear service fit.",
                         "lead_reason": "",
                         "save_reason": "",
+                        "readiness": "research_needed",
+                        "readiness_label": "Research Needed",
                     }
                 ]
             }
@@ -188,6 +190,8 @@ def test_dashboard_save_reason_falls_back_to_service_reason(monkeypatch: pytest.
     assert frame.loc[0, "service_reason"] == "Reason Co has verified contact details and clear service fit."
     assert frame.loc[0, "lead_reason"] == "Reason Co has verified contact details and clear service fit."
     assert frame.loc[0, "save_reason"] == "Reason Co has verified contact details and clear service fit."
+    assert frame.loc[0, "readiness"] == "Research Needed"
+    assert "readiness" in dashboard.STANDARD_LEAD_EXPORT_COLUMNS
 
 
 def test_leads_and_whatsapp_views_use_lead_reason_not_save_reason() -> None:
@@ -204,6 +208,20 @@ def test_leads_and_whatsapp_views_use_lead_reason_not_save_reason() -> None:
     assert 'row.get("lead_reason", "") or row.get("service_reason", "")' in whatsapp_source
     assert "save_reason" not in leads_source
     assert "save_reason" not in whatsapp_source
+
+
+def test_email_crm_filters_to_verified_email_and_whatsapp_filters_to_valid_phone() -> None:
+    source = dashboard.Path(dashboard.__file__).read_text(encoding="utf-8")
+    email_start = source.index('if normalized_page in {"Email CRM", "Email"}')
+    email_end = source.index('if normalized_page == "Outreach"')
+    email_source = source[email_start:email_end]
+    whatsapp_start = source.index("def render_whatsapp_crm_page")
+    whatsapp_end = source.index("def render_lead_action_buttons")
+    whatsapp_source = source[whatsapp_start:whatsapp_end]
+
+    assert 'frame.get("verified_email"' in email_source
+    assert ".str.strip().ne(\"\")" in email_source
+    assert 'frame = frame[frame["phone_valid"]].copy()' in whatsapp_source
 
 
 def test_lead_sort_quality_email_ready_and_company() -> None:

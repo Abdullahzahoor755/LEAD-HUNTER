@@ -99,14 +99,23 @@ EXCLUDED_DOMAINS = (
     "yelp.com",
     "yellowpages.com",
     "crunchbase.com",
+    "clutch.co",
+    "designrush.com",
     "glassdoor.com",
+    "glassdoor.",
     "indeed.com",
+    "lusha.com",
     "rozee.pk",
+    "quora.com",
     "reddit.com",
     "scribd.com",
+    "techbehemoths.com",
+    "elioplus.com",
     "f6s.com",
     "bayt.com",
     "naukrigulf.com",
+    "vocal.media",
+    "zoominfo.com",
     "forbesmiddleeast.com",
     "companiesmarketcap.com",
     "businessmagnet.co.uk",
@@ -2420,18 +2429,33 @@ def dedupe_leads(leads: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return unique_leads
 
 
+def beta_lead_readiness(analysis: Dict[str, Any]) -> str:
+    email = str(analysis.get("email", analysis.get("verified_email", "")) or "").strip().lower()
+    phone = str(analysis.get("phone", "") or "").strip()
+    website = str(analysis.get("website", analysis.get("company_url", "")) or "").strip()
+    company = str(analysis.get("company_name", analysis.get("company", "")) or "").strip()
+    if is_valid_email(email):
+        return "email_ready"
+    if phone:
+        return "phone_ready"
+    if company or is_valid_company_website(website):
+        return "research_needed"
+    return ""
+
+
 def is_qualified_lead(analysis: Dict[str, Any]) -> bool:
-    try:
-        score = int(analysis.get("lead_score", 0))
-    except (TypeError, ValueError):
+    website = str(analysis.get("website", analysis.get("company_url", "")) or "").strip()
+    company = str(analysis.get("company_name", analysis.get("company", "")) or "").strip()
+    if not company and not root_domain_from_url(website):
         return False
-        
-    if is_email_required_for_leads():
-        email = str(analysis.get("email", "")).strip()
-        if not is_valid_email(email):
-            return False
-            
-    return score >= MIN_QUALIFIED_LEAD_SCORE
+    if not is_valid_company_website(website):
+        return False
+
+    domain_type = str(analysis.get("domain_type", "") or "").strip().lower()
+    if bool(analysis.get("is_directory", False)) or domain_type in {"excluded", "listing", "non_business"}:
+        return False
+
+    return bool(beta_lead_readiness(analysis))
 
 
 def process_website(website: str, query: str = "", ai_mode: str = "") -> Dict[str, Any]:

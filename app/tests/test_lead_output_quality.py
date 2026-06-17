@@ -54,6 +54,93 @@ def test_lead_quality_grade_and_email_quality_helpers() -> None:
     assert grade == "A"
 
 
+def test_beta_acceptance_allows_low_score_verified_email_lead() -> None:
+    lead = {
+        "website": "https://low-score-email.test",
+        "company_name": "Low Score Email Co",
+        "email": "info@low-score-email.test",
+        "phone": "",
+        "lead_score": 10,
+        "domain_type": "business",
+    }
+
+    assert legacy_leads.is_qualified_lead(lead) is True
+    assert legacy_leads.beta_lead_readiness(lead) == "email_ready"
+
+
+def test_beta_acceptance_allows_phone_ready_lead_without_email() -> None:
+    lead = {
+        "website": "https://phone-ready.test",
+        "company_name": "Phone Ready Co",
+        "email": "",
+        "phone": "+966 55 123 4567",
+        "lead_score": 10,
+        "domain_type": "business",
+    }
+
+    assert legacy_leads.is_qualified_lead(lead) is True
+    assert legacy_leads.beta_lead_readiness(lead) == "phone_ready"
+
+
+def test_beta_acceptance_allows_research_needed_business_domain_without_contact() -> None:
+    lead = {
+        "website": "https://research-needed.test",
+        "company_name": "Research Needed Co",
+        "email": "",
+        "phone": "",
+        "lead_score": 5,
+        "domain_type": "business",
+    }
+
+    assert legacy_leads.is_qualified_lead(lead) is True
+    assert legacy_leads.beta_lead_readiness(lead) == "research_needed"
+
+
+def test_beta_acceptance_still_rejects_directory_invalid_and_aggregator_domains() -> None:
+    assert legacy_leads.is_qualified_lead(
+        {
+            "website": "https://example.test/directory/software-companies",
+            "company_name": "Example Directory",
+            "email": "info@example.test",
+            "phone": "",
+            "lead_score": 95,
+            "domain_type": "listing",
+            "is_directory": True,
+        }
+    ) is False
+    assert legacy_leads.is_qualified_lead(
+        {
+            "website": "not a url",
+            "company_name": "Invalid URL Co",
+            "email": "info@invalid.test",
+            "phone": "",
+            "lead_score": 95,
+        }
+    ) is False
+    assert legacy_leads.is_qualified_lead(
+        {
+            "website": "https://clutch.co/sa/developers",
+            "company_name": "Clutch",
+            "email": "info@clutch.co",
+            "phone": "",
+            "lead_score": 95,
+            "domain_type": "business",
+        }
+    ) is False
+
+
+def test_duplicate_domain_filter_still_rejects_repeated_domains() -> None:
+    _, stats = legacy_leads.extract_websites_with_stats(
+        [
+            {"title": "Alpha Software", "link": "https://alpha.test", "snippet": "Software company"},
+            {"title": "Alpha Software Contact", "link": "https://www.alpha.test/contact", "snippet": "Software company"},
+        ]
+    )
+
+    assert stats["filtered_results_count"] == 1
+    assert stats["duplicate_domain_count"] == 1
+
+
 def test_gmail_api_disabled_is_specific_safe_reason() -> None:
     reason = OutreachService(build_memory_session()).classify_send_failure(
         RuntimeError("HttpError 403 accessNotConfigured Gmail API has not been used in project before or it is disabled")
@@ -335,6 +422,8 @@ async def test_api_exports_only_standardized_lead_fields() -> None:
             "phone",
             "likely_email",
             "email_confidence",
+            "readiness",
+            "readiness_label",
             "lead_readiness_score",
             "service_reason",
             "industry",
@@ -354,6 +443,8 @@ async def test_api_exports_only_standardized_lead_fields() -> None:
         assert row["phone"] == ""
         assert row["likely_email"] == ""
         assert row["email_confidence"] == "verified_email"
+        assert row["readiness"] == "email_ready"
+        assert row["readiness_label"] == "Email Ready"
         assert row["lead_readiness_score"] == 100
         assert row["service_reason"] == "Strong business fit"
         assert row["save_reason"] == "Strong business fit"
@@ -374,6 +465,72 @@ async def test_country_snippet_is_saved_as_empty() -> None:
     saved = await LeadService(db).upsert_lead(tenant, lead)
 
     assert saved.country == ""
+
+
+@pytest.mark.anyio
+async def test_readiness_metadata_is_saved_for_email_phone_and_research_leads() -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-readiness-metadata")
+    service = LeadService(db)
+
+    email_ready = await service.upsert_lead(
+        tenant,
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company_url="https://email-ready.test",
+            verified_email="info@email-ready.test",
+        ),
+    )
+    phone_ready = await service.upsert_lead(
+        tenant,
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company_url="https://phone-ready.test",
+            phone="+966 55 123 4567",
+        ),
+    )
+    research_needed = await service.upsert_lead(
+        tenant,
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company_url="https://research-needed.test",
+        ),
+    )
+
+    assert email_ready.metadata["readiness"] == "email_ready"
+    assert phone_ready.metadata["readiness"] == "phone_ready"
+    assert research_needed.metadata["readiness"] == "research_needed"
+
+
+@pytest.mark.anyio
+async def test_email_crm_outreach_selection_excludes_research_needed_no_email_leads() -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-email-crm-readiness")
+    service = LeadService(db)
+    email_ready = await service.upsert_lead(
+        tenant,
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company="Email Ready",
+            company_url="https://email-ready.test",
+            verified_email="lead@email-ready.test",
+            outreach_status="pending",
+        ),
+    )
+    await service.upsert_lead(
+        tenant,
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company="Research Needed",
+            company_url="https://research-needed.test",
+            outreach_status="pending",
+            metadata={"readiness": "research_needed"},
+        ),
+    )
+
+    selected = await OutreachService(db).list_pending_outreach_leads(tenant, set())
+
+    assert [lead.id for lead in selected] == [email_ready.id]
 
 
 @pytest.mark.anyio

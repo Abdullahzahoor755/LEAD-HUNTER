@@ -1729,6 +1729,7 @@ STANDARD_LEAD_EXPORT_COLUMNS = [
     "email_confidence",
     "email_quality",
     "lead_quality_grade",
+    "readiness",
     "contact_readiness",
     "lead_readiness_score",
     "next_contact_action",
@@ -1766,6 +1767,7 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
                 "email_confidence": str(item.get("email_confidence", "") or "").strip().lower(),
                 "email_quality": str(item.get("email_quality", "") or "").strip().lower(),
                 "lead_quality_grade": str(item.get("lead_quality_grade", "") or "").strip(),
+                "readiness": str(item.get("readiness_label", "") or item.get("readiness", "") or "").strip(),
                 "lead_readiness_score": item.get("lead_readiness_score", 0),
                 "service_reason": str(item.get("service_reason", "") or "").strip(),
                 "lead_reason": str(item.get("lead_reason", "") or item.get("service_reason", "") or "").strip(),
@@ -1794,6 +1796,11 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
                 "marketing_campaign_kit": item.get("marketing_campaign_kit", {}) if isinstance(item.get("marketing_campaign_kit", {}), dict) else {},
             }
         )
+        rows[-1]["readiness"] = {
+            "email_ready": "Email Ready",
+            "phone_ready": "Phone Ready",
+            "research_needed": "Research Needed",
+        }.get(str(rows[-1]["readiness"]).strip().lower(), rows[-1]["readiness"])
         rows[-1]["contact_readiness"] = contact_readiness_label(rows[-1]["verified_email"], rows[-1]["phone"], rows[-1]["likely_email"])
         rows[-1]["next_contact_action"] = contact_next_action(rows[-1]["verified_email"], rows[-1]["phone"], rows[-1]["likely_email"])
     if not rows:
@@ -2556,6 +2563,7 @@ def render_whatsapp_crm_page(tenant: TenantContext) -> None:
     frame = frame.copy()
     frame["phone_badge"] = frame.get("phone", pd.Series("", index=frame.index)).astype(str).map(whatsapp_phone_badge)
     frame["phone_valid"] = frame["phone_badge"].str.startswith("✅")
+    frame = frame[frame["phone_valid"]].copy()
     total_phone = int(frame.get("phone", pd.Series("", index=frame.index)).astype(str).str.strip().ne("").sum())
     valid_count = int(frame["phone_valid"].sum())
     invalid_count = int(len(frame) - valid_count)
@@ -2714,6 +2722,7 @@ def render_live_leads_page(frame: pd.DataFrame) -> None:
         "company_url",
         "verified_email",
         "phone",
+        "readiness",
         "score",
         "outreach_status",
         "lead_reason",

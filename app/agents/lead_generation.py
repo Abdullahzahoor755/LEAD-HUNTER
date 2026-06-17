@@ -148,8 +148,9 @@ class LeadGenerationAgent(BaseAgent):
                     email=lead.verified_email or lead.email,
                     phone=lead.phone,
                 )
+                lead.metadata["readiness"] = str(item.get("readiness", "") or lead.metadata.get("readiness", "") or "").strip()
                 if not (lead.verified_email or lead.email):
-                    lead.metadata["outreach_readiness"] = "needs_manual_contact"
+                    lead.metadata["outreach_readiness"] = lead.metadata["readiness"] or "research_needed"
                 if not lead.service_reason:
                     LOGGER.info(
                         "Lead service_reason empty tenant=%s website=%s reason=missing_claude_reason_or_intent_summary",
@@ -173,7 +174,7 @@ class LeadGenerationAgent(BaseAgent):
                         "message": "lead_saved",
                         "metadata": {
                             "quality_grade": saved_lead.metadata.get("lead_quality_grade", ""),
-                            "outreach_readiness": "email_ready" if saved_lead.verified_email else "needs_manual_contact",
+                            "outreach_readiness": saved_lead.metadata.get("readiness", "email_ready" if saved_lead.verified_email else "research_needed"),
                         },
                     }
                 )
@@ -361,6 +362,8 @@ class LeadGenerationAgent(BaseAgent):
             metadata["score_breakdown"] = score_breakdown
         if item.get("quality_reason"):
             metadata["quality_reason"] = str(item.get("quality_reason", "")).strip()
+        if item.get("readiness"):
+            metadata["readiness"] = str(item.get("readiness", "")).strip()
         return metadata
 
     def _pipeline_events(self) -> list[Dict[str, Any]]:
