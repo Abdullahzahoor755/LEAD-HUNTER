@@ -9,7 +9,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, Sequence
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -362,6 +362,41 @@ def _settings_value(attribute: str, env_name: str, default: str = "") -> str:
     return str(getattr(settings, attribute, "") or os.getenv(env_name, default) or "").strip()
 
 
+def _is_production_environment() -> bool:
+    railway_environment = str(os.getenv("RAILWAY_ENVIRONMENT") or "").strip().lower()
+    if railway_environment in {"production", "prod"}:
+        return True
+    environment = str(
+        os.getenv("APP_ENV")
+        or os.getenv("ENV")
+        or getattr(settings, "environment", "")
+        or ""
+    ).strip().lower()
+    return environment in {"production", "prod"}
+
+
+def _frontend_base_url() -> str:
+    return str(
+        os.getenv("FRONTEND_BASE_URL")
+        or os.getenv("APP_FRONTEND_URL")
+        or getattr(settings, "frontend_base_url", "")
+        or ""
+    ).strip().rstrip("/")
+
+
+def _frontend_url_configuration_error() -> str:
+    base_url = _frontend_base_url()
+    if not _is_production_environment():
+        return ""
+    if not base_url:
+        return "App URL is not configured. Set FRONTEND_BASE_URL or APP_FRONTEND_URL to your production app URL."
+    parsed = urlparse(base_url)
+    host = str(parsed.hostname or "").strip().lower()
+    if host in {"localhost", "127.0.0.1", "0.0.0.0"}:
+        return "App URL cannot be localhost in production. Set FRONTEND_BASE_URL or APP_FRONTEND_URL to your production app URL."
+    return ""
+
+
 def _google_oauth_client_id() -> str:
     return _settings_value("google_oauth_client_id", "GOOGLE_OAUTH_CLIENT_ID")
 
@@ -387,7 +422,7 @@ def _google_auth_redirect_uri() -> str:
 
 
 def _google_auth_frontend_redirect_url(success: bool, message: str, token: str = "") -> str:
-    base_url = _settings_value("frontend_base_url", "APP_FRONTEND_URL").rstrip("/")
+    base_url = _frontend_base_url()
     params = {"google_auth": "success" if success else "error", "message": message}
     if token:
         params["auth_token"] = token
@@ -402,14 +437,17 @@ def _google_auth_redirect_response(success: bool, message: str, token: str = "")
 
 def _gmail_frontend_redirect_url(success: bool, message: str) -> str:
     status = "success" if success else "error"
-    base_url = _settings_value("frontend_base_url", "APP_FRONTEND_URL").rstrip("/")
+    base_url = _frontend_base_url()
     params = urlencode({"settings": "gmail", "gmail_oauth": status, "message": message})
     if base_url:
         return f"{base_url}/?{params}"
     return f"/?{params}"
 
 
-def _gmail_redirect_response(success: bool, message: str) -> RedirectResponse:
+def _gmail_redirect_response(success: bool, message: str) -> RedirectResponse | JSONResponse:
+    frontend_error = _frontend_url_configuration_error()
+    if frontend_error:
+        return JSONResponse(status_code=503, content={"detail": frontend_error})
     return RedirectResponse(_gmail_frontend_redirect_url(success, message), status_code=302)
 
 
@@ -432,6 +470,30 @@ def _build_gmail_authorization_url(redirect_uri: str, state: str) -> str:
         "state": state,
     }
     return f"{GOOGLE_OAUTH_AUTH_URL}?{urlencode(params)}"
+
+
+def _create_gmail_oauth_state(tenant: TenantContext) -> str:
+    return create_jwt_token(
+        {
+            "purpose": "gmail_oauth",
+            "tenant_id": tenant.tenant_id,
+            "tenant_slug": tenant.tenant_slug,
+            "user_id": tenant.user_id,
+            "email": str(tenant.metadata.get("email", "") if tenant.metadata else ""),
+        },
+        expires_in_seconds=600,
+    )
+
+
+def _decode_gmail_oauth_state(state: str) -> Dict[str, Any]:
+    state_payload = decode_jwt_token(state)
+    if state_payload.get("purpose") != "gmail_oauth":
+        raise ValueError("Invalid OAuth state.")
+    tenant_id = str(state_payload.get("tenant_id", "") or "").strip()
+    user_id = str(state_payload.get("user_id", "") or "").strip()
+    if not tenant_id or not user_id:
+        raise ValueError("Invalid OAuth state.")
+    return state_payload
 
 
 def _google_auth_redirect_uri_for_request(request: Request) -> str:
@@ -1174,16 +1236,10 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         await require_pro_features(tenant, db_session, "Gmail automation is a Pro feature.")
         if not _google_oauth_client_id() or not _google_oauth_client_secret():
             raise HTTPException(status_code=400, detail="Google OAuth is not configured.")
-        state = create_jwt_token(
-            {
-                "purpose": "gmail_oauth",
-                "tenant_id": tenant.tenant_id,
-                "tenant_slug": tenant.tenant_slug,
-                "user_id": tenant.user_id,
-                "email": str(tenant.metadata.get("email", "") if tenant.metadata else ""),
-            },
-            expires_in_seconds=600,
-        )
+        frontend_error = _frontend_url_configuration_error()
+        if frontend_error:
+            raise HTTPException(status_code=503, detail=frontend_error)
+        state = _create_gmail_oauth_state(tenant)
         redirect_uri = _gmail_oauth_redirect_uri(request)
         return {"authorization_url": _build_gmail_authorization_url(redirect_uri, state)}
 
@@ -1200,14 +1256,15 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         if not code or not state:
             return _gmail_redirect_response(False, "Google authorization response was incomplete.")
         try:
-            state_payload = decode_jwt_token(state)
-            if state_payload.get("purpose") != "gmail_oauth":
-                raise ValueError("Invalid OAuth state.")
+            state_payload = _decode_gmail_oauth_state(state)
             tenant_id = str(state_payload.get("tenant_id", "") or "").strip()
             user_id = str(state_payload.get("user_id", "") or "").strip()
-            if not tenant_id or not user_id:
-                raise ValueError("Invalid OAuth state.")
         except ValueError:
+            return _gmail_redirect_response(False, "Google authorization state was invalid or expired.")
+
+        tenants = await maybe_await(db_session.tenants.list(tenant_id))
+        user = await maybe_await(db_session.users.get(tenant_id, user_id))
+        if not tenants or user is None:
             return _gmail_redirect_response(False, "Google authorization state was invalid or expired.")
 
         redirect_uri = _gmail_oauth_redirect_uri(request)
