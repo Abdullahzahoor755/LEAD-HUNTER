@@ -1773,7 +1773,12 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
                 "score": item.get("score", 0),
                 "outreach_status": str(item.get("outreach_status", "") or "").strip().lower(),
                 "outreach_error": format_outreach_error(str(item.get("outreach_error", "") or "").strip().lower()),
-                "save_reason": str(item.get("save_reason", "") or "").strip(),
+                "save_reason": str(
+                    item.get("save_reason", "")
+                    or item.get("service_reason", "")
+                    or item.get("lead_reason", "")
+                    or ""
+                ).strip(),
                 "followup_count": item.get("followup_count", 0),
                 "reply_status": str(item.get("reply_status", "") or "").strip().lower(),
                 "bounce_status": str(item.get("bounce_status", "") or "").strip().lower(),
@@ -1792,7 +1797,7 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
         rows[-1]["contact_readiness"] = contact_readiness_label(rows[-1]["verified_email"], rows[-1]["phone"], rows[-1]["likely_email"])
         rows[-1]["next_contact_action"] = contact_next_action(rows[-1]["verified_email"], rows[-1]["phone"], rows[-1]["likely_email"])
     if not rows:
-        return pd.DataFrame(columns=["id", *STANDARD_LEAD_EXPORT_COLUMNS, "agency_kit", "offer_match", "whatsapp_sales_kit", "marketing_campaign_kit"])
+        return pd.DataFrame(columns=["id", *STANDARD_LEAD_EXPORT_COLUMNS, "lead_reason", "agency_kit", "offer_match", "whatsapp_sales_kit", "marketing_campaign_kit"])
     frame = pd.DataFrame(rows)
     frame["score"] = pd.to_numeric(frame.get("score", pd.Series(0, index=frame.index)), errors="coerce").fillna(0)
     frame["lead_readiness_score"] = pd.to_numeric(frame.get("lead_readiness_score", pd.Series(0, index=frame.index)), errors="coerce").fillna(0).astype(int)
@@ -1806,6 +1811,7 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
             for column in [
                 "id",
                 *STANDARD_LEAD_EXPORT_COLUMNS,
+                "lead_reason",
                 "agency_kit",
                 "offer_match",
                 "whatsapp_sales_kit",

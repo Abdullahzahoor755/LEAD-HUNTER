@@ -164,6 +164,48 @@ def test_lead_reason_truncates_for_leads_page() -> None:
     assert "search query" not in truncated.lower()
 
 
+def test_dashboard_save_reason_falls_back_to_service_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeResponse:
+        is_success = True
+
+        def json(self) -> dict[str, object]:
+            return {
+                "items": [
+                    {
+                        "company": "Reason Co",
+                        "company_url": "https://reason.test",
+                        "service_reason": "Reason Co has verified contact details and clear service fit.",
+                        "lead_reason": "",
+                        "save_reason": "",
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(dashboard, "api_request", lambda *args, **kwargs: FakeResponse())
+
+    frame = dashboard.load_dashboard_data(None)  # type: ignore[arg-type]
+
+    assert frame.loc[0, "service_reason"] == "Reason Co has verified contact details and clear service fit."
+    assert frame.loc[0, "lead_reason"] == "Reason Co has verified contact details and clear service fit."
+    assert frame.loc[0, "save_reason"] == "Reason Co has verified contact details and clear service fit."
+
+
+def test_leads_and_whatsapp_views_use_lead_reason_not_save_reason() -> None:
+    source = dashboard.Path(dashboard.__file__).read_text(encoding="utf-8")
+    leads_start = source.index("def render_live_leads_page")
+    leads_end = source.index("def render_settings_page")
+    leads_source = source[leads_start:leads_end]
+    whatsapp_start = source.index("def render_whatsapp_crm_row")
+    whatsapp_end = source.index("def render_whatsapp_crm_page")
+    whatsapp_source = source[whatsapp_start:whatsapp_end]
+
+    assert '"lead_reason"' in leads_source
+    assert 'row.get("lead_reason", "") or row.get("service_reason", "")' in leads_source
+    assert 'row.get("lead_reason", "") or row.get("service_reason", "")' in whatsapp_source
+    assert "save_reason" not in leads_source
+    assert "save_reason" not in whatsapp_source
+
+
 def test_lead_sort_quality_email_ready_and_company() -> None:
     frame = pd.DataFrame(
         [

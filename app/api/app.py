@@ -286,7 +286,12 @@ def _serialize_lead(lead: Lead, include_agency_kit: bool = False) -> Dict[str, A
         payload["marketing_campaign_kit"] = metadata.get("marketing_campaign_kit", {})
     payload["email_quality"] = str(metadata.get("email_quality", "") or "").strip()
     payload["lead_quality_grade"] = str(metadata.get("lead_quality_grade", "") or "").strip()
-    payload["save_reason"] = str(metadata.get("quality_reason", "") or metadata.get("reason", "") or "").strip()
+    payload["save_reason"] = str(
+        metadata.get("quality_reason", "")
+        or metadata.get("reason", "")
+        or lead.service_reason
+        or ""
+    ).strip()
     return payload
 
 

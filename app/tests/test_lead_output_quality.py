@@ -356,6 +356,7 @@ async def test_api_exports_only_standardized_lead_fields() -> None:
         assert row["email_confidence"] == "verified_email"
         assert row["lead_readiness_score"] == 100
         assert row["service_reason"] == "Strong business fit"
+        assert row["save_reason"] == "Strong business fit"
 
 
 @pytest.mark.anyio
