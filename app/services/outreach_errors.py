@@ -23,6 +23,7 @@ SAFE_OUTREACH_FAILURE_REASONS = {
     "oauth_token_error",
     "plan_locked",
     "provider_generation_failed",
+    "demo_mode_enabled",
     UNKNOWN_OUTREACH_FAILURE,
 }
 
@@ -36,6 +37,7 @@ OUTREACH_ERROR_MESSAGES = {
     "gmail_quota_exceeded": "Gmail quota or rate limit was exceeded. Try again later.",
     "gmail_network_error": "Gmail request failed due to a network error.",
     "gmail_unknown_send_error": "Gmail send failed with an unknown safe error.",
+    "demo_mode_enabled": "Demo mode is enabled. No real email was sent.",
 }
 
 

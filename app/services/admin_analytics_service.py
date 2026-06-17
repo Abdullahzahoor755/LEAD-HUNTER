@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 from app.core.models import Tenant
 from app.db.session import AsyncDatabaseSession, DatabaseSession
 from app.services._async import maybe_await
+from app.services.outreach_errors import normalized_outreach_error
 
 
 def _iso(value: Any) -> str:
@@ -139,3 +140,46 @@ class AdminAnalyticsService:
             }
             for job in jobs
         ]
+
+    async def outreach_stats(self) -> Dict[str, Any]:
+        leads = await self._all("leads")
+        emails = await self._all("emails")
+        pending_verified_leads = [
+            lead
+            for lead in leads
+            if str(lead.verified_email or lead.email or "").strip()
+            and str(lead.outreach_status or lead.status or "").strip().lower() == "pending"
+        ]
+        blocked_leads = [
+            lead
+            for lead in leads
+            if str(lead.outreach_status or lead.status or "").strip().lower() in {"blocked", "blocked_site"}
+            or normalized_outreach_error(
+                str(dict(lead.metadata or {}).get("outreach_error", "") or ""),
+                status=lead.status,
+                outreach_status=lead.outreach_status,
+            )
+            == "gmail_api_disabled"
+        ]
+        failed_reasons = Counter()
+        for email in emails:
+            if str(email.status or "").strip().lower() != "failed":
+                continue
+            metadata = dict(email.metadata or {})
+            reason = normalized_outreach_error(
+                str(metadata.get("error", "") or metadata.get("outreach_error", "") or ""),
+                status=email.status,
+            )
+            failed_reasons[reason or "unknown_outreach_failure"] += 1
+        sent_emails = [
+            email
+            for email in emails
+            if str(email.direction or "").strip().lower() == "outbound"
+            and str(email.status or "").strip().lower() == "sent"
+        ]
+        return {
+            "pending_verified_leads": len(pending_verified_leads),
+            "sent_emails": len(sent_emails),
+            "failed_emails_by_reason": dict(failed_reasons),
+            "blocked_leads": len(blocked_leads),
+        }

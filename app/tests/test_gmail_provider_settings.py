@@ -45,6 +45,16 @@ def _configure_google_oauth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.configs.settings.settings.frontend_base_url", "http://frontend.test")
 
 
+class _HealthyProvider:
+    async def health_check(self, account):
+        return {"email_address": account.email_address}
+
+
+class _DisabledProvider:
+    async def health_check(self, account):
+        raise RuntimeError("AccessNotConfigured Gmail API disabled")
+
+
 def _clear_google_oauth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "")
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
@@ -152,6 +162,7 @@ async def test_gmail_oauth_callback_stores_encrypted_refresh_token_and_sender(
 
     monkeypatch.setattr("app.api.app.exchange_gmail_oauth_code", fake_exchange)
     monkeypatch.setattr("app.api.app.fetch_gmail_profile_email", fake_profile)
+    monkeypatch.setattr("app.api.app.build_provider_registry", lambda: {"gmail": _HealthyProvider()})
     db = build_memory_session()
     app = create_fastapi_app(db=db)
     transport = httpx.ASGITransport(app=app)
@@ -187,6 +198,7 @@ async def test_gmail_status_returns_configured_without_secret_leak(monkeypatch: 
 
     monkeypatch.setattr("app.api.app.exchange_gmail_oauth_code", fake_exchange)
     monkeypatch.setattr("app.api.app.fetch_gmail_profile_email", fake_profile)
+    monkeypatch.setattr("app.api.app.build_provider_registry", lambda: {"gmail": _HealthyProvider()})
     app = create_fastapi_app(db=build_memory_session())
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -202,7 +214,12 @@ async def test_gmail_status_returns_configured_without_secret_leak(monkeypatch: 
 
     assert status.status_code == 200
     payload = status.json()
-    assert payload == {"configured": True, "connected": True, "sender_email": "sender@tenant.test"}
+    assert payload["configured"] is True
+    assert payload["connected"] is True
+    assert payload["sender_email"] == "sender@tenant.test"
+    assert payload["status"] == "connected"
+    assert payload["status_label"] == "Connected"
+    assert payload["last_successful_send"] == ""
     assert "client_secret" not in payload
     assert "refresh_token" not in payload
     assert "google-client-secret" not in str(payload)
@@ -217,7 +234,42 @@ async def test_gmail_status_returns_not_configured() -> None:
         status = await client.get("/settings/providers/gmail/status", headers=_auth_headers(signup["token"]))
 
     assert status.status_code == 200
-    assert status.json() == {"configured": False, "connected": False, "sender_email": ""}
+    payload = status.json()
+    assert payload["configured"] is False
+    assert payload["connected"] is False
+    assert payload["sender_email"] == ""
+    assert payload["status"] == "missing_credentials"
+
+
+@pytest.mark.anyio
+async def test_gmail_status_reports_api_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_google_oauth(monkeypatch)
+
+    async def fake_exchange(code: str, redirect_uri: str) -> dict[str, object]:
+        return {"refresh_token": "refresh-token", "access_token": "access-token", "expires_in": 3600}
+
+    async def fake_profile(access_token: str) -> str:
+        return "sender@tenant.test"
+
+    monkeypatch.setattr("app.api.app.exchange_gmail_oauth_code", fake_exchange)
+    monkeypatch.setattr("app.api.app.fetch_gmail_profile_email", fake_profile)
+    monkeypatch.setattr("app.api.app.build_provider_registry", lambda: {"gmail": _DisabledProvider()})
+    app = create_fastapi_app(db=build_memory_session())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        signup = await _signup(client, tenant_id="tenant-status-api-disabled")
+        headers = _auth_headers(signup["token"])
+        state = await _oauth_state(client, signup["token"])
+        await client.get("/settings/providers/gmail/oauth/callback", params={"code": "auth-code", "state": state})
+        status = await client.get("/settings/providers/gmail/status", headers=headers)
+
+    assert status.status_code == 200
+    payload = status.json()
+    assert payload["configured"] is True
+    assert payload["connected"] is False
+    assert payload["status"] == "gmail_api_disabled"
+    assert payload["status_label"] == "Gmail API disabled"
+    assert payload["error"] == "gmail_api_disabled"
 
 
 @pytest.mark.anyio
@@ -245,7 +297,11 @@ async def test_disconnect_clears_gmail_provider(monkeypatch: pytest.MonkeyPatch)
 
     assert response.status_code == 200
     assert response.json() == {"configured": False, "connected": False, "sender_email": ""}
-    assert status.json() == {"configured": False, "connected": False, "sender_email": ""}
+    status_payload = status.json()
+    assert status_payload["configured"] is False
+    assert status_payload["connected"] is False
+    assert status_payload["sender_email"] == ""
+    assert status_payload["status"] == "missing_credentials"
     tenant = db.tenants.list("tenant-disconnect")[0]
     assert "gmail" not in tenant.settings.get("providers", {})
 

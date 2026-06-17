@@ -47,6 +47,9 @@ class ProviderAccount:
 
 
 class MessageProvider(Protocol):
+    async def health_check(self, account: ProviderAccount) -> Dict[str, Any]:
+        ...
+
     async def send(self, account: ProviderAccount, request: ProviderSendRequest) -> ProviderSendResult:
         ...
 

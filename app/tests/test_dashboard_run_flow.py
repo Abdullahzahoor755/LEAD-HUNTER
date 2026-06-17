@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
+
+import pytest
 
 
 @dataclass
@@ -133,6 +136,46 @@ def test_start_lead_generation_enqueues_without_run_once(monkeypatch) -> None:
     assert fake_st.session_state["active_lead_generation_job_id"] == "job-123"
     assert [call[1] for call in calls] == ["/jobs"]
     assert calls[0][2]["json"]["agent_name"] == "lead_generation"
+
+
+@pytest.mark.anyio
+async def test_stale_lead_generation_job_does_not_block_new_enqueue() -> None:
+    import httpx
+
+    from app.api.app import create_fastapi_app
+    from app.core.auth import create_jwt_token
+    from app.core.models import Job, Tenant
+    from app.core.models import utc_now
+    from app.db.session import build_memory_session
+
+    db = build_memory_session()
+    tenant = Tenant(tenant_id="tenant-stale-job", subscription_plan="Free")
+    db.tenants.save(tenant)
+    stale_job = Job(
+        tenant_id=tenant.tenant_id,
+        name="lead_generation",
+        status="queued",
+        payload={"query": "old search"},
+        created_at=utc_now() - timedelta(hours=2),
+        updated_at=utc_now() - timedelta(hours=2),
+    )
+    db.jobs.save(stale_job)
+    app = create_fastapi_app(db)
+    token = create_jwt_token({"tenant_id": tenant.tenant_id, "user_id": "user-stale-job", "role": "member"})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/jobs",
+            json={"agent_name": "lead_generation", "payload": {"query": "fresh search", "limit": 1}},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["existing"] is False
+    assert payload["job_id"] != stale_job.id
+    saved_stale = db.jobs.get(tenant.tenant_id, stale_job.id)
+    assert saved_stale.status == "cancelled"
 
 
 def test_auth_forms_do_not_prefill_admin_credentials(monkeypatch) -> None:

@@ -8,6 +8,7 @@ import os
 from typing import Dict
 
 from app.agents.base import AgentRequest, BaseAgent
+from app.configs.settings import settings
 from app.core.models import AgentRun
 from app.db.session import AsyncDatabaseSession, DatabaseSession
 from app.providers.base import ProviderAccount, ProviderSendRequest
@@ -80,15 +81,29 @@ class OutreachAgent(BaseAgent):
                 failed += 1
             await self._record_safe_failure_logs(request.tenant.tenant_id, pending_leads, "gmail_sender_not_verified")
             return await self._record_run(db, request, sent, failed)
+        provider = build_provider_registry()["gmail"]
+        health = await credential_service.gmail_connection_health(request.tenant, provider=provider)
+        if str(health.get("status", "") or "") == "gmail_api_disabled":
+            pending_leads = [
+                lead
+                for lead in pending_leads
+                if str(dict(lead.metadata or {}).get("outreach_error", "") or "").strip().lower() != "gmail_api_disabled"
+            ]
+        else:
+            pending_leads = await service.list_pending_outreach_leads(
+                request.tenant,
+                blocked_domains,
+                gmail_health_ok=bool(health.get("connected")),
+            )
         audit_log(
             LOGGER,
             logging.INFO,
-            "OUTREACH_AUDIT outreach.credentials_loaded tenant_id=%s has_refresh_token=%s has_access_token=%s",
+            "OUTREACH_AUDIT outreach.credentials_loaded tenant_id=%s has_refresh_token=%s has_access_token=%s gmail_health=%s",
             request.tenant.tenant_id,
             bool(credentials.get("refresh_token")),
             bool(credentials.get("access_token")),
+            str(health.get("status", "") or ""),
         )
-        provider = build_provider_registry()["gmail"]
         account = ProviderAccount(tenant_id=request.tenant.tenant_id, **credentials)
         for lead in pending_leads:
             await service.prepare_outreach_attempt(request.tenant, lead)
@@ -126,6 +141,8 @@ class OutreachAgent(BaseAgent):
                     email_payload = await email_service.generate_outreach_email(request.tenant, lead)
                 except Exception:
                     raise OutreachFailure("provider_generation_failed") from None
+                if int(email_payload.get("human_score", 0) or 0) < 85:
+                    raise OutreachFailure("email_human_score_too_low")
                 subject = str(email_payload.get("subject", "") or "").strip()
                 body = email_service.ensure_unsubscribe_footer(str(email_payload.get("body", "") or "").strip())
                 audit_log(
@@ -139,6 +156,18 @@ class OutreachAgent(BaseAgent):
                     str(email_payload.get("provider", "") or ""),
                 )
                 sent_at = datetime.now(timezone.utc)
+                if settings.demo_mode:
+                    audit_log(
+                        LOGGER,
+                        logging.INFO,
+                        "OUTREACH_AUDIT outreach.demo_blocked tenant_id=%s lead_id=%s recipient=%s",
+                        request.tenant.tenant_id,
+                        lead.id,
+                        recipient,
+                    )
+                    await self._mark_failed(service, request.tenant, lead, subject, body, "demo_mode_enabled")
+                    failed += 1
+                    continue
                 try:
                     provider_result = await provider.send(
                         account,

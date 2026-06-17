@@ -21,6 +21,7 @@ LOGGER = logging.getLogger(__name__)
 class OutreachService:
     PENDING_SENDABLE_STATUSES = {"pending", "draft", "no_content_scraped", "blocked_site", "slow_site", "js_site"}
     RETRYABLE_FAILED_STATUSES = {"failed"}
+    RETRYABLE_FAILURE_REASONS = {"gmail_send_failed", "gmail_unknown_send_error", "gmail_network_error", "gmail_quota_exceeded"}
     IN_PROGRESS_STATUSES = {"running", "sending"}
     SENT_STATUSES = {"sent"}
 
@@ -96,22 +97,33 @@ class OutreachService:
                 continue
         return {"sent_messages": sent, "failed_messages": failed}
 
-    async def list_pending_outreach_leads(self, tenant: TenantContext, blocked_domains: set[str]) -> List[Lead]:
+    async def list_pending_outreach_leads(
+        self,
+        tenant: TenantContext,
+        blocked_domains: set[str],
+        gmail_health_ok: bool = False,
+    ) -> List[Lead]:
         leads = await self.lead_service.list_leads(tenant)
         return [
             lead
             for lead in leads
-            if self.outreach_lead_bucket(lead, blocked_domains) in {"pending_sendable", "retryable_failed"}
+            if self.outreach_lead_bucket(lead, blocked_domains, gmail_health_ok=gmail_health_ok) in {"pending_sendable", "retryable_failed"}
         ]
 
     async def list_outreach_attempt_leads(self, tenant: TenantContext, blocked_domains: set[str]) -> List[Lead]:
         return await self.list_pending_outreach_leads(tenant, blocked_domains)
 
-    async def outreach_preflight_counts(self, tenant: TenantContext, blocked_domains: set[str]) -> Dict[str, Any]:
+    async def outreach_preflight_counts(
+        self,
+        tenant: TenantContext,
+        blocked_domains: set[str],
+        gmail_health_ok: bool = False,
+    ) -> Dict[str, Any]:
         leads = await self.lead_service.list_leads(tenant)
         counts: Dict[str, Any] = {
             "pending_sendable_count": 0,
             "retryable_failed_count": 0,
+            "gmail_api_disabled_blocked_count": 0,
             "sendable_count": 0,
             "already_sent_count": 0,
             "no_email_count": 0,
@@ -119,11 +131,13 @@ class OutreachService:
             "sample_errors": [],
         }
         for lead in leads:
-            bucket = self.outreach_lead_bucket(lead, blocked_domains)
+            bucket = self.outreach_lead_bucket(lead, blocked_domains, gmail_health_ok=gmail_health_ok)
             if bucket == "pending_sendable":
                 counts["pending_sendable_count"] += 1
             elif bucket == "retryable_failed":
                 counts["retryable_failed_count"] += 1
+            elif bucket == "gmail_api_disabled_blocked":
+                counts["gmail_api_disabled_blocked_count"] += 1
             elif bucket == "already_sent":
                 counts["already_sent_count"] += 1
             elif bucket == "no_email":
@@ -471,9 +485,15 @@ class OutreachService:
         values = {value for value in values if value}
         return values or {"pending"}
 
-    def outreach_lead_bucket(self, lead: Lead, blocked_domains: set[str]) -> str:
+    def outreach_lead_bucket(self, lead: Lead, blocked_domains: set[str], gmail_health_ok: bool = False) -> str:
         statuses = self._lead_status_values(lead)
         recipient = self.outreach_recipient(lead)
+        metadata = dict(lead.metadata or {})
+        outreach_error = normalized_outreach_error(
+            str(metadata.get("outreach_error", "") or ""),
+            status=lead.status,
+            outreach_status=lead.outreach_status,
+        )
 
         if statuses & self.SENT_STATUSES:
             return "already_sent"
@@ -486,7 +506,13 @@ class OutreachService:
         if self._email_domain(recipient) in blocked_domains:
             return "blocked"
         if statuses & self.RETRYABLE_FAILED_STATUSES:
-            return "retryable_failed"
+            if outreach_error == "gmail_api_disabled" and not gmail_health_ok:
+                return "gmail_api_disabled_blocked"
+            if outreach_error == "gmail_api_disabled" and gmail_health_ok:
+                return "retryable_failed"
+            if outreach_error in self.RETRYABLE_FAILURE_REASONS:
+                return "retryable_failed"
+            return "excluded"
         if statuses & self.PENDING_SENDABLE_STATUSES:
             return "pending_sendable"
         return "excluded"

@@ -34,6 +34,9 @@ class Settings:
     enable_legacy_runtime: bool = dataclass_field(
         default_factory=lambda: os.getenv("ENABLE_LEGACY_RUNTIME", "false").lower() == "true"
     )
+    demo_mode: bool = dataclass_field(
+        default_factory=lambda: os.getenv("DEMO_MODE", os.getenv("APP_DEMO_MODE", "false")).lower() == "true"
+    )
     provider_config: Dict[str, str] = dataclass_field(
         default_factory=lambda: {
             "anthropic_model": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
@@ -41,7 +44,6 @@ class Settings:
     )
     billing_plan_prices: Dict[str, int] = dataclass_field(
         default_factory=lambda: {
-            "Starter": int(os.getenv("BILLING_PRICE_STARTER_PKR", "5000")),
             "Pro": int(os.getenv("BILLING_PRICE_PRO_PKR", os.getenv("BILLING_PRICE_PRO_USD", "2800"))),
             "Agency": int(os.getenv("BILLING_PRICE_AGENCY_PKR", os.getenv("BILLING_PRICE_AGENCY_USD", "5000"))),
         }

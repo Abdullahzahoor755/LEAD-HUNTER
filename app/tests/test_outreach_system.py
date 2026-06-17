@@ -10,6 +10,7 @@ import app.agents.outreach as outreach_module
 from app.agents.base import AgentRequest
 from app.agents.outreach import OutreachAgent
 from app.api.app import create_fastapi_app
+from app.core.auth import create_jwt_token
 from app.core.models import Email, Lead, Tenant, TenantContext
 from app.db.session import build_memory_session
 from app.providers.base import ProviderSendResult
@@ -31,6 +32,16 @@ class _FakeGmailProvider:
 
     async def fetch_replies(self, account, cursor: str = ""):
         return []
+
+
+class _HealthyGmailProvider(_FakeGmailProvider):
+    async def health_check(self, account):
+        return {"email_address": account.email_address}
+
+
+class _DisabledGmailProvider(_FakeGmailProvider):
+    async def health_check(self, account):
+        raise RuntimeError("AccessNotConfigured Gmail API has not been used or is disabled")
 
 
 class _FailingGmailProvider:
@@ -261,6 +272,265 @@ async def test_retry_failed_verified_email_lead_clears_old_error_on_success(monk
 
 
 @pytest.mark.anyio
+async def test_gmail_api_disabled_failed_lead_is_not_retried_until_health_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-api-disabled-hold")
+    db.tenants.save(_tenant_record(tenant.tenant_id))
+    await _configure_gmail(db, tenant, monkeypatch)
+    lead = db.for_tenant(tenant).save(
+        "leads",
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company="Disabled Co",
+            company_url="https://disabled.test",
+            email="lead@disabled.test",
+            verified_email="lead@disabled.test",
+            status="failed",
+            outreach_status="failed",
+            metadata={"outreach_error": "gmail_api_disabled"},
+        ),
+    )
+    provider = _DisabledGmailProvider()
+    monkeypatch.setattr(outreach_module, "build_provider_registry", lambda: {"gmail": provider})
+
+    result = await OutreachAgent().run(AgentRequest(tenant=tenant, payload={}), db)
+
+    saved = db.for_tenant(tenant).get("leads", lead.id)
+    assert result["sent_messages"] == 0
+    assert provider.sent == []
+    assert saved.outreach_status == "failed"
+    assert saved.metadata["outreach_error"] == "gmail_api_disabled"
+
+
+@pytest.mark.anyio
+async def test_gmail_api_disabled_failed_lead_retries_after_health_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-api-disabled-retry")
+    db.tenants.save(_tenant_record(tenant.tenant_id))
+    await _configure_gmail(db, tenant, monkeypatch)
+    lead = db.for_tenant(tenant).save(
+        "leads",
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company="Recovered Co",
+            company_url="https://recovered.test",
+            email="lead@recovered.test",
+            verified_email="lead@recovered.test",
+            status="failed",
+            outreach_status="failed",
+            metadata={"outreach_error": "gmail_api_disabled"},
+        ),
+    )
+    provider = _HealthyGmailProvider()
+    monkeypatch.setattr(outreach_module, "build_provider_registry", lambda: {"gmail": provider})
+
+    result = await OutreachAgent().run(AgentRequest(tenant=tenant, payload={}), db)
+
+    saved = db.for_tenant(tenant).get("leads", lead.id)
+    assert result["sent_messages"] == 1
+    assert provider.sent[0][1] == "lead@recovered.test"
+    assert saved.outreach_status == "sent"
+    assert "outreach_error" not in saved.metadata
+
+
+@pytest.mark.anyio
+async def test_outreach_does_not_duplicate_send_already_sent_leads(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-no-duplicate")
+    db.tenants.save(_tenant_record(tenant.tenant_id))
+    await _configure_gmail(db, tenant, monkeypatch)
+    db.for_tenant(tenant).save(
+        "leads",
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company="Sent Co",
+            company_url="https://sent.test",
+            email="lead@sent.test",
+            verified_email="lead@sent.test",
+            status="sent",
+            outreach_status="sent",
+        ),
+    )
+    pending = await _save_pending_lead(db, tenant)
+    provider = _HealthyGmailProvider()
+    monkeypatch.setattr(outreach_module, "build_provider_registry", lambda: {"gmail": provider})
+
+    result = await OutreachAgent().run(AgentRequest(tenant=tenant, payload={}), db)
+
+    assert result["sent_messages"] == 1
+    assert [item[1] for item in provider.sent] == [pending.verified_email]
+
+
+@pytest.mark.anyio
+async def test_demo_mode_blocks_real_email_sending(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-demo-mode")
+    db.tenants.save(_tenant_record(tenant.tenant_id))
+    await _configure_gmail(db, tenant, monkeypatch)
+    lead = await _save_pending_lead(db, tenant)
+    provider = _HealthyGmailProvider()
+    monkeypatch.setattr(outreach_module, "build_provider_registry", lambda: {"gmail": provider})
+    monkeypatch.setattr("app.configs.settings.settings.demo_mode", True)
+
+    result = await OutreachAgent().run(AgentRequest(tenant=tenant, payload={}), db)
+
+    saved = db.for_tenant(tenant).get("leads", lead.id)
+    emails = db.for_tenant(tenant).list("emails")
+    assert result["sent_messages"] == 0
+    assert result["failed_messages"] == 1
+    assert provider.sent == []
+    assert saved.outreach_status == "failed"
+    assert saved.metadata["outreach_error"] == "demo_mode_enabled"
+    assert emails[0].metadata["error"] == "demo_mode_enabled"
+
+
+@pytest.mark.anyio
+async def test_admin_outreach_stats_counts_reliability_fields() -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-admin-outreach")
+    db.tenants.save(_tenant_record(tenant.tenant_id))
+    db.for_tenant(tenant).save(
+        "leads",
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company="Pending Co",
+            verified_email="lead@pending.test",
+            email="lead@pending.test",
+            status="pending",
+            outreach_status="pending",
+        ),
+    )
+    db.for_tenant(tenant).save(
+        "leads",
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company="Blocked Co",
+            verified_email="lead@blocked.test",
+            email="lead@blocked.test",
+            status="failed",
+            outreach_status="failed",
+            metadata={"outreach_error": "gmail_api_disabled"},
+        ),
+    )
+    db.for_tenant(tenant).save(
+        "emails",
+        Email(
+            tenant_id=tenant.tenant_id,
+            lead_id="lead-1",
+            direction="outbound",
+            provider="gmail",
+            status="sent",
+            sent_at=datetime.now(timezone.utc),
+        ),
+    )
+    db.for_tenant(tenant).save(
+        "emails",
+        Email(
+            tenant_id=tenant.tenant_id,
+            lead_id="lead-2",
+            direction="outbound",
+            provider="gmail",
+            status="failed",
+            metadata={"error": "gmail_send_failed"},
+        ),
+    )
+    app = create_fastapi_app(db)
+    token = create_jwt_token({"tenant_id": tenant.tenant_id, "user_id": "admin", "role": "admin"})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/admin/outreach/stats", headers=_auth_headers(token))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["pending_verified_leads"] == 1
+    assert payload["sent_emails"] == 1
+    assert payload["failed_emails_by_reason"] == {"gmail_send_failed": 1}
+    assert payload["blocked_leads"] == 1
+
+
+@pytest.mark.anyio
+async def test_system_health_returns_correct_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SERPER_API_KEY", "serper-test")
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-health")
+    db.tenants.save(_tenant_record(tenant.tenant_id))
+    await _configure_gmail(db, tenant, monkeypatch)
+    await _save_pending_lead(db, tenant)
+    monkeypatch.setattr("app.api.app.build_provider_registry", lambda: {"gmail": _HealthyGmailProvider()})
+    app = create_fastapi_app(db)
+    token = create_jwt_token({"tenant_id": tenant.tenant_id, "user_id": "owner", "role": "member"})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/system/health", headers=_auth_headers(token))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "pass"
+    assert payload["checks"]["lead_generation_provider"]["status"] == "pass"
+    assert payload["checks"]["job_queue"]["status"] == "pass"
+    assert payload["checks"]["database"]["status"] == "pass"
+    assert payload["checks"]["gmail"]["status"] == "pass"
+    assert payload["checks"]["pending_outreach_safety"]["status"] == "pass"
+
+
+@pytest.mark.anyio
+async def test_system_health_reports_clear_onboarding_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SERPER_API_KEY", raising=False)
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-health-errors")
+    db.tenants.save(_tenant_record(tenant.tenant_id))
+    app = create_fastapi_app(db)
+    token = create_jwt_token({"tenant_id": tenant.tenant_id, "user_id": "owner", "role": "member"})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/system/health", headers=_auth_headers(token))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "fail"
+    assert payload["checks"]["lead_generation_provider"]["message"] == "SERPER_API_KEY is missing."
+    assert payload["checks"]["gmail"]["message"] == "Missing credentials"
+
+
+@pytest.mark.anyio
+async def test_lead_quality_export_returns_standard_report_fields() -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-quality-export")
+    db.tenants.save(_tenant_record(tenant.tenant_id))
+    db.for_tenant(tenant).save(
+        "leads",
+        Lead(
+            tenant_id=tenant.tenant_id,
+            company="Quality Co",
+            company_url="https://quality.test",
+            verified_email="lead@quality.test",
+            email="lead@quality.test",
+            status="pending",
+            outreach_status="pending",
+            score=88,
+            service_reason="Strong lead fit with verified email.",
+        ),
+    )
+    app = create_fastapi_app(db)
+    token = create_jwt_token({"tenant_id": tenant.tenant_id, "user_id": "owner", "role": "member"})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/leads/export/quality", headers=_auth_headers(token))
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item == {
+        "company": "Quality Co",
+        "website": "https://quality.test",
+        "verified_email": "lead@quality.test",
+        "status": "pending",
+        "outreach_status": "pending",
+        "score": 88,
+        "reason": "Strong lead fit with verified email.",
+    }
+
+
+@pytest.mark.anyio
 async def test_failed_send_persists_failed_status_and_email_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
     db = build_memory_session()
     tenant = TenantContext(tenant_id="tenant-send-failed")
@@ -422,8 +692,8 @@ async def test_outreach_preflight_counts_sendable_no_email_and_unknown_failures(
     payload = response.json()
     assert payload["gmail_connected"] is False
     assert payload["pending_sendable_count"] == 1
-    assert payload["retryable_failed_count"] == 1
-    assert payload["sendable_count"] == 2
+    assert payload["retryable_failed_count"] == 0
+    assert payload["sendable_count"] == 1
     assert payload["already_sent_count"] == 0
     assert payload["no_email_count"] == 1
     assert payload["failed_without_reason_count"] == 1

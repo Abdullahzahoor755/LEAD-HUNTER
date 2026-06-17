@@ -2009,8 +2009,13 @@ def load_outreach_preflight() -> Dict[str, Any]:
     if not response.is_success:
         return {
             "gmail_connected": False,
+            "gmail_status": "missing_credentials",
+            "gmail_status_label": "Missing credentials",
+            "gmail_error": "gmail_not_connected",
+            "last_successful_send": "",
             "pending_sendable_count": 0,
             "retryable_failed_count": 0,
+            "gmail_api_disabled_blocked_count": 0,
             "sendable_count": 0,
             "already_sent_count": 0,
             "no_email_count": 0,
@@ -2020,22 +2025,45 @@ def load_outreach_preflight() -> Dict[str, Any]:
     return body
 
 
+def load_system_health() -> Dict[str, Any]:
+    response = api_request("GET", "/system/health")
+    body = parse_api_json(response)
+    if not response.is_success:
+        return {"status": "fail", "checks": {"system": {"status": "fail", "message": str(body.get("detail", "Health check failed."))}}}
+    return body
+
+
+def load_lead_quality_export() -> pd.DataFrame:
+    response = api_request("GET", "/leads/export/quality")
+    body = parse_api_json(response)
+    if not response.is_success:
+        st.error(str(body.get("detail", "Could not load lead quality export.")))
+        return pd.DataFrame()
+    return pd.DataFrame(body.get("items", []))
+
+
 def render_outreach_preflight_summary(preflight: Dict[str, Any]) -> None:
     pending_sendable_count = int(preflight.get("pending_sendable_count", 0) or 0)
     retryable_failed_count = int(preflight.get("retryable_failed_count", 0) or 0)
     sendable_count = int(preflight.get("sendable_count", 0) or 0)
     already_sent_count = int(preflight.get("already_sent_count", 0) or 0)
     no_email_count = int(preflight.get("no_email_count", 0) or 0)
+    api_disabled_blocked_count = int(preflight.get("gmail_api_disabled_blocked_count", 0) or 0)
     gmail_connected = bool(preflight.get("gmail_connected"))
+    gmail_status_label = str(preflight.get("gmail_status_label", "") or ("Connected" if gmail_connected else "Missing credentials"))
+    last_successful_send = str(preflight.get("last_successful_send", "") or "")
     st.caption(
         "Sendable email leads: "
         f"{sendable_count} | "
         f"Pending: {pending_sendable_count} | "
         f"Retryable failed: {retryable_failed_count} | "
+        f"Gmail API blocked: {api_disabled_blocked_count} | "
         f"Already sent: {already_sent_count} | "
         f"Leads without verified email: {no_email_count} | "
-        f"Gmail connected: {str(gmail_connected).lower()}"
+        f"Gmail: {gmail_status_label}"
     )
+    if last_successful_send:
+        st.caption(f"Last successful send: {last_successful_send}")
     if pending_sendable_count == 0 and retryable_failed_count > 0:
         st.info(
             f"No new pending email leads found, but {retryable_failed_count} failed verified-email leads can be retried. "
@@ -2640,7 +2668,7 @@ def render_lead_action_buttons(row: pd.Series, index: int) -> None:
 
 def render_live_leads_page(frame: pd.DataFrame) -> None:
     st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
-    header_cols = st.columns([2, 1])
+    header_cols = st.columns([2, 1, 1])
     with header_cols[0]:
         st.markdown('<div class="section-title">Leads</div>', unsafe_allow_html=True)
         st.markdown('<div class="section-caption">Review saved leads without CRM clutter.</div>', unsafe_allow_html=True)
@@ -2653,6 +2681,19 @@ def render_live_leads_page(frame: pd.DataFrame) -> None:
                 "Export CSV",
                 csv_frame.to_csv(index=False).encode("utf-8"),
                 file_name="leads.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+    with header_cols[2]:
+        quality_frame = load_lead_quality_export() if not frame.empty else pd.DataFrame()
+        if quality_frame.empty:
+            st.button("Quality Report", use_container_width=True, disabled=True)
+        else:
+            report = sanitize_csv_frame(quality_frame)
+            st.download_button(
+                "Quality Report",
+                report.to_csv(index=False).encode("utf-8"),
+                file_name="lead_quality_report.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
@@ -2779,6 +2820,7 @@ def sanitize_csv_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def render_settings_page() -> None:
+    render_system_health_settings()
     render_ai_provider_settings()
     render_email_personalization_settings()
     render_gmail_settings()
@@ -2974,16 +3016,34 @@ def render_gmail_settings() -> None:
     configured = bool(status.get("configured"))
     connected = bool(status.get("connected"))
     sender_email = str(status.get("sender_email", "") or "")
+    status_label = str(status.get("status_label", "") or ("Connected" if connected else "Missing credentials"))
+    status_code = str(status.get("status", "") or "").strip()
+    last_successful_send = str(status.get("last_successful_send", "") or "")
     st.markdown(
-        f'<span class="status-badge {"success" if connected else "warning"}">{"Connected" if connected else "Not connected"}</span>',
+        f'<span class="status-badge {"success" if connected else "warning"}">{html.escape(status_label)}</span>',
         unsafe_allow_html=True,
     )
     if connected and sender_email:
         st.caption(f"Connected as {sender_email}")
+        if last_successful_send:
+            st.caption(f"Last successful send: {last_successful_send}")
+    elif status_code == "gmail_api_disabled":
+        st.caption("Gmail API is disabled for this OAuth project. Enable Gmail API, then reconnect Gmail.")
+    elif status_code == "invalid_credentials":
+        st.caption("Gmail credentials are invalid or incomplete. Reconnect Gmail.")
     elif configured:
         st.caption("Gmail is configured, but the sender email could not be loaded.")
     else:
         st.caption("Use Google OAuth to connect a sender account.")
+
+    with st.expander("Gmail setup guide", expanded=not connected):
+        st.markdown(
+            "- Enable the Gmail API in the Google Cloud project used for OAuth.\n"
+            "- Add the Gmail OAuth redirect URL shown in your deployment settings.\n"
+            "- Connect Gmail from this screen and approve `gmail.send` and `gmail.readonly`.\n"
+            "- If Google does not return offline access, click Reconnect Gmail and approve access again.\n"
+            "- In demo mode, Gmail can be connected and checked, but no real email is sent."
+        )
 
     connect_label = "Reconnect Gmail" if connected else "Connect Gmail"
     if st.button(connect_label, use_container_width=True):
@@ -3012,6 +3072,39 @@ def render_gmail_settings() -> None:
             st.rerun()
         else:
             st.error(str(body.get("detail", "Could not disconnect Gmail.")))
+    st.markdown("</div></div></div>", unsafe_allow_html=True)
+
+
+def render_system_health_settings() -> None:
+    st.markdown(
+        """
+        <div class="page-section dashboard-actions">
+            <div class="page-card">
+                <div class="page-card-inner">
+                    <div class="section-title">System Health</div>
+                    <div class="settings-note">Run a quick pre-demo check for providers, queue, database, Gmail, and outreach safety.</div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.button("Run System Health Check", use_container_width=True):
+        st.session_state["system_health_result"] = load_system_health()
+    health = st.session_state.get("system_health_result", {})
+    if isinstance(health, dict) and health:
+        st.caption(f"Overall status: {str(health.get('status', 'unknown')).upper()}")
+        if bool(health.get("demo_mode")):
+            st.info("Demo mode is enabled. Real Gmail sends are blocked.")
+        rows = []
+        for name, payload in dict(health.get("checks", {}) or {}).items():
+            detail = dict(payload or {})
+            rows.append(
+                {
+                    "check": str(name).replace("_", " ").title(),
+                    "status": str(detail.get("status", "") or ""),
+                    "message": str(detail.get("message", "") or ""),
+                }
+            )
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     st.markdown("</div></div></div>", unsafe_allow_html=True)
 
 
@@ -3374,6 +3467,7 @@ def admin_get(path: str) -> Dict[str, Any]:
 def render_admin_summary() -> None:
     render_page_header("Admin Dashboard", "Workspace analytics, users, leads, jobs, and payment approvals.", "Admin")
     summary = admin_get("/admin/summary")
+    outreach = admin_get("/admin/outreach/stats")
     if not summary:
         return
     primary_metrics = [
@@ -3406,6 +3500,25 @@ def render_admin_summary() -> None:
         f"Running jobs: {int(summary.get('running_jobs', 0) or 0)} | "
         f"Failed jobs: {int(summary.get('failed_jobs', 0) or 0)}"
     )
+    if outreach:
+        outreach_metrics = [
+            ("Pending verified", int(outreach.get("pending_verified_leads", 0) or 0), "Ready leads"),
+            ("Sent emails", int(outreach.get("sent_emails", 0) or 0), "Outbound"),
+            ("Blocked leads", int(outreach.get("blocked_leads", 0) or 0), "Needs fix"),
+        ]
+        st.markdown(
+            '<div class="page-section metric-card-grid">'
+            + "".join(render_metric_card(label, value, help_text) for label, value, help_text in outreach_metrics)
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+        failed = dict(outreach.get("failed_emails_by_reason", {}) or {})
+        if failed:
+            st.dataframe(
+                pd.DataFrame([{"reason": key, "count": value} for key, value in sorted(failed.items())]),
+                use_container_width=True,
+                hide_index=True,
+            )
     st.markdown("</div></div>", unsafe_allow_html=True)
 
 

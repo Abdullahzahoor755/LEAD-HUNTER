@@ -47,6 +47,14 @@ class GmailProvider(MessageProvider):
             raise RuntimeError("Google API dependencies are not installed.")
         return build("gmail", "v1", credentials=self._credentials(account), cache_discovery=False)
 
+    async def health_check(self, account: ProviderAccount) -> dict:
+        service = self._build_service(account)
+        raw = await asyncio.to_thread(lambda: service.users().getProfile(userId="me").execute())
+        return {
+            "email_address": str(raw.get("emailAddress", "") or "").strip().lower(),
+            "messages_total": int(raw.get("messagesTotal", 0) or 0),
+        }
+
     async def send(self, account: ProviderAccount, request: ProviderSendRequest) -> ProviderSendResult:
         audit_log(
             LOGGER,

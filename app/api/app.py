@@ -20,6 +20,7 @@ from app.configs.settings import settings
 from app.api.public_pages import router as public_pages_router
 from app.middleware.auth import AuthTenantMiddleware
 from app.middleware.security import InMemoryRateLimitMiddleware, SecurityHeadersMiddleware
+from app.providers.registry import build_provider_registry
 from app.core.auth import create_jwt_token, decode_jwt_token, get_plan_limits, is_plan_gated_agent, validate_production_jwt_secret
 from app.core.models import Job, Lead, TenantContext
 from app.core.tenant import get_current_tenant, resolve_tenant_context
@@ -44,6 +45,7 @@ from app.services.security_service import SecretEncryptionError
 from app.services._async import maybe_await
 
 LOGGER = logging.getLogger(__name__)
+STALE_LEAD_GENERATION_JOB_AFTER = timedelta(minutes=30)
 
 GMAIL_OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
@@ -660,6 +662,29 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
             "items": [_serialize_lead(item, include_agency_kit=include_agency_kit) for item in items],
         }
 
+    @app.get("/leads/export/quality")
+    async def lead_quality_export(
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        items = await LeadService(db_session).list_leads(tenant)
+        return {
+            "tenant_id": tenant.tenant_id,
+            "items": [
+                {
+                    "company": str(lead.company or lead.company_name or "").strip(),
+                    "website": str(lead.company_url or lead.website or "").strip(),
+                    "verified_email": str(lead.verified_email or lead.email or "").strip().lower(),
+                    "status": str(lead.status or "").strip().lower(),
+                    "outreach_status": str(lead.outreach_status or "").strip().lower(),
+                    "score": int(lead.score or lead.lead_score or 0),
+                    "reason": str(lead.service_reason or lead.reason or "").strip(),
+                }
+                for lead in items
+            ],
+        }
+
     @app.get("/debug/leads/serialization")
     async def debug_lead_serialization(
         request: Request,
@@ -886,11 +911,22 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         if is_plan_gated_agent(payload.agent_name):
             await require_pro_features(tenant, db_session, "Outreach is available in Pro plan.")
         if str(payload.agent_name or "").strip() == "lead_generation":
+            now = datetime.now(timezone.utc)
             jobs = await maybe_await(db_session.jobs.list(tenant.tenant_id))
             for existing in sorted(jobs, key=lambda item: item.created_at, reverse=True):
                 if str(existing.name or existing.job_type or "").strip() != "lead_generation":
                     continue
                 if str(existing.status or "").strip().lower() not in {"queued", "running"}:
+                    continue
+                created_at = existing.created_at
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                if now - created_at > STALE_LEAD_GENERATION_JOB_AFTER:
+                    existing.status = "cancelled"
+                    existing.error = "Cancelled stale lead generation job before enqueueing a fresh run."
+                    existing.locked_by = ""
+                    existing.locked_at = None
+                    await maybe_await(db_session.for_tenant(tenant).save("jobs", existing))
                     continue
                 return {
                     "job_id": existing.id,
@@ -917,17 +953,95 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
             for item in os.getenv("EMAIL_OPTOUT_DOMAINS", "").split(",")
             if item.strip()
         }
-        counts = await service.outreach_preflight_counts(tenant, blocked_domains)
-
         try:
-            credentials = await ProviderCredentialService(db_session).get_gmail_credentials(tenant)
+            health = await ProviderCredentialService(db_session).gmail_connection_health(
+                tenant,
+                provider=build_provider_registry()["gmail"],
+            )
         except Exception:
-            credentials = {}
-        gmail_connected = bool(credentials.get("refresh_token") or credentials.get("access_token")) if credentials else False
+            health = {"connected": False, "status": "invalid_credentials", "status_label": "Invalid credentials", "error": "gmail_unknown_send_error"}
+        counts = await service.outreach_preflight_counts(
+            tenant,
+            blocked_domains,
+            gmail_health_ok=bool(health.get("connected")),
+        )
         return {
-            "gmail_connected": gmail_connected,
+            "gmail_connected": bool(health.get("connected")),
+            "gmail_status": str(health.get("status", "") or ""),
+            "gmail_status_label": str(health.get("status_label", "") or ""),
+            "gmail_error": str(health.get("error", "") or ""),
+            "last_successful_send": str(health.get("last_successful_send", "") or ""),
             **counts,
         }
+
+    @app.get("/system/health")
+    async def system_health(
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        checks: Dict[str, Any] = {}
+        try:
+            await maybe_await(db_session.tenants.list(tenant.tenant_id))
+            checks["database"] = {"status": "pass", "message": "Database reachable."}
+        except Exception:
+            checks["database"] = {"status": "fail", "message": "Database check failed."}
+
+        queue_ready = bool(getattr(app.state, "queue", None) is not None)
+        checks["job_queue"] = {
+            "status": "pass" if queue_ready else "fail",
+            "message": "Job queue ready." if queue_ready else "Job queue is not available.",
+        }
+
+        serper_ready = bool(os.getenv("SERPER_API_KEY", "").strip())
+        checks["lead_generation_provider"] = {
+            "status": "pass" if serper_ready else "fail",
+            "message": "Lead generation provider configured." if serper_ready else "SERPER_API_KEY is missing.",
+        }
+
+        service = OutreachService(db_session)
+        blocked_domains = {
+            item.strip().lower()
+            for item in os.getenv("EMAIL_OPTOUT_DOMAINS", "").split(",")
+            if item.strip()
+        }
+        try:
+            gmail_health = await ProviderCredentialService(db_session).gmail_connection_health(
+                tenant,
+                provider=build_provider_registry()["gmail"],
+            )
+        except Exception:
+            gmail_health = {
+                "connected": False,
+                "status": "invalid_credentials",
+                "status_label": "Invalid credentials",
+                "error": "gmail_unknown_send_error",
+            }
+        counts = await service.outreach_preflight_counts(
+            tenant,
+            blocked_domains,
+            gmail_health_ok=bool(gmail_health.get("connected")),
+        )
+        checks["gmail"] = {
+            "status": "pass" if gmail_health.get("connected") else "fail",
+            "message": str(gmail_health.get("status_label", "") or "Gmail is not connected."),
+            "details": gmail_health,
+        }
+        unsafe_retries = int(counts.get("gmail_api_disabled_blocked_count", 0) or 0)
+        sendable = int(counts.get("sendable_count", 0) or 0)
+        checks["pending_outreach_safety"] = {
+            "status": "pass" if unsafe_retries == 0 else "warn",
+            "message": "Pending outreach is safe to run." if unsafe_retries == 0 else "Gmail API disabled retries are blocked.",
+            "sendable_count": sendable,
+            "gmail_api_disabled_blocked_count": unsafe_retries,
+            "demo_mode": bool(settings.demo_mode),
+        }
+        overall = "pass"
+        if any(item.get("status") == "fail" for item in checks.values()):
+            overall = "fail"
+        elif any(item.get("status") == "warn" for item in checks.values()):
+            overall = "warn"
+        return {"status": overall, "demo_mode": bool(settings.demo_mode), "checks": checks}
 
     @app.get("/jobs/recent")
     async def recent_jobs(
@@ -1143,15 +1257,20 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         tenant = request.state.tenant
         await require_pro_features(tenant, db_session, "Gmail automation is a Pro feature.")
         try:
-            credentials = await ProviderCredentialService(db_session).get_gmail_credentials(tenant)
+            health = await ProviderCredentialService(db_session).gmail_connection_health(
+                tenant,
+                provider=build_provider_registry()["gmail"],
+            )
         except SecretEncryptionError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        sender_email = str(credentials.get("email_address", "")).strip().lower() if credentials else ""
-        connected = bool(credentials.get("refresh_token") or credentials.get("access_token")) if credentials else False
         return {
-            "configured": bool(credentials) and connected,
-            "connected": connected,
-            "sender_email": sender_email,
+            "configured": bool(health.get("configured")),
+            "connected": bool(health.get("connected")),
+            "sender_email": str(health.get("sender_email", "") or ""),
+            "status": str(health.get("status", "") or ""),
+            "status_label": str(health.get("status_label", "") or ""),
+            "error": str(health.get("error", "") or ""),
+            "last_successful_send": str(health.get("last_successful_send", "") or ""),
         }
 
     @app.post("/settings/providers/gmail/disconnect")
@@ -1511,6 +1630,14 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
     ) -> Dict[str, Any]:
         require_admin(request)
         return {"items": await AdminAnalyticsService(db_session).recent_jobs(limit=50)}
+
+    @app.get("/admin/outreach/stats")
+    async def admin_outreach_stats(
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        require_admin(request)
+        return await AdminAnalyticsService(db_session).outreach_stats()
 
     return app
 
