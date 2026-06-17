@@ -473,7 +473,10 @@ class LeadService:
         candidate = re.sub(r"^(reason|service_reason|why):\s*", "", candidate, flags=re.IGNORECASE)
         candidate = re.sub(r"\s*\|\s*(fallback_reason|quality_filter)=.*$", "", candidate, flags=re.IGNORECASE)
         candidate = candidate.strip(" -;")
-        return self._clean_forbidden_reason(candidate)[:220]
+        cleaned = self._clean_forbidden_reason(candidate)
+        if self._contains_forbidden_reason(cleaned):
+            return ""
+        return cleaned[:220]
 
     def _safe_lead_reason(self, lead: Lead) -> str:
         metadata = dict(lead.metadata or {})
@@ -498,7 +501,10 @@ class LeadService:
         replacements = {
             "matches the technology target from the search query": "appears to offer technology services",
             "target from the search query": "business category",
+            "target from search query": "business category",
             "matches the search query": "appears to be relevant",
+            "workflow automation may help": "a clearer follow-up process may help",
+            "may need workflow automation": "may benefit from clearer follow-up",
             "search query": "business category",
             "scraped data": "public information",
             "AI detected": "it appears",
@@ -511,6 +517,18 @@ class LeadService:
         text = re.sub(r"\s+", " ", text).strip()
         sentences = re.split(r"(?<=[.!?])\s+", text)
         return " ".join(sentences[:2]).strip()
+
+    def _contains_forbidden_reason(self, value: str) -> bool:
+        lowered = str(value or "").lower()
+        banned = (
+            "matches the search query",
+            "target from the search query",
+            "target from search query",
+            "workflow automation may help",
+            "may need workflow automation",
+            "search query",
+        )
+        return any(phrase in lowered for phrase in banned)
 
     def _domain_label(self, url: str) -> str:
         return self._domain_from_url(url).replace("www.", "")

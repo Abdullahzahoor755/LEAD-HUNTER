@@ -298,11 +298,43 @@ class LeadGenerationAgent(BaseAgent):
         return "Lead generation completed with 0 leads: all candidates were rejected or already existed."
 
     def _service_reason_from_raw(self, item: Dict[str, Any]) -> str:
-        analysis_reason = str(item.get("analysis_reason", "")).strip()
-        if analysis_reason and not self._looks_like_score_breakdown(analysis_reason):
-            return analysis_reason
-        intent_summary = str(item.get("intent_summary", "")).strip()
-        return "" if self._looks_like_score_breakdown(intent_summary) else intent_summary
+        quality_filter = item.get("quality_filter", {}) if isinstance(item.get("quality_filter", {}), dict) else {}
+        candidates = (
+            item.get("reason", ""),
+            quality_filter.get("reason", ""),
+            item.get("quality_reason", ""),
+            item.get("analysis_reason", ""),
+            item.get("intent_summary", ""),
+        )
+        for value in candidates:
+            reason = str(value or "").strip()
+            if self._usable_service_reason(reason):
+                return reason
+        return self._fallback_service_reason(item)
+
+    def _usable_service_reason(self, value: str) -> bool:
+        return bool(value) and not self._looks_like_score_breakdown(value) and not self._contains_generic_reason(value)
+
+    def _contains_generic_reason(self, value: str) -> bool:
+        lowered = str(value or "").lower()
+        banned = (
+            "matches the search query",
+            "target from the search query",
+            "target from search query",
+            "workflow automation may help",
+            "may need workflow automation",
+            "search query",
+        )
+        return any(phrase in lowered for phrase in banned)
+
+    def _fallback_service_reason(self, item: Dict[str, Any]) -> str:
+        company = str(item.get("company_name", "") or item.get("company", "")).strip()
+        website = str(item.get("website", "") or item.get("company_url", "")).strip()
+        industry = str(item.get("industry", "")).strip()
+        subject = company or legacy_leads.root_domain_from_url(website) or "This company"
+        if industry and industry.lower() not in {"other", "unknown", "n/a", "na", "none"}:
+            return f"{subject} appears relevant for outreach based on its {industry} business profile and contact availability."
+        return f"{subject} appears relevant for outreach based on its business profile and contact availability."
 
     def _country_from_payload(self, payload: Dict[str, Any]) -> str:
         explicit_country = str(payload.get("country", "") or payload.get("target_country", "")).strip()

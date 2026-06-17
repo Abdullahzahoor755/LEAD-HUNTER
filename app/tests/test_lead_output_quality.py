@@ -752,6 +752,145 @@ async def test_lead_generation_uses_claude_reason_and_keeps_score_breakdown_in_m
 
 
 @pytest.mark.anyio
+async def test_lead_generation_prefers_clean_item_reason_for_service_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-clean-item-reason")
+
+    monkeypatch.setattr(legacy_leads, "load_environment", lambda: None)
+    monkeypatch.setattr(
+        legacy_leads,
+        "process_query",
+        lambda query, seen_websites, limit, ai_mode="", niche="", location="": [
+            {
+                "qualified": True,
+                "decision": "accepted",
+                "company_name": "Clean Reason Co",
+                "website": "https://clean-item-reason.test",
+                "email": "info@clean-item-reason.test",
+                "industry": "Technology",
+                "lead_score": 82,
+                "reason": "Clean Reason Co has a clear services page and verified contact details for outreach.",
+                "quality_reason": "Moderate buying intent detected with available contact - worth reaching out.",
+                "analysis_reason": "Clean Reason Co matches the search query and may need workflow automation.",
+                "intent_summary": "target from search query",
+                "email_status": "pending",
+            }
+        ],
+    )
+
+    await LeadGenerationAgent().run(
+        AgentRequest(tenant=tenant, payload={"query": "technology companies", "limit": 1}),
+        db,
+    )
+
+    saved = db.for_tenant(tenant).list("leads")[0]
+    assert saved.service_reason == "Clean Reason Co has a clear services page and verified contact details for outreach."
+    assert "search query" not in saved.service_reason.lower()
+    assert "workflow automation" not in saved.service_reason.lower()
+
+
+@pytest.mark.anyio
+async def test_lead_generation_uses_quality_reason_when_item_reason_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-quality-reason")
+
+    monkeypatch.setattr(legacy_leads, "load_environment", lambda: None)
+    monkeypatch.setattr(
+        legacy_leads,
+        "process_query",
+        lambda query, seen_websites, limit, ai_mode="", niche="", location="": [
+            {
+                "qualified": True,
+                "decision": "accepted",
+                "company_name": "Quality Reason Co",
+                "website": "https://quality-reason.test",
+                "email": "info@quality-reason.test",
+                "industry": "Technology",
+                "lead_score": 78,
+                "quality_filter": {"reason": "High-intent company with verified contact - strong outreach candidate."},
+                "analysis_reason": "Quality Reason Co matches the search query.",
+                "email_status": "pending",
+            }
+        ],
+    )
+
+    await LeadGenerationAgent().run(
+        AgentRequest(tenant=tenant, payload={"query": "technology companies", "limit": 1}),
+        db,
+    )
+
+    saved = db.for_tenant(tenant).list("leads")[0]
+    assert saved.service_reason == "High-intent company with verified contact - strong outreach candidate."
+
+
+@pytest.mark.anyio
+async def test_banned_analysis_and_intent_reasons_use_safe_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-banned-reasons")
+
+    monkeypatch.setattr(legacy_leads, "load_environment", lambda: None)
+    monkeypatch.setattr(
+        legacy_leads,
+        "process_query",
+        lambda query, seen_websites, limit, ai_mode="", niche="", location="": [
+            {
+                "qualified": True,
+                "decision": "accepted",
+                "company_name": "Banned Analysis Co",
+                "website": "https://banned-analysis.test",
+                "email": "info@banned-analysis.test",
+                "industry": "Technology",
+                "lead_score": 77,
+                "analysis_reason": "Banned Analysis Co matches the search query and may need workflow automation.",
+                "intent_summary": "target from search query",
+                "email_status": "pending",
+            },
+            {
+                "qualified": True,
+                "decision": "accepted",
+                "company_name": "Banned Intent Co",
+                "website": "https://banned-intent.test",
+                "email": "info@banned-intent.test",
+                "industry": "Software",
+                "lead_score": 76,
+                "analysis_reason": "",
+                "intent_summary": "workflow automation may help this target from the search query",
+                "email_status": "pending",
+            },
+            {
+                "qualified": True,
+                "decision": "accepted",
+                "company_name": "Email Status Co",
+                "website": "https://email-status-reason.test",
+                "email": "info@email-status-reason.test",
+                "industry": "",
+                "lead_score": 74,
+                "analysis_reason": "",
+                "intent_summary": "",
+                "email_status": "target from search query",
+            },
+        ],
+    )
+
+    await LeadGenerationAgent().run(
+        AgentRequest(tenant=tenant, payload={"query": "software companies", "limit": 3}),
+        db,
+    )
+
+    saved = db.for_tenant(tenant).list("leads")
+    assert len(saved) == 3
+    assert {lead.outreach_status for lead in saved} == {"pending"}
+    for lead in saved:
+        assert lead.service_reason
+        assert "appears relevant for outreach based on its" in lead.service_reason
+        lowered = lead.service_reason.lower()
+        assert "search query" not in lowered
+        assert "target from search query" not in lowered
+        assert "workflow automation" not in lowered
+        assert "email_status" not in lowered
+
+
+@pytest.mark.anyio
 async def test_lead_generation_defaults_new_outreach_status_to_pending_and_does_not_send(monkeypatch: pytest.MonkeyPatch) -> None:
     db = build_memory_session()
     tenant = TenantContext(tenant_id="tenant-generation-pending-status")
@@ -885,7 +1024,7 @@ async def test_free_plan_lead_generation_uses_fallback_without_anthropic_key(mon
     saved = db.for_tenant(tenant).list("leads")[0]
     assert result["status"] == "SUCCESS"
     assert saved.industry == "Logistics"
-    assert "logistics" in saved.service_reason.lower()
+    assert saved.service_reason == "Low intent signals - saved for reference only."
     assert saved.metadata["ai_mode"] == "fallback"
 
 
@@ -1007,10 +1146,9 @@ async def test_missing_claude_industry_remains_other_and_reason_fallback(monkeyp
         )
 
     saved = db.for_tenant(tenant).list("leads")[0]
-    assert saved.service_reason == "This appears to be a relevant business with public contact details."
+    assert saved.service_reason == "No Claude Co appears relevant for outreach based on its business profile and contact availability."
     assert saved.industry == "Other"
     assert saved.country == "Saudi Arabia"
-    assert "missing_claude_reason_or_intent_summary" in caplog.text
     assert "missing_claude_industry" in caplog.text
 
 
