@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from fastapi import APIRouter
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from app.configs.settings import settings
 
@@ -39,7 +39,7 @@ def _nav() -> str:
 
 
 def _frontend_url() -> str:
-    return str(settings.frontend_base_url or "/").strip() or "/"
+    return str(settings.frontend_base_url or "").strip()
 
 
 def _paragraphs(items: Iterable[str]) -> str:
@@ -76,7 +76,7 @@ def _render_page(page: Page) -> HTMLResponse:
 
 
 def _render_homepage() -> HTMLResponse:
-    app_url = html.escape(_frontend_url(), quote=True)
+    app_url = "/app"
     sections = {
         "preview": (
             ("Lead Generation", "Find prospects by niche and location, then organize them into a workspace-ready pipeline."),
@@ -738,6 +738,19 @@ GMAIL_ACCESS_PAGE = Page(
 @router.get("/", response_class=HTMLResponse)
 async def home() -> HTMLResponse:
     return _render_homepage()
+
+
+@router.get("/app")
+async def open_app() -> Response:
+    frontend_url = _frontend_url()
+    if not frontend_url or frontend_url == "/":
+        return HTMLResponse(
+            "<!doctype html><html><body><h1>App URL is not configured</h1>"
+            "<p>Set FRONTEND_BASE_URL to the Streamlit app URL, then reload this page.</p>"
+            '<p><a href="/">Back to homepage</a></p></body></html>',
+            status_code=503,
+        )
+    return RedirectResponse(frontend_url, status_code=302)
 
 
 @router.get(PUBLIC_STYLES_PATH)

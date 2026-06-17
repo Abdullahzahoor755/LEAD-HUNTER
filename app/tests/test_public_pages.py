@@ -56,6 +56,7 @@ async def test_homepage_has_saas_landing_sections() -> None:
 
     assert response.status_code == 200
     assert 'href="/public/homepage.css"' in response.text
+    assert 'href="/app"' in response.text
     assert "Find leads, send Gmail outreach, and track replies." in response.text
     assert "Open App" in response.text
     assert "Gmail Access" in response.text
@@ -87,6 +88,35 @@ async def test_homepage_has_saas_landing_sections() -> None:
     assert "text/css" in styles.headers["content-type"]
     assert ".lh-hero" in styles.text
     assert "@media" in styles.text
+
+
+@pytest.mark.anyio
+async def test_open_app_redirects_to_configured_frontend(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api.public_pages import settings
+
+    monkeypatch.setattr(settings, "frontend_base_url", "https://app.leadhunter.test")
+    app = create_fastapi_app(db=build_memory_session())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver", follow_redirects=False) as client:
+        response = await client.get("/app")
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "https://app.leadhunter.test"
+
+
+@pytest.mark.anyio
+async def test_open_app_has_clear_error_when_frontend_url_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api.public_pages import settings
+
+    monkeypatch.setattr(settings, "frontend_base_url", "")
+    app = create_fastapi_app(db=build_memory_session())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/app")
+
+    assert response.status_code == 503
+    assert "App URL is not configured" in response.text
+    assert "FRONTEND_BASE_URL" in response.text
 
 
 @pytest.mark.anyio

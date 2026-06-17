@@ -17,6 +17,7 @@ class AuthTenantMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         public_paths = {
             "/",
+            "/app",
             "/privacy",
             "/terms",
             "/contact",
