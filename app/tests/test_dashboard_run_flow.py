@@ -115,6 +115,65 @@ class _FakeSidebar:
         return str(selected)
 
 
+class _AsyncRepo:
+    def __init__(self, repo: Any) -> None:
+        self.repo = repo
+
+    async def list(self, tenant_id: str):
+        return self.repo.list(tenant_id)
+
+    async def list_all(self):
+        return self.repo.list_all()
+
+    async def get(self, tenant_id: str, item_id: str):
+        return self.repo.get(tenant_id, item_id)
+
+    async def save(self, item: Any):
+        return self.repo.save(item)
+
+    async def delete(self, tenant_id: str, item_id: str):
+        return self.repo.delete(tenant_id, item_id)
+
+    async def find_by_company_url(self, tenant_id: str, company_url: str):
+        return self.repo.find_by_company_url(tenant_id, company_url)
+
+    async def find_by_email(self, tenant_id: str, email: str):
+        return self.repo.find_by_email(tenant_id, email)
+
+    async def claim_latest_matching_for_tenant(self, tenant_id: str, queue: str, worker_id: str, job_type: str):
+        return self.repo.claim_latest_matching_for_tenant(tenant_id, queue, worker_id, job_type)
+
+
+class _FakeAsyncSession:
+    def __init__(self, *, fail_commit: bool = False) -> None:
+        self.commits = 0
+        self.fail_commit = fail_commit
+
+    async def commit(self) -> None:
+        self.commits += 1
+        if self.fail_commit:
+            raise RuntimeError("commit failed")
+
+
+def _async_db_from_memory(memory_db: Any, session: _FakeAsyncSession):
+    from app.db.session import AsyncDatabaseSession
+
+    return AsyncDatabaseSession(
+        session=session,
+        tenants=_AsyncRepo(memory_db.tenants),
+        users=_AsyncRepo(memory_db.users),
+        campaigns=_AsyncRepo(memory_db.campaigns),
+        leads=_AsyncRepo(memory_db.leads),
+        emails=_AsyncRepo(memory_db.emails),
+        replies=_AsyncRepo(memory_db.replies),
+        followups=_AsyncRepo(memory_db.followups),
+        agent_runs=_AsyncRepo(memory_db.agent_runs),
+        jobs=_AsyncRepo(memory_db.jobs),
+        payments=_AsyncRepo(memory_db.payments),
+        gmail_credentials=_AsyncRepo(memory_db.gmail_credentials),
+    )
+
+
 def test_dashboard_run_once_sends_job_type(monkeypatch) -> None:
     import dashboard
 
@@ -210,7 +269,7 @@ async def test_stale_lead_generation_job_does_not_block_new_enqueue() -> None:
     db.jobs.save(stale_job)
     app = create_fastapi_app(db)
     token = create_jwt_token({"tenant_id": tenant.tenant_id, "user_id": "user-stale-job", "role": "member"})
-    transport = httpx.ASGITransport(app=app)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/jobs",
@@ -224,6 +283,196 @@ async def test_stale_lead_generation_job_does_not_block_new_enqueue() -> None:
     assert payload["job_id"] != stale_job.id
     saved_stale = db.jobs.get(tenant.tenant_id, stale_job.id)
     assert saved_stale.status == "cancelled"
+
+
+@pytest.mark.anyio
+async def test_old_running_lead_generation_job_is_not_cancelled() -> None:
+    import httpx
+
+    from app.api.app import create_fastapi_app
+    from app.core.auth import create_jwt_token
+    from app.core.models import Job, Tenant, utc_now
+    from app.db.session import build_memory_session
+
+    db = build_memory_session()
+    tenant = Tenant(tenant_id="tenant-running-job", subscription_plan="Free")
+    db.tenants.save(tenant)
+    running_job = Job(
+        tenant_id=tenant.tenant_id,
+        name="lead_generation",
+        status="running",
+        payload={"query": "old active search"},
+        created_at=utc_now() - timedelta(hours=2),
+        started_at=utc_now() - timedelta(minutes=5),
+        locked_at=utc_now() - timedelta(minutes=5),
+        locked_by="worker-active",
+    )
+    db.jobs.save(running_job)
+    app = create_fastapi_app(db)
+    token = create_jwt_token({"tenant_id": tenant.tenant_id, "user_id": "user-running-job", "role": "member"})
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/jobs",
+            json={"agent_name": "lead_generation", "payload": {"query": "fresh search", "limit": 1}},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["existing"] is True
+    assert payload["job_id"] == running_job.id
+    saved_running = db.jobs.get(tenant.tenant_id, running_job.id)
+    assert saved_running.status == "running"
+
+
+@pytest.mark.anyio
+async def test_jobs_endpoint_commits_before_background_worker_runs() -> None:
+    import httpx
+
+    from app.api.app import create_fastapi_app
+    from app.core.auth import create_jwt_token
+    from app.core.models import Tenant
+    from app.db.session import build_memory_session
+
+    class FakeQueue:
+        def __init__(self, session: _FakeAsyncSession) -> None:
+            self.session = session
+            self.registered: list[str] = []
+            self.commit_count_seen_by_worker = -1
+
+        async def register(self, job_id: str) -> None:
+            self.registered.append(job_id)
+
+        async def run_once_for_tenant(self, tenant, job_type: str = ""):
+            self.commit_count_seen_by_worker = self.session.commits
+            return {"status": "empty", "tenant_id": tenant.tenant_id}
+
+    memory_db = build_memory_session()
+    tenant = Tenant(tenant_id="tenant-commit-before-worker", subscription_plan="Free")
+    memory_db.tenants.save(tenant)
+    fake_session = _FakeAsyncSession()
+    async_db = _async_db_from_memory(memory_db, fake_session)
+    app = create_fastapi_app(async_db)
+    fake_queue = FakeQueue(fake_session)
+    app.state.queue = fake_queue
+    token = create_jwt_token({"tenant_id": tenant.tenant_id, "user_id": "user-commit-worker", "role": "member"})
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/jobs",
+            json={"agent_name": "lead_generation", "payload": {"query": "IT companies in Riyadh", "limit": 2}},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["existing"] is False
+    assert fake_queue.registered == [body["job_id"]]
+    assert fake_session.commits == 1
+    assert fake_queue.commit_count_seen_by_worker == 1
+
+
+@pytest.mark.anyio
+async def test_jobs_endpoint_does_not_schedule_worker_when_commit_fails() -> None:
+    import httpx
+
+    from app.api.app import create_fastapi_app
+    from app.core.auth import create_jwt_token
+    from app.core.models import Tenant
+    from app.db.session import build_memory_session
+
+    class FakeQueue:
+        def __init__(self) -> None:
+            self.registered: list[str] = []
+            self.runs = 0
+
+        async def register(self, job_id: str) -> None:
+            self.registered.append(job_id)
+
+        async def run_once_for_tenant(self, tenant, job_type: str = ""):
+            self.runs += 1
+            return {"status": "empty", "tenant_id": tenant.tenant_id}
+
+    memory_db = build_memory_session()
+    tenant = Tenant(tenant_id="tenant-commit-fails", subscription_plan="Free")
+    memory_db.tenants.save(tenant)
+    async_db = _async_db_from_memory(memory_db, _FakeAsyncSession(fail_commit=True))
+    app = create_fastapi_app(async_db)
+    fake_queue = FakeQueue()
+    app.state.queue = fake_queue
+    token = create_jwt_token({"tenant_id": tenant.tenant_id, "user_id": "user-commit-fails", "role": "member"})
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/jobs",
+            json={"agent_name": "lead_generation", "payload": {"query": "IT companies in Riyadh", "limit": 2}},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 500
+    assert fake_queue.registered
+    assert fake_queue.runs == 0
+
+
+@pytest.mark.anyio
+async def test_ui_created_lead_generation_job_completes_and_links_saved_leads() -> None:
+    import httpx
+
+    from app.agents.base import AgentRequest, BaseAgent
+    from app.agents.registry import AgentRegistry
+    from app.api.app import create_fastapi_app
+    from app.core.auth import create_jwt_token
+    from app.core.models import Lead, Tenant, TenantContext
+    from app.db.session import build_memory_session
+    from app.workers.jobs import AsyncJobQueue
+
+    class SavingLeadAgent(BaseAgent):
+        name = "lead_generation"
+
+        async def run(self, request: AgentRequest, db) -> dict[str, Any]:
+            job_id = str(request.payload.get("_job_id", ""))
+            db.for_tenant(request.tenant).save(
+                "leads",
+                Lead(
+                    tenant_id=request.tenant.tenant_id,
+                    job_id=job_id,
+                    company="Riyadh IT Co",
+                    company_url="https://riyadh-it.test",
+                    verified_email="hello@riyadh-it.test",
+                    source_query=str(request.payload.get("query", "")),
+                ),
+            )
+            return {"status": "SUCCESS", "message": "saved", "data": {"saved_leads": 1, "lead_count": 1}}
+
+    db = build_memory_session()
+    tenant = Tenant(tenant_id="tenant-ui-job-completes", subscription_plan="Free")
+    db.tenants.save(tenant)
+    app = create_fastapi_app(db)
+    registry = AgentRegistry()
+    registry.register(SavingLeadAgent())
+    app.state.queue = AsyncJobQueue(db=db, agents=registry)
+    token = create_jwt_token({"tenant_id": tenant.tenant_id, "user_id": "user-ui-job", "role": "member"})
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/jobs",
+            json={"agent_name": "lead_generation", "payload": {"query": "IT companies in Riyadh", "limit": 2}},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    job_id = response.json()["job_id"]
+    job = db.for_tenant(TenantContext(tenant_id=tenant.tenant_id)).get("jobs", job_id)
+    leads = db.for_tenant(TenantContext(tenant_id=tenant.tenant_id)).list("leads")
+    assert job.status == "completed"
+    assert job.started_at is not None
+    assert job.completed_at is not None
+    assert len(leads) == 1
+    assert leads[0].job_id == job_id
 
 
 def test_auth_forms_do_not_prefill_admin_credentials(monkeypatch) -> None:

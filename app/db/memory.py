@@ -18,7 +18,7 @@ from app.core.interfaces import (
     UserRepository,
     GmailCredentialRepository,
 )
-from app.core.models import AgentRun, Campaign, Email, Followup, Job, Lead, Payment, Reply, Tenant, User, GmailCredential
+from app.core.models import AgentRun, Campaign, Email, Followup, Job, Lead, Payment, Reply, Tenant, User, GmailCredential, utc_now
 from app.core.tenant import assert_same_tenant
 from app.db.base import deserialize_model, serialize_model
 
@@ -162,6 +162,7 @@ class InMemoryJobRepository(InMemoryTenantScopedRepository, JobRepository):
             job.status = "running"
             job.attempt_count = int(job.attempt_count or 0) + 1
             job.locked_by = worker_id
+            job.started_at = job.started_at or utc_now()
             self.save(job)
             self._items[tenant_id][item_id]["locked_at"] = serialize_model(job).get("updated_at")
             return job
@@ -186,6 +187,7 @@ class InMemoryJobRepository(InMemoryTenantScopedRepository, JobRepository):
         job.status = "running"
         job.attempt_count = int(job.attempt_count or 0) + 1
         job.locked_by = worker_id
+        job.started_at = job.started_at or utc_now()
         self.save(job)
         self._items[tenant_id][item_id]["locked_at"] = serialize_model(job).get("updated_at")
         return job

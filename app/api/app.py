@@ -916,12 +916,19 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
             for existing in sorted(jobs, key=lambda item: item.created_at, reverse=True):
                 if str(existing.name or existing.job_type or "").strip() != "lead_generation":
                     continue
-                if str(existing.status or "").strip().lower() not in {"queued", "running"}:
+                existing_status = str(existing.status or "").strip().lower()
+                if existing_status not in {"queued", "running"}:
                     continue
                 created_at = existing.created_at
                 if created_at.tzinfo is None:
                     created_at = created_at.replace(tzinfo=timezone.utc)
-                if now - created_at > STALE_LEAD_GENERATION_JOB_AFTER:
+                is_unclaimed_queued = (
+                    existing_status == "queued"
+                    and existing.started_at is None
+                    and existing.locked_at is None
+                    and not str(existing.locked_by or "").strip()
+                )
+                if is_unclaimed_queued and now - created_at > STALE_LEAD_GENERATION_JOB_AFTER:
                     existing.status = "cancelled"
                     existing.error = "Cancelled stale lead generation job before enqueueing a fresh run."
                     existing.locked_by = ""
@@ -937,6 +944,8 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
                 }
         job = await JobService(db_session).enqueue(tenant, name=payload.agent_name, payload=payload.payload)
         await app.state.queue.register(job.id)
+        if isinstance(db_session, AsyncDatabaseSession):
+            await db_session.session.commit()
         if str(payload.agent_name or "").strip() == "lead_generation":
             background_tasks.add_task(app.state.queue.run_once_for_tenant, tenant, "lead_generation")
         return {"job_id": job.id, "tenant_id": tenant.tenant_id, "agent_name": payload.agent_name, "existing": False, "status": job.status}
