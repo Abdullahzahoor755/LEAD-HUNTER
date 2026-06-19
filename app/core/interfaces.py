@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Iterable, Optional, Protocol, Sequence, TypeVar
 
-from app.core.models import AgentRun, Campaign, Email, Followup, Job, Lead, Payment, Reply, Tenant, User, GmailCredential
+from app.core.models import AgentRun, Campaign, Email, Followup, Job, Lead, Payment, Reply, Tenant, User, GmailCredential, VoiceCall
 
 T = TypeVar("T")
 
@@ -57,6 +57,11 @@ class EmailRepository(TenantScopedRepository[Email], Protocol):
 
 class ReplyRepository(TenantScopedRepository[Reply], Protocol):
     def list_for_lead(self, tenant_id: str, lead_id: str) -> Sequence[Reply]:
+        ...
+
+
+class VoiceCallRepository(TenantScopedRepository[VoiceCall], Protocol):
+    def find_by_provider_call_id(self, provider_call_id: str) -> Optional[VoiceCall]:
         ...
 
 

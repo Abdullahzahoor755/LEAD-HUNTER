@@ -30,6 +30,7 @@ class AuthTenantMiddleware(BaseHTTPMiddleware):
             "/auth/google/start",
             "/auth/google/callback",
             "/settings/providers/gmail/oauth/callback",
+            "/voice/webhook/vapi",
         }
         if request.url.path in public_paths:
             return await call_next(request)

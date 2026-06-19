@@ -184,6 +184,7 @@ def _async_db_from_memory(memory_db: Any, session: _FakeAsyncSession):
         leads=_AsyncRepo(memory_db.leads),
         emails=_AsyncRepo(memory_db.emails),
         replies=_AsyncRepo(memory_db.replies),
+        voice_calls=_AsyncRepo(memory_db.voice_calls),
         followups=_AsyncRepo(memory_db.followups),
         agent_runs=_AsyncRepo(memory_db.agent_runs),
         jobs=_AsyncRepo(memory_db.jobs),

@@ -21,8 +21,10 @@ from app.api.public_pages import router as public_pages_router
 from app.middleware.auth import AuthTenantMiddleware
 from app.middleware.security import InMemoryRateLimitMiddleware, SecurityHeadersMiddleware
 from app.providers.registry import build_provider_registry
+from app.providers.vapi.client import VapiCallError, VapiClient, VapiConfigurationError
+from app.providers.vapi.webhooks import parse_vapi_webhook
 from app.core.auth import create_jwt_token, decode_jwt_token, get_plan_limits, is_plan_gated_agent, validate_production_jwt_secret
-from app.core.models import Job, Lead, TenantContext
+from app.core.models import Job, Lead, TenantContext, VoiceCall
 from app.core.tenant import get_current_tenant, resolve_tenant_context
 from app.db.postgres import initialize_async_database, verify_async_database
 from app.db.session import AsyncDatabaseSession, DatabaseSession, get_async_db_session, reset_async_session_factory
@@ -42,6 +44,7 @@ from app.services.outreach_service import OutreachService
 from app.services.plan_gate import PlanGateError, require_pro_plan
 from app.services.provider_credential_service import ProviderCredentialService
 from app.services.security_service import SecretEncryptionError
+from app.services.voice_outcome_service import VoiceOutcomeService, normalize_voice_outcome
 from app.services._async import maybe_await
 
 LOGGER = logging.getLogger(__name__)
@@ -1259,13 +1262,26 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
             state_payload = _decode_gmail_oauth_state(state)
             tenant_id = str(state_payload.get("tenant_id", "") or "").strip()
             user_id = str(state_payload.get("user_id", "") or "").strip()
-        except ValueError:
-            return _gmail_redirect_response(False, "Google authorization state was invalid or expired.")
+        except ValueError as error:
+            reason = str(error)
+            LOGGER.warning(
+                "Gmail OAuth state validation failed reason=%s has_state=%s",
+                type(error).__name__,
+                bool(state),
+            )
+            if "expired" in reason.lower():
+                return _gmail_redirect_response(False, "Google authorization expired. Please reconnect Gmail.")
+            return _gmail_redirect_response(False, "Google authorization could not be verified. Please reconnect Gmail.")
 
         tenants = await maybe_await(db_session.tenants.list(tenant_id))
         user = await maybe_await(db_session.users.get(tenant_id, user_id))
         if not tenants or user is None:
-            return _gmail_redirect_response(False, "Google authorization state was invalid or expired.")
+            LOGGER.warning(
+                "Gmail OAuth state binding failed tenant_present=%s user_present=%s",
+                bool(tenants),
+                user is not None,
+            )
+            return _gmail_redirect_response(False, "Google authorization could not be verified. Please reconnect Gmail.")
 
         redirect_uri = _gmail_oauth_redirect_uri(request)
         try:
@@ -1480,6 +1496,191 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
     ) -> Dict[str, Any]:
         tenant = request.state.tenant
         return await LeadService(db_session).dashboard_snapshot(tenant)
+
+    def voice_pending_response() -> None:
+        raise HTTPException(status_code=501, detail="Voice calling foundation added; implementation pending.")
+
+    @app.get("/voice/agent/status")
+    async def voice_agent_status() -> Dict[str, Any]:
+        client = VapiClient()
+        return {
+            "configured": client.configured,
+            "api_key_present": bool(client.api_key),
+            "assistant_id_present": bool(client.assistant_id),
+            "provider_reachable": await client.provider_reachable(),
+        }
+
+    @app.post("/voice/webhook/vapi")
+    async def vapi_webhook(
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, bool]:
+        try:
+            payload = await request.json()
+        except Exception:
+            return {"ok": True, "ignored": True}
+        event = parse_vapi_webhook(payload)
+        if event.ignored:
+            return {"ok": True, "ignored": True}
+
+        voice_call = await maybe_await(db_session.voice_calls.find_by_provider_call_id(event.provider_call_id))
+        if voice_call is None:
+            LOGGER.info(
+                "voice_webhook_ignored event_type=%s vapi_call_id=%s reason=%s",
+                event.event_type,
+                event.provider_call_id,
+                "voice_call_not_found",
+            )
+            return {"ok": True, "ignored": True}
+
+        if event.event_type == "call-started":
+            voice_call.status = "active"
+            await maybe_await(db_session.for_tenant(voice_call.tenant_id).save("voice_calls", voice_call))
+            LOGGER.info(
+                "voice_webhook_call_started tenant_id=%s lead_id=%s vapi_call_id=%s",
+                voice_call.tenant_id,
+                voice_call.lead_id,
+                voice_call.provider_call_id,
+            )
+            return {"ok": True, "ignored": False}
+
+        if event.event_type in {"transcript", "transcript-updated"}:
+            if event.transcript:
+                voice_call.transcript = event.transcript
+                await maybe_await(db_session.for_tenant(voice_call.tenant_id).save("voice_calls", voice_call))
+            return {"ok": True, "ignored": False}
+
+        if event.event_type == "call-ended":
+            if event.transcript:
+                voice_call.transcript = event.transcript
+            if event.duration_seconds:
+                voice_call.duration_seconds = event.duration_seconds
+            try:
+                classification = await VoiceOutcomeService().classify(voice_call.transcript)
+                classification = normalize_voice_outcome(classification)
+            except Exception:
+                classification = normalize_voice_outcome({})
+            voice_call.outcome = classification["outcome"]
+            voice_call.summary = classification["summary"]
+            voice_call.status = "completed"
+            await maybe_await(db_session.for_tenant(voice_call.tenant_id).save("voice_calls", voice_call))
+            LOGGER.info(
+                "voice_webhook_call_ended tenant_id=%s lead_id=%s vapi_call_id=%s outcome=%s duration_seconds=%s",
+                voice_call.tenant_id,
+                voice_call.lead_id,
+                voice_call.provider_call_id,
+                voice_call.outcome,
+                voice_call.duration_seconds,
+            )
+            return {"ok": True, "ignored": False}
+
+        return {"ok": True, "ignored": True}
+
+    @app.post("/voice/call/{lead_id}")
+    async def create_voice_call(
+        lead_id: str,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        lead = await maybe_await(db_session.for_tenant(tenant).get("leads", lead_id))
+        if lead is None:
+            LOGGER.info("voice_call_lead_not_found tenant_id=%s lead_id=%s phone_present=%s", tenant.tenant_id, lead_id, False)
+            raise HTTPException(status_code=404, detail="Lead not found.")
+        phone_number = str(getattr(lead, "phone", "") or "").strip()
+        LOGGER.info(
+            "voice_call_requested tenant_id=%s lead_id=%s phone_present=%s",
+            tenant.tenant_id,
+            lead.id,
+            bool(phone_number),
+        )
+        if not phone_number:
+            raise HTTPException(status_code=422, detail="Lead does not have a phone number.")
+
+        voice_call = VoiceCall(
+            tenant_id=tenant.tenant_id,
+            lead_id=lead.id,
+            user_id=tenant.user_id,
+            phone_number=phone_number,
+            status="pending",
+            metadata={"lead_id": lead.id, "provider": "vapi"},
+        )
+        voice_call = await maybe_await(db_session.for_tenant(tenant).save("voice_calls", voice_call))
+        client = VapiClient()
+        try:
+            result = await client.create_call(
+                phone_number=phone_number,
+                lead_id=lead.id,
+                metadata={"tenant_id": tenant.tenant_id, "lead_id": lead.id, "voice_call_id": voice_call.id},
+            )
+        except VapiConfigurationError as error:
+            voice_call.status = "failed"
+            voice_call.summary = "Voice provider is not configured."
+            voice_call.metadata = {**voice_call.metadata, "error": "vapi_not_configured"}
+            await maybe_await(db_session.for_tenant(tenant).save("voice_calls", voice_call))
+            LOGGER.warning(
+                "voice_call_failed tenant_id=%s lead_id=%s phone_present=%s error=%s",
+                tenant.tenant_id,
+                lead.id,
+                True,
+                "Voice provider is not configured.",
+            )
+            raise HTTPException(status_code=503, detail="Voice provider is not configured yet.") from error
+        except VapiCallError as error:
+            voice_call.status = "failed"
+            voice_call.summary = "Voice provider call failed."
+            voice_call.metadata = {**voice_call.metadata, "error": "vapi_call_failed"}
+            await maybe_await(db_session.for_tenant(tenant).save("voice_calls", voice_call))
+            LOGGER.warning(
+                "voice_call_failed tenant_id=%s lead_id=%s phone_present=%s error=%s",
+                tenant.tenant_id,
+                lead.id,
+                True,
+                "Voice provider call failed.",
+            )
+            raise HTTPException(status_code=502, detail="Voice call could not be started right now.") from error
+
+        vapi_call_id = str(result.get("id") or result.get("callId") or result.get("call_id") or "").strip()
+        if not vapi_call_id:
+            voice_call.status = "failed"
+            voice_call.summary = "Vapi did not return a call id."
+            voice_call.metadata = {**voice_call.metadata, "error": "missing_vapi_call_id"}
+            await maybe_await(db_session.for_tenant(tenant).save("voice_calls", voice_call))
+            LOGGER.warning(
+                "voice_call_failed tenant_id=%s lead_id=%s phone_present=%s error=%s",
+                tenant.tenant_id,
+                lead.id,
+                True,
+                "Vapi did not return a call id.",
+            )
+            raise HTTPException(status_code=502, detail="Voice call could not be started right now.")
+        voice_call.provider_call_id = vapi_call_id
+        voice_call.status = "active"
+        voice_call.metadata = {**voice_call.metadata, "vapi_response_status": str(result.get("status", "") or "")}
+        voice_call = await maybe_await(db_session.for_tenant(tenant).save("voice_calls", voice_call))
+        LOGGER.info(
+            "voice_call_started tenant_id=%s lead_id=%s phone_present=%s vapi_call_id=%s",
+            tenant.tenant_id,
+            lead.id,
+            True,
+            voice_call.provider_call_id,
+        )
+        return {"call_id": voice_call.id, "vapi_call_id": voice_call.provider_call_id, "status": voice_call.status}
+
+    @app.post("/voice/campaign")
+    async def create_voice_campaign(request: Request) -> None:
+        _ = request
+        voice_pending_response()
+
+    @app.get("/voice/calls")
+    async def list_voice_calls(request: Request) -> None:
+        _ = request
+        voice_pending_response()
+
+    @app.get("/voice/calls/{call_id}")
+    async def get_voice_call(call_id: str, request: Request) -> None:
+        _ = (call_id, request)
+        voice_pending_response()
 
     @app.get("/billing/plans")
     async def billing_plans(

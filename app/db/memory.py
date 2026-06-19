@@ -17,8 +17,9 @@ from app.core.interfaces import (
     TenantRepository,
     UserRepository,
     GmailCredentialRepository,
+    VoiceCallRepository,
 )
-from app.core.models import AgentRun, Campaign, Email, Followup, Job, Lead, Payment, Reply, Tenant, User, GmailCredential, utc_now
+from app.core.models import AgentRun, Campaign, Email, Followup, Job, Lead, Payment, Reply, Tenant, User, GmailCredential, VoiceCall, utc_now
 from app.core.tenant import assert_same_tenant
 from app.db.base import deserialize_model, serialize_model
 
@@ -117,6 +118,20 @@ class InMemoryReplyRepository(InMemoryTenantScopedRepository, ReplyRepository):
 
     def list_for_lead(self, tenant_id: str, lead_id: str) -> Sequence[Reply]:
         return [item for item in self.list(tenant_id) if item.lead_id == lead_id]
+
+
+class InMemoryVoiceCallRepository(InMemoryTenantScopedRepository, VoiceCallRepository):
+    def __init__(self) -> None:
+        super().__init__(VoiceCall)
+
+    def find_by_provider_call_id(self, provider_call_id: str) -> Optional[VoiceCall]:
+        normalized = str(provider_call_id or "").strip()
+        if not normalized:
+            return None
+        for item in self.list_all():
+            if item.provider_call_id == normalized:
+                return item
+        return None
 
 
 class InMemoryFollowupRepository(InMemoryTenantScopedRepository, FollowupRepository):

@@ -33,7 +33,7 @@ class Tenant(TenantScopedModel):
     slug: str = ""
     status: str = "active"
     is_active: bool = True
-    subscription_plan: str = "Starter"
+    subscription_plan: str = "Free"
     subscription_status: str = "active"
     settings: Dict[str, Any] = field(default_factory=dict)
 
@@ -140,6 +140,25 @@ class Reply(TenantScopedModel):
     sentiment: str = ""
     lead_temperature: str = ""
     received_at: Optional[datetime] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class VoiceCall(TenantScopedModel):
+    lead_id: str = ""
+    user_id: str = ""
+    provider: str = "vapi"
+    provider_call_id: str = ""
+    phone_number: str = ""
+    direction: str = "outbound"
+    status: str = "pending"
+    outcome: str = ""
+    duration_seconds: int = 0
+    started_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
+    transcript: str = ""
+    summary: str = ""
+    recording_url: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 

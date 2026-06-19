@@ -66,6 +66,9 @@ class Settings:
     google_auth_client_id: str = Field(default="", alias="GOOGLE_AUTH_CLIENT_ID")
     google_auth_client_secret: str = Field(default="", alias="GOOGLE_AUTH_CLIENT_SECRET")
     google_auth_redirect_uri: str = Field(default="", alias="GOOGLE_AUTH_REDIRECT_URI")
+    vapi_api_key: str = Field(default="", alias="VAPI_API_KEY")
+    vapi_assistant_id: str = Field(default="", alias="VAPI_ASSISTANT_ID")
+    vapi_base_url: str = Field(default="https://api.vapi.ai", alias="VAPI_BASE_URL")
     frontend_base_url: str = dataclass_field(
         default_factory=lambda: os.getenv("FRONTEND_BASE_URL", os.getenv("APP_FRONTEND_URL", ""))
     )

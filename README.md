@@ -38,6 +38,17 @@ DATABASE_ECHO=false
 - Every API request must resolve a `tenant_id` before accessing application services.
 - Request-scoped tenant middleware and DB session guards block cross-tenant access.
 
+## Manual Voice Agent test
+
+Developer-only checklist for verifying a real single Vapi call:
+
+- Set `VAPI_API_KEY`.
+- Set `VAPI_ASSISTANT_ID`.
+- Confirm the target lead belongs to your tenant and has a verified test phone number.
+- Call `POST /voice/call/{lead_id}` with an authenticated tenant user token.
+- Expect the verified phone to ring.
+- Confirm the response includes `call_id`, `vapi_call_id`, and `status`.
+
 ## Legacy lead pipeline agents
 
 `leads.py` now routes the lead workflow through JSON-in/JSON-out agents:

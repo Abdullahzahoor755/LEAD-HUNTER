@@ -22,6 +22,7 @@ from app.core.interfaces import (
     TenantRepository,
     UserRepository,
     GmailCredentialRepository,
+    VoiceCallRepository,
 )
 from app.core.models import TenantContext
 from app.core.tenant import assert_same_tenant, get_current_tenant, resolve_tenant_context
@@ -37,6 +38,7 @@ from app.db.memory import (
     InMemoryTenantRepository,
     InMemoryUserRepository,
     InMemoryGmailCredentialRepository,
+    InMemoryVoiceCallRepository,
 )
 from app.repositories.sqlalchemy import build_async_repositories
 
@@ -49,6 +51,7 @@ class DatabaseSession:
     leads: LeadRepository
     emails: EmailRepository
     replies: ReplyRepository
+    voice_calls: VoiceCallRepository
     followups: FollowupRepository
     agent_runs: AgentRunRepository
     jobs: JobRepository
@@ -105,6 +108,7 @@ class AsyncDatabaseSession:
     leads: Any
     emails: Any
     replies: Any
+    voice_calls: Any
     followups: Any
     agent_runs: Any
     jobs: Any
@@ -160,6 +164,7 @@ def build_memory_session() -> DatabaseSession:
         leads=InMemoryLeadRepository(),
         emails=InMemoryEmailRepository(),
         replies=InMemoryReplyRepository(),
+        voice_calls=InMemoryVoiceCallRepository(),
         followups=InMemoryFollowupRepository(),
         agent_runs=InMemoryAgentRunRepository(),
         jobs=InMemoryJobRepository(),

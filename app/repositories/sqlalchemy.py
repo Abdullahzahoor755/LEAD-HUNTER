@@ -9,7 +9,7 @@ from typing import Any, Generic, Iterable, Optional, Sequence, TypeVar
 from sqlalchemy import Select, and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.models import AgentRun, Campaign, Email, Followup, Job, Lead, Payment, Reply, Tenant, User, GmailCredential
+from app.core.models import AgentRun, Campaign, Email, Followup, Job, Lead, Payment, Reply, Tenant, User, GmailCredential, VoiceCall
 from app.models.sqlalchemy import (
     AgentRunRecord,
     CampaignRecord,
@@ -22,6 +22,7 @@ from app.models.sqlalchemy import (
     TenantRecord,
     UserRecord,
     GmailCredentialRecord,
+    VoiceCallRecord,
 )
 
 T = TypeVar("T")
@@ -169,6 +170,21 @@ class AsyncReplyRepository(AsyncRepository[Reply, ReplyRecord]):
         return [self._to_model(item) for item in result.scalars().all()]
 
 
+class AsyncVoiceCallRepository(AsyncRepository[VoiceCall, VoiceCallRecord]):
+    record_type = VoiceCallRecord
+    model_type = VoiceCall
+
+    async def find_by_provider_call_id(self, provider_call_id: str) -> Optional[VoiceCall]:
+        normalized = str(provider_call_id or "").strip()
+        if not normalized:
+            return None
+        result = await self.session.execute(
+            select(VoiceCallRecord).where(VoiceCallRecord.provider_call_id == normalized).limit(1)
+        )
+        record = result.scalar_one_or_none()
+        return self._to_model(record) if record else None
+
+
 class AsyncFollowupRepository(AsyncRepository[Followup, FollowupRecord]):
     record_type = FollowupRecord
     model_type = Followup
@@ -308,6 +324,7 @@ def build_async_repositories(session: AsyncSession) -> dict[str, object]:
         "leads": AsyncLeadRepository(session),
         "emails": AsyncEmailRepository(session),
         "replies": AsyncReplyRepository(session),
+        "voice_calls": AsyncVoiceCallRepository(session),
         "followups": AsyncFollowupRepository(session),
         "agent_runs": AsyncAgentRunRepository(session),
         "jobs": AsyncJobRepository(session),

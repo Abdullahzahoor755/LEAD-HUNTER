@@ -181,10 +181,12 @@ def build_postgres_session() -> DatabaseSession:
         leads=_AsyncLeadRepositoryProxy("leads"),
         emails=_AsyncEmailRepositoryProxy("emails"),
         replies=_AsyncReplyRepositoryProxy("replies"),
+        voice_calls=_AsyncRepositoryProxy("voice_calls"),
         followups=_AsyncFollowupRepositoryProxy("followups"),
         agent_runs=_AsyncRepositoryProxy("agent_runs"),
         jobs=_AsyncJobRepositoryProxy("jobs"),
         payments=_AsyncPaymentRepositoryProxy("payments"),
+        gmail_credentials=_AsyncRepositoryProxy("gmail_credentials"),
     )
 
 
