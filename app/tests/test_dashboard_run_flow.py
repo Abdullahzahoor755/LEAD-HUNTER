@@ -569,6 +569,21 @@ def test_sidebar_shows_admin_for_admin_role(monkeypatch) -> None:
     assert "Admin Panel" in module_options
 
 
+def test_sidebar_shows_admin_for_top_level_session_role(monkeypatch) -> None:
+    import dashboard
+
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["auth"] = {"tenant_id": "mian755", "email": ""}
+    fake_st.session_state["user_role"] = "admin"
+    monkeypatch.setattr(dashboard, "st", fake_st)
+    monkeypatch.setattr(dashboard, "st_autorefresh", None)
+
+    dashboard.render_sidebar_navigation()
+
+    module_options = [label.replace("● ", "") for label, kwargs in fake_st.sidebar.button_calls if str(kwargs.get("key", "")).startswith("nav_")]
+    assert "Admin Panel" in module_options
+
+
 def test_sidebar_hides_admin_for_member_role(monkeypatch) -> None:
     import dashboard
 
@@ -655,9 +670,18 @@ def test_auth_role_supports_common_response_shapes(monkeypatch) -> None:
         {"user": {"role": "admin"}},
         {"user_role": "admin"},
         {"is_admin": True},
+        {"admin": True},
     ):
         fake_st.session_state["auth"] = payload
         assert dashboard.is_admin_user() is True
+
+    fake_st.session_state["auth"] = {}
+    fake_st.session_state["role"] = "admin"
+    assert dashboard.is_admin_user() is True
+
+    fake_st.session_state["role"] = ""
+    fake_st.session_state["user_role"] = "admin"
+    assert dashboard.is_admin_user() is True
 
 
 def test_outreach_error_helper_maps_unknown_failure() -> None:

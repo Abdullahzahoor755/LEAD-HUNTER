@@ -165,7 +165,7 @@ def extract_auth_role(auth: Dict[str, Any], include_token: bool = True) -> str:
         if role:
             return role
 
-    is_admin = auth.get("is_admin")
+    is_admin = auth.get("is_admin", auth.get("admin"))
     if isinstance(is_admin, bool):
         return "admin" if is_admin else ""
     if str(is_admin or "").strip().lower() in {"1", "true", "yes", "admin"}:
@@ -1537,7 +1537,16 @@ def api_request(method: str, path: str, **kwargs: Any) -> httpx.Response:
 
 def get_auth_role() -> str:
     auth = st.session_state.get("auth", {}) or {}
-    return extract_auth_role(auth)
+    role = extract_auth_role(auth)
+    if role:
+        return role
+
+    session_payload: Dict[str, Any] = {}
+    for key in ("role", "user_role", "is_admin", "admin", "user"):
+        value = st.session_state.get(key)
+        if value not in (None, ""):
+            session_payload[key] = value
+    return extract_auth_role(session_payload, include_token=False)
 
 
 def is_admin_user() -> bool:
