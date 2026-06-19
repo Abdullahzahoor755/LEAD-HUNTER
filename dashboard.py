@@ -5,7 +5,7 @@ Streamlit analytics dashboard backed by PostgreSQL.
 from __future__ import annotations
 
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import html
 import mimetypes
 import os
@@ -86,6 +86,7 @@ def bootstrap_dashboard_state() -> None:
     st.session_state.setdefault("whatsapp_sales_kit", {})
     st.session_state.setdefault("whatsapp_sales_source", "")
     st.session_state.setdefault("mini_agency_plan", {})
+    st.session_state.setdefault("auth_validated_token", "")
 
 
 PLAN_DETAILS: Dict[str, Dict[str, Any]] = {
@@ -247,12 +248,73 @@ def consume_google_auth_redirect() -> None:
             st.session_state["latest_subscription"] = {}
             st.session_state["plan_onboarding_seen"] = ""
             clear_google_auth_query_params()
+            persist_auth_to_query(st.session_state["auth"])
             st.rerun()
             return
         st.session_state["google_auth_error"] = "Google sign in did not return a session token."
     elif status == "error":
         st.session_state["google_auth_error"] = query_param_value(params, "message") or "Google sign in failed safely."
     clear_google_auth_query_params()
+
+
+def persist_auth_to_query(auth: Dict[str, Any]) -> None:
+    token = str(auth.get("token", "") or "").strip()
+    if not token:
+        return
+    try:
+        st.query_params["auth_token"] = token
+    except Exception:
+        try:
+            st.experimental_set_query_params(auth_token=token)
+        except Exception:
+            return
+
+
+def hydrate_auth_from_query() -> None:
+    auth = st.session_state.get("auth", {}) or {}
+    if auth.get("token"):
+        return
+    token = query_param_value(current_query_params(), "auth_token").strip()
+    if token:
+        st.session_state["auth"] = normalize_auth_payload({"token": token})
+
+
+def clear_auth_state() -> None:
+    st.session_state["auth"] = {}
+    st.session_state["latest_subscription"] = {}
+    st.session_state["plan_onboarding_seen"] = ""
+    st.session_state["auth_validated_token"] = ""
+    try:
+        if "auth_token" in st.query_params:
+            del st.query_params["auth_token"]
+    except Exception:
+        pass
+
+
+def validate_current_auth() -> bool:
+    auth = st.session_state.get("auth", {}) or {}
+    token = str(auth.get("token", "") or "").strip()
+    if not token:
+        return False
+    if st.session_state.get("auth_validated_token") == token and auth.get("tenant_id"):
+        return True
+    try:
+        response = api_request("GET", "/dashboard/snapshot", timeout=12)
+    except Exception:
+        return bool(auth.get("tenant_id"))
+    if response.status_code in {401, 403}:
+        clear_auth_state()
+        return False
+    if not response.is_success:
+        return bool(auth.get("tenant_id"))
+    payload = parse_api_json(response)
+    normalized = normalize_auth_payload(auth)
+    if payload.get("tenant_id"):
+        normalized["tenant_id"] = str(payload.get("tenant_id"))
+    st.session_state["auth"] = normalized
+    st.session_state["auth_validated_token"] = token
+    persist_auth_to_query(normalized)
+    return bool(normalized.get("tenant_id"))
 
 
 def start_google_auth_flow() -> None:
@@ -1528,8 +1590,10 @@ def render_empty_state(title: str, message: str, action_label: str | None = None
 
 def require_login() -> TenantContext | None:
     consume_google_auth_redirect()
+    hydrate_auth_from_query()
     auth = st.session_state.get("auth", {})
-    if auth.get("tenant_id"):
+    if auth.get("token") and validate_current_auth():
+        auth = st.session_state.get("auth", {}) or {}
         return TenantContext(
             tenant_id=str(auth["tenant_id"]),
             user_id=str(auth.get("user_id", "")),
@@ -1610,6 +1674,7 @@ def require_login() -> TenantContext | None:
                     st.session_state["auth"] = normalize_auth_payload(payload)
                     st.session_state["latest_subscription"] = {}
                     st.session_state["plan_onboarding_seen"] = ""
+                    persist_auth_to_query(st.session_state["auth"])
                     st.rerun()
                 except Exception as error:
                     st.error(str(error))
@@ -1650,6 +1715,7 @@ def require_login() -> TenantContext | None:
                     st.session_state["auth"] = normalize_auth_payload(payload)
                     st.session_state["latest_subscription"] = {}
                     st.session_state["plan_onboarding_seen"] = ""
+                    persist_auth_to_query(st.session_state["auth"])
                     st.rerun()
                 except Exception as error:
                     st.error(str(error))
@@ -1746,14 +1812,15 @@ STANDARD_LEAD_EXPORT_COLUMNS = [
 ]
 
 
-def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
+@st.cache_data(ttl=45, show_spinner=False)
+def load_dashboard_data(_tenant: TenantContext | None = None, limit: int = 50) -> pd.DataFrame:
     response = api_request("GET", "/leads?include_agency_kit=true")
     payload = response.json()
     if not response.is_success:
         raise RuntimeError(str(payload.get("detail", "Could not load leads.")))
     items = payload.get("items", [])
     rows = []
-    for item in items:
+    for item in items[: max(1, int(limit or 50))]:
         rows.append(
             {
                 "id": str(item.get("id", "") or "").strip(),
@@ -1829,6 +1896,15 @@ def load_dashboard_data(tenant: TenantContext) -> pd.DataFrame:
     ]
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def load_dashboard_snapshot_cached() -> Dict[str, Any]:
+    response = api_request("GET", "/dashboard/snapshot")
+    snapshot = parse_api_json(response, "DASHBOARD_SNAPSHOT_FAILED")
+    if not response.is_success:
+        raise RuntimeError(str(snapshot.get("detail", "Could not load dashboard snapshot.")))
+    return snapshot
+
+
 def filtered_frame(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame
@@ -1882,6 +1958,11 @@ def enqueue_job(agent_name: str, payload: Dict[str, Any] | None = None, *, run_n
     body = parse_api_json(response)
     if not response.is_success:
         raise RuntimeError(str(body.get("detail", f"Could not enqueue {agent_name}.")))
+    try:
+        load_recent_jobs.clear()
+        load_dashboard_snapshot_cached.clear()
+    except Exception:
+        pass
     result: Dict[str, Any] = {"queued": body}
     if run_now:
         try:
@@ -1935,6 +2016,33 @@ def load_job_events(job_id: str) -> List[Dict[str, Any]]:
     return list(body.get("events", []) or [])
 
 
+def parse_datetime_value(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def is_active_lead_generation_job(job: Dict[str, Any], now: datetime | None = None) -> bool:
+    if str(job.get("job_type") or job.get("name") or "").strip() != "lead_generation":
+        return False
+    if str(job.get("status", "") or "").strip().lower() not in {"queued", "running"}:
+        return False
+    updated_at = parse_datetime_value(job.get("updated_at") or job.get("created_at"))
+    if updated_at is None:
+        return True
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current.astimezone(timezone.utc) - updated_at <= timedelta(minutes=30)
+
+
 def render_active_lead_generation_job() -> bool:
     job_id = str(st.session_state.get("active_lead_generation_job_id", "") or "").strip()
     if not job_id:
@@ -1946,7 +2054,13 @@ def render_active_lead_generation_job() -> bool:
         return False
 
     normalized_status = str(status.get("status", "") or "").strip().lower()
-    active = normalized_status in {"queued", "running"}
+    active = is_active_lead_generation_job(
+        {
+            "job_type": "lead_generation",
+            "status": normalized_status,
+            "updated_at": status.get("updated_at") or status.get("created_at"),
+        }
+    )
     progress = int(status.get("progress_percentage", 0) or 0)
     current_stage = str(status.get("current_stage", "") or normalized_status or "queued").strip()
     st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
@@ -1976,6 +2090,10 @@ def render_active_lead_generation_job() -> bool:
         st.rerun()
     elif normalized_status == "failed":
         st.error(str(status.get("message") or status.get("error") or "Lead generation failed safely."))
+        st.session_state["active_lead_generation_job_id"] = ""
+        st.session_state["lead_generation_busy"] = False
+    elif normalized_status in {"queued", "running"} and not active:
+        st.info("No active jobs.")
         st.session_state["active_lead_generation_job_id"] = ""
         st.session_state["lead_generation_busy"] = False
     elif active:
@@ -2228,12 +2346,13 @@ def render_actions(tenant: TenantContext) -> None:
     st.markdown("</div></div>", unsafe_allow_html=True)
 
 
-def load_recent_jobs() -> List[Dict[str, Any]]:
+@st.cache_data(ttl=30, show_spinner=False)
+def load_recent_jobs(limit: int = 10) -> List[Dict[str, Any]]:
     try:
         response = api_request("GET", "/jobs/recent")
         payload = parse_api_json(response)
         if response.is_success:
-            return list(payload.get("items", []) or [])
+            return list(payload.get("items", []) or [])[: max(1, int(limit or 10))]
     except Exception:
         return []
     return []
@@ -2279,9 +2398,7 @@ def render_lead_pipeline_monitor(latest_job: Dict[str, Any]) -> None:
 def render_generation_status_card(snapshot: Dict[str, Any]) -> None:
     jobs = load_recent_jobs()
     latest_job = jobs[0] if jobs else {}
-    queued_or_running = [
-        job for job in jobs if str(job.get("status", "")).strip().lower() in {"queued", "running"}
-    ]
+    queued_or_running = [job for job in jobs if is_active_lead_generation_job(job)]
     metrics = [
         ("Last job status", str(latest_job.get("status", "unknown") or "unknown").title(), "Current pipeline"),
         ("Total leads", str(int(snapshot.get("lead_count", 0) or 0)), "Saved in workspace"),
@@ -2290,7 +2407,15 @@ def render_generation_status_card(snapshot: Dict[str, Any]) -> None:
     ]
     cards = "".join(render_metric_card(label, value, hint) for label, value, hint in metrics)
     st.markdown(f'<div class="page-section"><div class="metric-card-grid">{cards}</div></div>', unsafe_allow_html=True)
-    render_lead_pipeline_monitor(latest_job)
+    if queued_or_running:
+        render_lead_pipeline_monitor(queued_or_running[0])
+    else:
+        st.caption("No active jobs.")
+    with st.expander("Recent jobs", expanded=False):
+        if jobs:
+            st.dataframe(pd.DataFrame(jobs), use_container_width=True, hide_index=True)
+        else:
+            st.caption("No recent jobs.")
     if str(latest_job.get("job_type", "")).strip() == "lead_generation":
         result = latest_job.get("result", {})
         if isinstance(result, dict) and int(result.get("saved_leads", result.get("lead_count", 0)) or 0) == 0:
@@ -3128,10 +3253,7 @@ def render_account_plan_settings() -> None:
     auth = st.session_state.get("auth", {}) or {}
     snapshot: Dict[str, Any] = {}
     try:
-        response = api_request("GET", "/dashboard/snapshot")
-        body = parse_api_json(response)
-        if response.is_success:
-            snapshot = body
+        snapshot = load_dashboard_snapshot_cached()
     except Exception:
         snapshot = {}
     st.markdown('<div class="page-section page-card"><div class="page-card-inner">', unsafe_allow_html=True)
@@ -3762,6 +3884,36 @@ def render_whatsapp_sales_kit_page(tenant: TenantContext) -> None:
     render_whatsapp_sales_output(current_whatsapp_sales_kit())
 
 
+def email_crm_default_rows(frame: pd.DataFrame, sort_order: str = "Newest first", status_filter: str = "All", limit: int = 10) -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+    filtered = frame.copy()
+    status_map = {
+        "Sent": ("outreach_status", "sent"),
+        "Failed": ("outreach_status", "failed"),
+        "Replied": ("reply_status", "replied"),
+        "No Reply": ("reply_status", "no_reply"),
+    }
+    if status_filter in status_map:
+        column, value = status_map[status_filter]
+        if column in filtered.columns:
+            statuses = filtered[column].astype(str).str.strip().str.lower()
+            filtered = filtered[statuses.ne("no_reply")] if status_filter == "Replied" else filtered[statuses.eq(value)]
+    if "created_at" in filtered.columns:
+        order = pd.to_datetime(filtered["created_at"], errors="coerce").sort_values(ascending=sort_order == "Oldest first")
+        filtered = filtered.loc[order.index]
+    return filtered.head(max(1, int(limit or 10)))
+
+
+def render_email_crm_table(title: str, frame: pd.DataFrame, columns: List[str]) -> None:
+    st.markdown(f'<div class="section-title">{html.escape(title)}</div>', unsafe_allow_html=True)
+    if frame.empty:
+        st.caption("Nothing to show.")
+        return
+    available = [column for column in columns if column in frame.columns]
+    st.dataframe(frame[available].head(10), use_container_width=True, hide_index=True)
+
+
 def render_email_crm_page(tenant: TenantContext, page: str) -> None:
     render_module_header(
         "Email CRM",
@@ -3769,10 +3921,10 @@ def render_email_crm_page(tenant: TenantContext, page: str) -> None:
     )
     normalized_page = str(page or "Generate Leads")
     if normalized_page == "Generate Leads":
-        snapshot_response = api_request("GET", "/dashboard/snapshot")
-        snapshot = parse_api_json(snapshot_response, "DASHBOARD_SNAPSHOT_FAILED")
-        if not snapshot_response.is_success:
-            st.error(str(snapshot.get("detail", "Could not load dashboard snapshot.")))
+        try:
+            snapshot = load_dashboard_snapshot_cached()
+        except Exception as error:
+            st.error(str(error))
             return
         frame = load_dashboard_data(tenant)
         render_generation_status_card(snapshot)
@@ -3788,42 +3940,49 @@ def render_email_crm_page(tenant: TenantContext, page: str) -> None:
         if not frame.empty:
             frame = frame[frame.get("verified_email", pd.Series("", index=frame.index)).astype(str).str.strip().ne("")]
         st.markdown('<div class="page-section page-card"><div class="page-card-inner dashboard-actions">', unsafe_allow_html=True)
-        st.markdown('<div class="section-title">Email-Ready Leads</div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-caption">Preview email content, queue outreach, and manually update reply status.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Email CRM</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-caption">Gmail status, outreach summary, recent emails, replies, and simple actions.</div>', unsafe_allow_html=True)
         if frame.empty:
             render_empty_state("No email-ready leads", "Generate leads with verified email addresses to use Email CRM.", "Generate Leads")
             st.markdown("</div></div>", unsafe_allow_html=True)
             return
-        st.dataframe(frame[[column for column in ["company_url", "verified_email", "outreach_status", "reply_status"] if column in frame.columns]], use_container_width=True, hide_index=True)
-        for index, row in frame.head(50).iterrows():
-            lead_id = str(row.get("id", "") or "").strip()
-            company = str(row.get("company", "") or row.get("company_url", "") or "Lead").strip()
-            with st.expander(f"{company[:90]} - {row.get('verified_email', '')}", expanded=False):
-                st.write(f"Outreach status: {row.get('outreach_status', '') or 'pending'}")
-                st.write(f"Reply status: {row.get('reply_status', '') or 'no_reply'}")
-                cols = st.columns(2)
-                with cols[0]:
-                    if st.button("Generate/Preview Email", key=f"email_preview_{lead_id}_{index}", use_container_width=True):
-                        st.info("Email preview uses the configured outreach profile when outreach is queued.")
-                with cols[1]:
-                    if st.button("Send Email", key=f"email_send_{lead_id}_{index}", use_container_width=True):
-                        enqueue_job("outreach")
-                        st.success("Email outreach queued.")
-                status_cols = st.columns(3)
-                for label, status, col in [
-                    ("Mark Replied", "replied", status_cols[0]),
-                    ("Mark Interested", "interested", status_cols[1]),
-                    ("Mark Not Interested", "not_interested", status_cols[2]),
-                ]:
-                    with col:
-                        if st.button(label, key=f"email_reply_status_{status}_{lead_id}_{index}", use_container_width=True):
-                            response = api_request("POST", f"/leads/{lead_id}/reply-status", json={"reply_status": status})
-                            payload = parse_api_json(response)
-                            if response.is_success:
-                                st.success("Reply status updated.")
-                                st.rerun()
-                            else:
-                                st.error(str(payload.get("detail", "Could not update reply status.")))
+        preflight = load_outreach_preflight()
+        sent_count = int(frame["outreach_status"].astype(str).str.lower().eq("sent").sum()) if "outreach_status" in frame.columns else 0
+        failed_count = int(frame["outreach_status"].astype(str).str.lower().eq("failed").sum()) if "outreach_status" in frame.columns else 0
+        replied_count = int(frame["reply_status"].astype(str).str.lower().ne("no_reply").sum()) if "reply_status" in frame.columns else 0
+        no_reply_count = max(0, sent_count - replied_count)
+        cards = [
+            ("Gmail Connection Status", "Connected" if preflight.get("gmail_connected") else "Not connected", str(preflight.get("gmail_status_label", "") or "")),
+            ("Sent", sent_count, "Outreach emails"),
+            ("Failed", failed_count, "Need attention"),
+            ("Replies", replied_count, "Detected replies"),
+            ("No Reply", no_reply_count, "Sent without reply"),
+        ]
+        st.markdown('<div class="metric-card-grid">' + "".join(render_metric_card(*card) for card in cards) + "</div>", unsafe_allow_html=True)
+        action_cols = st.columns(2)
+        with action_cols[0]:
+            if st.button("Send Outreach", use_container_width=True, disabled=not has_pro_features()):
+                enqueue_job("outreach")
+                st.success("Outreach job queued.")
+        with action_cols[1]:
+            if st.button("Check Replies", use_container_width=True, disabled=not has_pro_features()):
+                enqueue_job("reply_monitor", {"mode": "once"})
+                st.success("Reply check queued.")
+        filter_cols = st.columns(2)
+        with filter_cols[0]:
+            sort_order = st.selectbox("Sort", ["Newest first", "Oldest first"], key="email_crm_sort")
+        with filter_cols[1]:
+            status_filter = st.selectbox("Status", ["All", "Sent", "Failed", "Replied", "No Reply"], key="email_crm_status")
+        visible = email_crm_default_rows(frame, sort_order, status_filter, 10)
+        recent_sent = visible[visible["outreach_status"].astype(str).str.lower().eq("sent")] if "outreach_status" in visible.columns else visible.head(0)
+        recent_replies = visible[visible["reply_status"].astype(str).str.lower().ne("no_reply")] if "reply_status" in visible.columns else visible.head(0)
+        failed = visible[visible["outreach_status"].astype(str).str.lower().eq("failed")] if "outreach_status" in visible.columns else visible.head(0)
+        display_columns = ["company", "company_url", "verified_email", "outreach_status", "reply_status", "last_reply_at"]
+        render_email_crm_table("Recent Outreach Emails", recent_sent if not recent_sent.empty else visible, display_columns)
+        render_email_crm_table("Recent Replies", recent_replies, display_columns)
+        render_email_crm_table("Failed Emails Needing Attention", failed, ["company", "verified_email", "outreach_error", "outreach_status"])
+        with st.expander("Advanced / Debug details", expanded=False):
+            st.dataframe(frame.head(50), use_container_width=True, hide_index=True)
         st.markdown("</div></div>", unsafe_allow_html=True)
         return
     if normalized_page == "Outreach":
@@ -3866,10 +4025,10 @@ def render_dashboard_home(tenant: TenantContext) -> None:
         "Dashboard",
         "A simple overview of leads, outreach, replies, and active jobs.",
     )
-    snapshot_response = api_request("GET", "/dashboard/snapshot")
-    snapshot = parse_api_json(snapshot_response, "DASHBOARD_SNAPSHOT_FAILED")
-    if not snapshot_response.is_success:
-        st.error(str(snapshot.get("detail", "Could not load dashboard snapshot.")))
+    try:
+        snapshot = load_dashboard_snapshot_cached()
+    except Exception as error:
+        st.error(str(error))
         return
     frame = load_dashboard_data(tenant)
     render_generation_status_card(snapshot)
@@ -4282,13 +4441,11 @@ def render_sidebar_navigation() -> Dict[str, str]:
     render_sidebar_brand()
     st.sidebar.markdown("### Workspace")
     if st.sidebar.button("Logout", use_container_width=True):
-        st.session_state["auth"] = {}
-        st.session_state["latest_subscription"] = {}
-        st.session_state["plan_onboarding_seen"] = ""
+        clear_auth_state()
         st.rerun()
-    refresh_enabled = st.sidebar.checkbox("Auto-refresh", value=True)
+    refresh_enabled = st.sidebar.checkbox("Auto-refresh", value=False)
     if refresh_enabled and st_autorefresh:
-        st_autorefresh(interval=30_000, key="dashboard_refresh")
+        st_autorefresh(interval=45_000, key="dashboard_refresh")
 
     modules = ["Dashboard", "Generate Leads", "Leads", "Email CRM", "WhatsApp CRM", "Marketing Kit", "Billing", "Settings"]
     if is_admin_user():
@@ -4296,7 +4453,14 @@ def render_sidebar_navigation() -> Dict[str, str]:
     if st.session_state.get("sidebar_module") not in modules:
         st.session_state["sidebar_module"] = "Dashboard"
     st.sidebar.markdown("### Modules")
-    module = st.sidebar.radio("Module", modules, key="sidebar_module", label_visibility="collapsed")
+    module = str(st.session_state.get("sidebar_module") or "Dashboard")
+    for item in modules:
+        active = item == module
+        label = f"{'● ' if active else ''}{item}"
+        if st.sidebar.button(label, key=f"nav_{item}", use_container_width=True, disabled=active):
+            st.session_state["sidebar_module"] = item
+            module = item
+            st.rerun()
 
     page = module
     if module == "Marketing Kit":

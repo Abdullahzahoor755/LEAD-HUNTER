@@ -224,6 +224,29 @@ def test_email_crm_filters_to_verified_email_and_whatsapp_filters_to_valid_phone
     assert 'frame = frame[frame["phone_valid"]].copy()' in whatsapp_source
 
 
+def test_email_crm_default_rows_limit_and_filter() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "company": f"Lead {index}",
+                "created_at": f"2026-06-{index:02d}T00:00:00+00:00",
+                "outreach_status": "sent" if index % 3 else "failed",
+                "reply_status": "replied" if index % 4 == 0 else "no_reply",
+            }
+            for index in range(1, 16)
+        ]
+    )
+
+    newest = dashboard.email_crm_default_rows(frame, "Newest first", "All", 10)
+    failed = dashboard.email_crm_default_rows(frame, "Newest first", "Failed", 10)
+    oldest = dashboard.email_crm_default_rows(frame, "Oldest first", "All", 10)
+
+    assert len(newest) == 10
+    assert newest.iloc[0]["company"] == "Lead 15"
+    assert oldest.iloc[0]["company"] == "Lead 1"
+    assert set(failed["outreach_status"]) == {"failed"}
+
+
 def test_lead_sort_quality_email_ready_and_company() -> None:
     frame = pd.DataFrame(
         [

@@ -41,6 +41,7 @@ class _TabsContext:
 class _FakeStreamlit:
     def __init__(self) -> None:
         self.session_state: dict[str, Any] = {}
+        self.query_params: dict[str, Any] = {}
         self.text_input_calls: list[tuple[str, dict[str, Any]]] = []
         self.rerun_count = 0
         self.sidebar = _FakeSidebar(self)
@@ -88,16 +89,25 @@ class _FakeStreamlit:
     def dataframe(self, *args: Any, **kwargs: Any) -> None:
         return None
 
+    def cache_data(self, *args: Any, **kwargs: Any):
+        def decorator(func):
+            func.clear = lambda: None
+            return func
+
+        return decorator
+
 
 class _FakeSidebar:
     def __init__(self, app: _FakeStreamlit) -> None:
         self.app = app
         self.radio_calls: list[tuple[str, list[str], dict[str, Any]]] = []
+        self.button_calls: list[tuple[str, dict[str, Any]]] = []
 
     def markdown(self, *args: Any, **kwargs: Any) -> None:
         return None
 
     def button(self, *args: Any, **kwargs: Any) -> bool:
+        self.button_calls.append((str(args[0] if args else ""), kwargs))
         return False
 
     def checkbox(self, *args: Any, **kwargs: Any) -> bool:
@@ -243,6 +253,55 @@ def test_completed_lead_generation_job_triggers_dashboard_refresh(monkeypatch) -
     assert fake_st.session_state["active_lead_generation_job_id"] == ""
     assert fake_st.session_state["lead_generation_busy"] is False
     assert fake_st.rerun_count == 1
+
+
+def test_stale_lead_generation_job_is_not_active() -> None:
+    import dashboard
+
+    now = dashboard.datetime(2026, 6, 19, 12, 0, tzinfo=dashboard.timezone.utc)
+    stale = {
+        "job_type": "lead_generation",
+        "status": "running",
+        "updated_at": "2026-06-19T11:20:00+00:00",
+    }
+    recent = {
+        "job_type": "lead_generation",
+        "status": "queued",
+        "updated_at": "2026-06-19T11:45:00+00:00",
+    }
+    completed = {
+        "job_type": "lead_generation",
+        "status": "completed",
+        "updated_at": "2026-06-19T11:59:00+00:00",
+    }
+
+    assert dashboard.is_active_lead_generation_job(stale, now=now) is False
+    assert dashboard.is_active_lead_generation_job(recent, now=now) is True
+    assert dashboard.is_active_lead_generation_job(completed, now=now) is False
+
+
+def test_valid_query_token_survives_refresh(monkeypatch) -> None:
+    import dashboard
+
+    token = "refresh-token"
+    fake_st = _FakeStreamlit()
+    fake_st.query_params["auth_token"] = token
+    monkeypatch.setattr(dashboard, "st", fake_st)
+    monkeypatch.setattr(dashboard, "decode_jwt_token", lambda value: {"tenant_id": "tenant-refresh", "user_id": "user-refresh"} if value == token else {})
+
+    def fake_api_request(method: str, path: str, **kwargs: Any) -> _FakeResponse:
+        assert path == "/dashboard/snapshot"
+        return _FakeResponse(payload={"tenant_id": "tenant-refresh", "lead_count": 0})
+
+    monkeypatch.setattr(dashboard, "api_request", fake_api_request)
+
+    dashboard.hydrate_auth_from_query()
+    assert dashboard.validate_current_auth() is True
+
+    auth = fake_st.session_state["auth"]
+    assert auth["token"] == token
+    assert auth["tenant_id"] == "tenant-refresh"
+    assert fake_st.session_state["auth_validated_token"] == token
 
 
 @pytest.mark.anyio
@@ -506,7 +565,7 @@ def test_sidebar_shows_admin_for_admin_role(monkeypatch) -> None:
 
     dashboard.render_sidebar_navigation()
 
-    module_options = [options for label, options, _ in fake_st.sidebar.radio_calls if label == "Module"][0]
+    module_options = [label.replace("● ", "") for label, _ in fake_st.sidebar.button_calls if label != "Logout"]
     assert "Admin Panel" in module_options
 
 
@@ -520,7 +579,7 @@ def test_sidebar_hides_admin_for_member_role(monkeypatch) -> None:
 
     dashboard.render_sidebar_navigation()
 
-    module_options = [options for label, options, _ in fake_st.sidebar.radio_calls if label == "Module"][0]
+    module_options = [label.replace("● ", "") for label, _ in fake_st.sidebar.button_calls if label != "Logout"]
     assert "Admin Panel" not in module_options
 
 
@@ -535,7 +594,7 @@ def test_sidebar_uses_clean_production_navigation(monkeypatch) -> None:
 
     dashboard.render_sidebar_navigation()
 
-    module_options = [options for label, options, _ in fake_st.sidebar.radio_calls if label == "Module"][0]
+    module_options = [label.replace("● ", "") for label, _ in fake_st.sidebar.button_calls if label != "Logout"]
     assert module_options == ["Dashboard", "Generate Leads", "Leads", "Email CRM", "WhatsApp CRM", "Marketing Kit", "Billing", "Settings"]
 
     removed_items = {
@@ -559,7 +618,7 @@ def test_sidebar_uses_clean_production_navigation(monkeypatch) -> None:
 
     dashboard.render_sidebar_navigation()
 
-    marketing_modules = [options for label, options, _ in marketing_st.sidebar.radio_calls if label == "Module"][0]
+    marketing_modules = [label.replace("● ", "") for label, _ in marketing_st.sidebar.button_calls if label != "Logout"]
     assert "Marketing Kit" in marketing_modules
     assert removed_items.isdisjoint(marketing_modules)
 
