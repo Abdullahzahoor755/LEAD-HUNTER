@@ -459,6 +459,11 @@ def render_landing_styles() -> None:
         [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
             padding: 1.1rem .9rem;
         }
+        .lhai-sidebar-account-menu {
+            margin-top: 2rem;
+            padding-top: .85rem;
+            border-top: 1px solid #dceff6;
+        }
         [data-testid="stSidebar"] .stRadio [role="radiogroup"] {
             gap: .35rem;
         }
@@ -1050,6 +1055,10 @@ def render_landing_styles() -> None:
         }
         [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
             background: transparent;
+        }
+        [data-testid="stSidebar"] .lhai-sidebar-account-menu {
+            margin-top: min(22vh, 9rem);
+            border-top: 1px solid #dceff6;
         }
         [data-testid="stSidebar"] label,
         [data-testid="stSidebar"] p,
@@ -4439,18 +4448,15 @@ def render_sidebar_brand() -> None:
 
 def render_sidebar_navigation() -> Dict[str, str]:
     render_sidebar_brand()
-    st.sidebar.markdown("### Workspace")
-    if st.sidebar.button("Logout", use_container_width=True):
-        clear_auth_state()
-        st.rerun()
     refresh_enabled = st.sidebar.checkbox("Auto-refresh", value=False)
     if refresh_enabled and st_autorefresh:
         st_autorefresh(interval=45_000, key="dashboard_refresh")
 
-    modules = ["Dashboard", "Generate Leads", "Leads", "Email CRM", "WhatsApp CRM", "Marketing Kit", "Billing", "Settings"]
+    modules = ["Dashboard", "Generate Leads", "Leads", "Email CRM", "WhatsApp CRM", "Marketing Kit"]
     if is_admin_user():
         modules.append("Admin Panel")
-    if st.session_state.get("sidebar_module") not in modules:
+    account_modules = ["Billing", "Settings"]
+    if st.session_state.get("sidebar_module") not in [*modules, *account_modules]:
         st.session_state["sidebar_module"] = "Dashboard"
     st.sidebar.markdown("### Modules")
     module = str(st.session_state.get("sidebar_module") or "Dashboard")
@@ -4461,6 +4467,26 @@ def render_sidebar_navigation() -> Dict[str, str]:
             st.session_state["sidebar_module"] = item
             module = item
             st.rerun()
+
+    st.sidebar.markdown('<div class="lhai-sidebar-account-menu">', unsafe_allow_html=True)
+    auth = st.session_state.get("auth", {}) or {}
+    account_label = str(auth.get("email") or auth.get("name") or "Account & Settings").strip()
+    if len(account_label) > 28:
+        account_label = f"{account_label[:25]}..."
+    if st.sidebar.button(f"⚙️ {account_label}", key="account_settings_menu", use_container_width=True):
+        st.session_state["account_menu_open"] = not bool(st.session_state.get("account_menu_open", False))
+    if st.session_state.get("account_menu_open", False):
+        for item in account_modules:
+            active = item == module
+            label = f"{'● ' if active else ''}{item}"
+            if st.sidebar.button(label, key=f"account_nav_{item}", use_container_width=True, disabled=active):
+                st.session_state["sidebar_module"] = item
+                module = item
+                st.rerun()
+        if st.sidebar.button("Logout", key="account_logout", use_container_width=True):
+            clear_auth_state()
+            st.rerun()
+    st.sidebar.markdown("</div>", unsafe_allow_html=True)
 
     page = module
     if module == "Marketing Kit":

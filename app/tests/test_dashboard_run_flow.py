@@ -565,7 +565,7 @@ def test_sidebar_shows_admin_for_admin_role(monkeypatch) -> None:
 
     dashboard.render_sidebar_navigation()
 
-    module_options = [label.replace("● ", "") for label, _ in fake_st.sidebar.button_calls if label != "Logout"]
+    module_options = [label.replace("● ", "") for label, kwargs in fake_st.sidebar.button_calls if str(kwargs.get("key", "")).startswith("nav_")]
     assert "Admin Panel" in module_options
 
 
@@ -579,7 +579,7 @@ def test_sidebar_hides_admin_for_member_role(monkeypatch) -> None:
 
     dashboard.render_sidebar_navigation()
 
-    module_options = [label.replace("● ", "") for label, _ in fake_st.sidebar.button_calls if label != "Logout"]
+    module_options = [label.replace("● ", "") for label, kwargs in fake_st.sidebar.button_calls if str(kwargs.get("key", "")).startswith("nav_")]
     assert "Admin Panel" not in module_options
 
 
@@ -594,8 +594,8 @@ def test_sidebar_uses_clean_production_navigation(monkeypatch) -> None:
 
     dashboard.render_sidebar_navigation()
 
-    module_options = [label.replace("● ", "") for label, _ in fake_st.sidebar.button_calls if label != "Logout"]
-    assert module_options == ["Dashboard", "Generate Leads", "Leads", "Email CRM", "WhatsApp CRM", "Marketing Kit", "Billing", "Settings"]
+    module_options = [label.replace("● ", "") for label, kwargs in fake_st.sidebar.button_calls if str(kwargs.get("key", "")).startswith("nav_")]
+    assert module_options == ["Dashboard", "Generate Leads", "Leads", "Email CRM", "WhatsApp CRM", "Marketing Kit"]
 
     removed_items = {
         "AI Agency Kit",
@@ -618,9 +618,30 @@ def test_sidebar_uses_clean_production_navigation(monkeypatch) -> None:
 
     dashboard.render_sidebar_navigation()
 
-    marketing_modules = [label.replace("● ", "") for label, _ in marketing_st.sidebar.button_calls if label != "Logout"]
+    marketing_modules = [label.replace("● ", "") for label, kwargs in marketing_st.sidebar.button_calls if str(kwargs.get("key", "")).startswith("nav_")]
     assert "Marketing Kit" in marketing_modules
     assert removed_items.isdisjoint(marketing_modules)
+
+
+def test_sidebar_account_menu_contains_billing_settings_and_logout(monkeypatch) -> None:
+    import dashboard
+
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["auth"] = {"tenant_id": "tenant-user", "email": "member@example.test", "role": "member"}
+    fake_st.session_state["account_menu_open"] = True
+    monkeypatch.setattr(dashboard, "st", fake_st)
+    monkeypatch.setattr(dashboard, "st_autorefresh", None)
+
+    dashboard.render_sidebar_navigation()
+
+    main_modules = [label.replace("● ", "") for label, kwargs in fake_st.sidebar.button_calls if str(kwargs.get("key", "")).startswith("nav_")]
+    account_items = [label.replace("● ", "") for label, kwargs in fake_st.sidebar.button_calls if str(kwargs.get("key", "")).startswith("account_nav_")]
+    all_labels = [label for label, _ in fake_st.sidebar.button_calls]
+
+    assert "Billing" not in main_modules
+    assert "Settings" not in main_modules
+    assert account_items == ["Billing", "Settings"]
+    assert "Logout" in all_labels
 
 
 def test_auth_role_supports_common_response_shapes(monkeypatch) -> None:
