@@ -6,6 +6,8 @@ import httpx
 import pytest
 
 from app.api.app import create_fastapi_app
+from app.agents.base import AgentRequest
+from app.agents.voice_outreach import VoiceOutreachAgent
 from app.core.models import Lead, TenantContext, VoiceCall
 from app.db.session import build_memory_session
 from app.providers.vapi.client import VapiCallError
@@ -414,13 +416,138 @@ async def test_voice_call_logs_and_errors_do_not_expose_vapi_api_key(
     assert secret not in calls[0].summary
 
 
+def test_voice_outreach_agent_registered() -> None:
+    from app.workers.runner import build_agent_registry
+
+    registry = build_agent_registry()
+    assert "voice_outreach" in list(registry.list_names())
+    assert registry.get("voice_outreach").name == "voice_outreach"
+
+
 @pytest.mark.anyio
-async def test_voice_campaign_endpoint_is_pending() -> None:
+async def test_voice_campaign_requires_auth() -> None:
     app = create_fastapi_app(db=build_memory_session())
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        auth = await _signup(client, "tenant-voice-campaign-pending")
-        response = await client.post("/voice/campaign", headers=_auth_headers(auth["token"]))
+        response = await client.post("/voice/campaign", json={"lead_ids": ["lead-1"]})
 
-    assert response.status_code == 501
-    assert response.json()["detail"] == "Voice calling foundation added; implementation pending."
+    assert response.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_voice_campaign_empty_lead_ids_returns_422() -> None:
+    app = create_fastapi_app(db=build_memory_session())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        auth = await _signup(client, "tenant-voice-campaign-empty")
+        response = await client.post("/voice/campaign", headers=_auth_headers(auth["token"]), json={"lead_ids": []})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "At least one lead_id is required."
+
+
+@pytest.mark.anyio
+async def test_voice_campaign_more_than_five_leads_returns_422() -> None:
+    app = create_fastapi_app(db=build_memory_session())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        auth = await _signup(client, "tenant-voice-campaign-too-many")
+        response = await client.post(
+            "/voice/campaign",
+            headers=_auth_headers(auth["token"]),
+            json={"lead_ids": ["1", "2", "3", "4", "5", "6"]},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Voice campaigns are limited to 5 leads in this phase."
+
+
+@pytest.mark.anyio
+async def test_voice_campaign_valid_request_enqueues_voice_outreach_job() -> None:
+    db = build_memory_session()
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        auth = await _signup(client, "tenant-voice-campaign-valid")
+        response = await client.post(
+            "/voice/campaign",
+            headers=_auth_headers(auth["token"]),
+            json={"lead_ids": ["lead-1", "lead-2"], "max_calls": 2},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "queued"
+    assert payload["agent_name"] == "voice_outreach"
+    jobs = db.jobs.list(auth["tenant_id"])
+    assert len(jobs) == 1
+    assert jobs[0].name == "voice_outreach"
+    assert jobs[0].payload == {"lead_ids": ["lead-1", "lead-2"], "max_calls": 2}
+
+
+@pytest.mark.anyio
+async def test_voice_outreach_agent_skips_leads_without_phone(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.providers.vapi.client import VapiClient
+
+    async def fail_if_called(self, *, phone_number: str, lead_id: str = "", metadata: dict | None = None) -> dict:
+        raise AssertionError("Vapi should not be called for leads without phone numbers")
+
+    monkeypatch.setattr(VapiClient, "create_call", fail_if_called)
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-agent-skip", user_id="user-agent-skip")
+    lead = db.for_tenant(tenant).save("leads", Lead(tenant_id=tenant.tenant_id, phone=""))
+
+    result = await VoiceOutreachAgent().run(AgentRequest(tenant=tenant, payload={"lead_ids": [lead.id]}), db)
+
+    assert result["processed"] == 1
+    assert result["skipped"] == 1
+    assert result["results"][0]["reason"] == "missing_phone"
+    assert db.voice_calls.list(tenant.tenant_id) == []
+
+
+@pytest.mark.anyio
+async def test_voice_outreach_agent_one_failed_call_does_not_fail_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.providers.vapi.client import VapiClient
+
+    async def fake_create_call(self, *, phone_number: str, lead_id: str = "", metadata: dict | None = None) -> dict:
+        if lead_id == failed_lead.id:
+            raise VapiCallError("Provider failed safely.")
+        return {"id": f"vapi-{lead_id}", "status": "queued"}
+
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-agent-partial", user_id="user-agent-partial")
+    failed_lead = db.for_tenant(tenant).save("leads", Lead(tenant_id=tenant.tenant_id, phone="+15550000001"))
+    good_lead = db.for_tenant(tenant).save("leads", Lead(tenant_id=tenant.tenant_id, phone="+15550000002"))
+    monkeypatch.setattr(VapiClient, "create_call", fake_create_call)
+
+    result = await VoiceOutreachAgent().run(
+        AgentRequest(tenant=tenant, payload={"lead_ids": [failed_lead.id, good_lead.id]}),
+        db,
+    )
+
+    assert result["status"] == "completed"
+    assert result["failed"] == 1
+    assert result["started"] == 1
+    calls = db.voice_calls.list(tenant.tenant_id)
+    assert sorted(call.status for call in calls) == ["active", "failed"]
+
+
+@pytest.mark.anyio
+async def test_voice_outreach_agent_preserves_tenant_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.providers.vapi.client import VapiClient
+
+    async def fail_if_called(self, *, phone_number: str, lead_id: str = "", metadata: dict | None = None) -> dict:
+        raise AssertionError("Vapi should not be called for another tenant's lead")
+
+    monkeypatch.setattr(VapiClient, "create_call", fail_if_called)
+    db = build_memory_session()
+    tenant_a = TenantContext(tenant_id="tenant-agent-a", user_id="user-a")
+    tenant_b = TenantContext(tenant_id="tenant-agent-b", user_id="user-b")
+    other_lead = db.for_tenant(tenant_b).save("leads", Lead(tenant_id=tenant_b.tenant_id, phone="+15550000003"))
+
+    result = await VoiceOutreachAgent().run(AgentRequest(tenant=tenant_a, payload={"lead_ids": [other_lead.id]}), db)
+
+    assert result["skipped"] == 1
+    assert result["results"][0]["reason"] == "lead_not_found"
+    assert db.voice_calls.list(tenant_a.tenant_id) == []
+    assert db.voice_calls.list(tenant_b.tenant_id) == []

@@ -7,6 +7,7 @@ from app.agents.outreach import OutreachAgent
 from app.agents.followup import FollowupAgent
 from app.agents.registry import AgentRegistry
 from app.agents.reply_monitor import ReplyMonitorAgent
+from app.agents.voice_outreach import VoiceOutreachAgent
 from app.db.session import DatabaseSession
 from app.workers.jobs import AsyncJobQueue
 
@@ -17,6 +18,7 @@ def build_agent_registry() -> AgentRegistry:
     registry.register(OutreachAgent())
     registry.register(FollowupAgent())
     registry.register(ReplyMonitorAgent())
+    registry.register(VoiceOutreachAgent())
     return registry
 
 

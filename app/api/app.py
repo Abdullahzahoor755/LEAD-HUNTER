@@ -187,6 +187,11 @@ class JobRequest(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
+class VoiceCampaignRequest(BaseModel):
+    lead_ids: list[str] = Field(default_factory=list)
+    max_calls: int = 5
+
+
 class AgencyKitBulkRequest(BaseModel):
     lead_ids: list[str] = Field(default_factory=list)
 
@@ -1668,9 +1673,40 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         return {"call_id": voice_call.id, "vapi_call_id": voice_call.provider_call_id, "status": voice_call.status}
 
     @app.post("/voice/campaign")
-    async def create_voice_campaign(request: Request) -> None:
-        _ = request
-        voice_pending_response()
+    async def create_voice_campaign(
+        payload: VoiceCampaignRequest,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        lead_ids = []
+        seen_lead_ids: set[str] = set()
+        for item in payload.lead_ids:
+            lead_id = str(item or "").strip()
+            if lead_id and lead_id not in seen_lead_ids:
+                seen_lead_ids.add(lead_id)
+                lead_ids.append(lead_id)
+        if not lead_ids:
+            raise HTTPException(status_code=422, detail="At least one lead_id is required.")
+        if len(lead_ids) > 5:
+            raise HTTPException(status_code=422, detail="Voice campaigns are limited to 5 leads in this phase.")
+        max_calls = max(1, min(5, int(payload.max_calls or 5)))
+        job = await JobService(db_session).enqueue(
+            tenant,
+            name="voice_outreach",
+            payload={"lead_ids": lead_ids, "max_calls": max_calls},
+        )
+        await app.state.queue.register(job.id)
+        if isinstance(db_session, AsyncDatabaseSession):
+            await db_session.session.commit()
+        LOGGER.info(
+            "voice_campaign_queued tenant_id=%s job_id=%s lead_count=%s max_calls=%s",
+            tenant.tenant_id,
+            job.id,
+            len(lead_ids),
+            max_calls,
+        )
+        return {"job_id": job.id, "status": "queued", "agent_name": "voice_outreach"}
 
     @app.get("/voice/calls")
     async def list_voice_calls(request: Request) -> None:
