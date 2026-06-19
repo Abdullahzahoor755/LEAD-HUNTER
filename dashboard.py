@@ -2773,11 +2773,32 @@ def render_whatsapp_crm_page(tenant: TenantContext) -> None:
 @st.cache_data(ttl=20, show_spinner=False)
 def load_voice_calls(_tenant: TenantContext | None = None, limit: int = 50) -> List[Dict[str, Any]]:
     response = api_request("GET", f"/voice/calls?limit={max(1, min(100, int(limit or 50)))}")
-    payload = response.json()
+    payload = safe_voice_api_json(response)
+    if payload is None:
+        st.warning("Voice Calls API is not available right now.")
+        return []
     if not response.is_success:
-        raise RuntimeError(str(payload.get("detail", "Could not load voice calls.")))
+        st.warning(str(payload.get("detail", "Voice Calls API is not available right now.")))
+        return []
     items = payload.get("items", [])
     return list(items) if isinstance(items, list) else []
+
+
+def safe_voice_api_json(response: httpx.Response) -> Dict[str, Any] | None:
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    headers = getattr(response, "headers", {}) or {}
+    content_type = str(headers.get("content-type", "") if hasattr(headers, "get") else "").lower()
+    if "application/json" not in content_type:
+        safe_text = str(getattr(response, "text", "") or "")[:160]
+        print(f"Voice Calls API unavailable status={status_code} body={safe_text!r}")
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        safe_text = str(getattr(response, "text", "") or "")[:160]
+        print(f"Voice Calls API invalid JSON status={status_code} body={safe_text!r}")
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def render_voice_calls_page(tenant: TenantContext) -> None:
@@ -2799,11 +2820,7 @@ def render_voice_calls_page(tenant: TenantContext) -> None:
         unsafe_allow_html=True,
     )
 
-    try:
-        calls = load_voice_calls(tenant, 50)
-    except Exception as error:
-        st.warning(f"Could not load voice calls: {error}")
-        calls = []
+    calls = load_voice_calls(tenant, 50)
 
     metrics = [
         render_metric_card("Total Calls", len(calls)),
@@ -2844,9 +2861,15 @@ def render_voice_calls_page(tenant: TenantContext) -> None:
         if selected_call_id:
             try:
                 detail_response = api_request("GET", f"/voice/calls/{selected_call_id}", timeout=8)
-                detail = detail_response.json()
+                detail = safe_voice_api_json(detail_response)
+                if detail is None:
+                    raise RuntimeError("Voice Calls API is not available right now.")
+                if detail_response.status_code in {401, 403}:
+                    raise RuntimeError("You are not authorized to view this voice call.")
+                if detail_response.status_code == 404:
+                    raise RuntimeError("Voice call was not found.")
                 if not detail_response.is_success:
-                    raise RuntimeError(str(detail.get("detail", "Could not load voice call.")))
+                    raise RuntimeError(str(detail.get("detail", "Voice call could not be loaded right now.")))
                 with st.expander("Transcript", expanded=False):
                     st.markdown(f"**Outcome:** {html.escape(str(detail.get('outcome') or 'unknown'))}")
                     st.markdown(f"**Summary:** {html.escape(str(detail.get('summary') or ''))}")

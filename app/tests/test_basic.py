@@ -520,6 +520,19 @@ async def test_voice_calls_list_is_tenant_scoped_and_excludes_transcript() -> No
 
 
 @pytest.mark.anyio
+async def test_voice_calls_list_returns_json_on_empty_data() -> None:
+    app = create_fastapi_app(db=build_memory_session())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        auth = await _signup(client, "tenant-voice-list-empty")
+        response = await client.get("/voice/calls", headers=_auth_headers(auth["token"]))
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"items": []}
+
+
+@pytest.mark.anyio
 async def test_voice_call_detail_enforces_tenant_isolation() -> None:
     db = build_memory_session()
     app = create_fastapi_app(db=db)

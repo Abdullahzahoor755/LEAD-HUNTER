@@ -14,12 +14,16 @@ class _FakeResponse:
     is_success: bool = True
     status_code: int = 200
     headers: dict[str, str] | None = None
+    body: str = "{}"
+    json_error: bool = False
 
     @property
     def text(self) -> str:
-        return "{}"
+        return self.body
 
     def json(self) -> dict[str, Any]:
+        if self.json_error:
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
         return self.payload
 
 
@@ -718,14 +722,119 @@ def test_render_voice_calls_page_exists_and_handles_api_failure(monkeypatch) -> 
 
     monkeypatch.setattr(dashboard, "api_request", fake_api_request)
     monkeypatch.setattr(dashboard, "load_dashboard_data", lambda tenant: (_ for _ in ()).throw(RuntimeError("leads down")))
-    dashboard.load_voice_calls.clear = lambda: None
+    dashboard.load_voice_calls.clear()
 
     assert hasattr(dashboard, "render_voice_calls_page")
     dashboard.render_voice_calls_page(TenantContext(tenant_id="tenant-ui", user_id="user-ui"))
 
     warnings = [str(item[0]) for item in fake_st.warning_calls]
     assert any("Voice provider status unavailable" in item for item in warnings)
-    assert any("Could not load voice calls" in item for item in warnings)
+    assert any("Voice Calls API is not available right now." in item for item in warnings)
+
+
+def test_voice_calls_page_handles_non_json_response_safely(monkeypatch) -> None:
+    import dashboard
+    from app.core.models import TenantContext
+
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(dashboard, "st", fake_st)
+
+    def fake_api_request(method: str, path: str, **kwargs: Any) -> _FakeResponse:
+        if path.startswith("/voice/calls"):
+            return _FakeResponse(
+                payload={},
+                is_success=False,
+                status_code=502,
+                headers={"content-type": "text/html"},
+                body="<html>backend exploded</html>",
+                json_error=True,
+            )
+        return _FakeResponse(payload={"configured": False, "provider_reachable": False}, headers={"content-type": "application/json"})
+
+    monkeypatch.setattr(dashboard, "api_request", fake_api_request)
+    monkeypatch.setattr(dashboard, "load_dashboard_data", lambda tenant: (_ for _ in ()).throw(RuntimeError("leads down")))
+    dashboard.load_voice_calls.clear()
+
+    dashboard.render_voice_calls_page(TenantContext(tenant_id="tenant-ui", user_id="user-ui"))
+
+    warnings = [str(item[0]) for item in fake_st.warning_calls]
+    assert any("Voice Calls API is not available right now." in item for item in warnings)
+    assert all("Expecting value" not in item for item in warnings)
+    assert all("<html>" not in item for item in warnings)
+
+
+def test_voice_calls_page_handles_backend_500_safely(monkeypatch) -> None:
+    import dashboard
+    from app.core.models import TenantContext
+
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(dashboard, "st", fake_st)
+
+    def fake_api_request(method: str, path: str, **kwargs: Any) -> _FakeResponse:
+        if path.startswith("/voice/calls"):
+            return _FakeResponse(
+                payload={"detail": "Voice calls could not be loaded right now."},
+                is_success=False,
+                status_code=500,
+                headers={"content-type": "application/json"},
+            )
+        return _FakeResponse(payload={"configured": False, "provider_reachable": False}, headers={"content-type": "application/json"})
+
+    monkeypatch.setattr(dashboard, "api_request", fake_api_request)
+    monkeypatch.setattr(dashboard, "load_dashboard_data", lambda tenant: (_ for _ in ()).throw(RuntimeError("leads down")))
+    dashboard.load_voice_calls.clear()
+
+    dashboard.render_voice_calls_page(TenantContext(tenant_id="tenant-ui", user_id="user-ui"))
+
+    warnings = [str(item[0]) for item in fake_st.warning_calls]
+    assert any("Voice calls could not be loaded right now." in item for item in warnings)
+    assert all("Expecting value" not in item for item in warnings)
+
+
+def test_voice_call_detail_handles_non_json_response_safely(monkeypatch) -> None:
+    import dashboard
+    from app.core.models import TenantContext
+
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(dashboard, "st", fake_st)
+    monkeypatch.setattr(
+        dashboard,
+        "load_voice_calls",
+        lambda tenant, limit=50: [
+            {
+                "id": "call-1",
+                "lead_id": "lead-1",
+                "status": "completed",
+                "outcome": "unknown",
+                "summary": "",
+                "duration_seconds": 0,
+                "called_at": "",
+                "created_at": "2026-01-01T00:00:00",
+            }
+        ],
+    )
+    monkeypatch.setattr(dashboard, "load_dashboard_data", lambda tenant: (_ for _ in ()).throw(RuntimeError("leads down")))
+
+    def fake_api_request(method: str, path: str, **kwargs: Any) -> _FakeResponse:
+        if path == "/voice/calls/call-1":
+            return _FakeResponse(
+                payload={},
+                is_success=False,
+                status_code=502,
+                headers={"content-type": "text/html"},
+                body="<html>bad gateway</html>",
+                json_error=True,
+            )
+        return _FakeResponse(payload={"configured": False, "provider_reachable": False}, headers={"content-type": "application/json"})
+
+    monkeypatch.setattr(dashboard, "api_request", fake_api_request)
+
+    dashboard.render_voice_calls_page(TenantContext(tenant_id="tenant-ui", user_id="user-ui"))
+
+    warnings = [str(item[0]) for item in fake_st.warning_calls]
+    assert any("Could not load selected call: Voice Calls API is not available right now." in item for item in warnings)
+    assert all("Expecting value" not in item for item in warnings)
+    assert all("<html>" not in item for item in warnings)
 
 
 def test_auth_role_supports_common_response_shapes(monkeypatch) -> None:
