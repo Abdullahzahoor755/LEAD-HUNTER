@@ -53,7 +53,9 @@ class _FakeStreamlit:
         return None
 
     def columns(self, *args: Any, **kwargs: Any):
-        return _NullContext(), _NullContext()
+        spec = args[0] if args else 2
+        count = spec if isinstance(spec, int) else len(spec)
+        return tuple(_NullContext() for _ in range(count))
 
     def tabs(self, *args: Any, **kwargs: Any):
         return _TabsContext()
@@ -76,6 +78,19 @@ class _FakeStreamlit:
 
     def button(self, *args: Any, **kwargs: Any) -> bool:
         return False
+
+    def selectbox(self, label: str, options: list[Any], **kwargs: Any) -> Any:
+        choices = list(options)
+        return choices[0] if choices else None
+
+    def multiselect(self, label: str, options: list[Any], **kwargs: Any) -> list[Any]:
+        return []
+
+    def expander(self, *args: Any, **kwargs: Any):
+        return _NullContext()
+
+    def text_area(self, *args: Any, **kwargs: Any) -> str:
+        return str(kwargs.get("value", "") or "")
 
     def caption(self, *args: Any, **kwargs: Any) -> None:
         return None
@@ -641,7 +656,7 @@ def test_sidebar_uses_clean_production_navigation(monkeypatch) -> None:
     dashboard.render_sidebar_navigation()
 
     module_options = [label.replace("● ", "") for label, kwargs in fake_st.sidebar.button_calls if str(kwargs.get("key", "")).startswith("nav_")]
-    assert module_options == ["Dashboard", "Generate Leads", "Leads", "Email CRM", "WhatsApp CRM", "Marketing Kit"]
+    assert module_options == ["Dashboard", "Generate Leads", "Leads", "Email CRM", "WhatsApp CRM", "Marketing Kit", "Voice Calls"]
 
     removed_items = {
         "AI Agency Kit",
@@ -666,6 +681,7 @@ def test_sidebar_uses_clean_production_navigation(monkeypatch) -> None:
 
     marketing_modules = [label.replace("● ", "") for label, kwargs in marketing_st.sidebar.button_calls if str(kwargs.get("key", "")).startswith("nav_")]
     assert "Marketing Kit" in marketing_modules
+    assert "Voice Calls" in marketing_modules
     assert removed_items.isdisjoint(marketing_modules)
 
 
@@ -688,6 +704,28 @@ def test_sidebar_account_menu_contains_billing_settings_and_logout(monkeypatch) 
     assert "Settings" not in main_modules
     assert account_items == ["Billing", "Settings"]
     assert "Logout" in all_labels
+
+
+def test_render_voice_calls_page_exists_and_handles_api_failure(monkeypatch) -> None:
+    import dashboard
+    from app.core.models import TenantContext
+
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(dashboard, "st", fake_st)
+
+    def fake_api_request(method: str, path: str, **kwargs: Any) -> _FakeResponse:
+        return _FakeResponse(payload={"detail": "unavailable"}, is_success=False, status_code=503)
+
+    monkeypatch.setattr(dashboard, "api_request", fake_api_request)
+    monkeypatch.setattr(dashboard, "load_dashboard_data", lambda tenant: (_ for _ in ()).throw(RuntimeError("leads down")))
+    dashboard.load_voice_calls.clear = lambda: None
+
+    assert hasattr(dashboard, "render_voice_calls_page")
+    dashboard.render_voice_calls_page(TenantContext(tenant_id="tenant-ui", user_id="user-ui"))
+
+    warnings = [str(item[0]) for item in fake_st.warning_calls]
+    assert any("Voice provider status unavailable" in item for item in warnings)
+    assert any("Could not load voice calls" in item for item in warnings)
 
 
 def test_auth_role_supports_common_response_shapes(monkeypatch) -> None:

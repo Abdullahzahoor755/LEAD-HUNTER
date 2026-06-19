@@ -1709,14 +1709,52 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
         return {"job_id": job.id, "status": "queued", "agent_name": "voice_outreach"}
 
     @app.get("/voice/calls")
-    async def list_voice_calls(request: Request) -> None:
-        _ = request
-        voice_pending_response()
+    async def list_voice_calls(
+        request: Request,
+        limit: int = 50,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        safe_limit = max(1, min(100, int(limit or 50)))
+        calls = await maybe_await(db_session.for_tenant(tenant).list("voice_calls"))
+        sorted_calls = sorted(calls, key=lambda item: item.created_at, reverse=True)[:safe_limit]
+        return {
+            "items": [
+                {
+                    "id": call.id,
+                    "lead_id": call.lead_id,
+                    "status": call.status,
+                    "outcome": call.outcome,
+                    "summary": call.summary,
+                    "duration_seconds": call.duration_seconds,
+                    "called_at": (call.started_at or call.created_at).isoformat() if (call.started_at or call.created_at) else "",
+                    "created_at": call.created_at.isoformat() if call.created_at else "",
+                }
+                for call in sorted_calls
+            ]
+        }
 
     @app.get("/voice/calls/{call_id}")
-    async def get_voice_call(call_id: str, request: Request) -> None:
-        _ = (call_id, request)
-        voice_pending_response()
+    async def get_voice_call(
+        call_id: str,
+        request: Request,
+        db_session: DatabaseSession | AsyncDatabaseSession = Depends(get_db_dependency),
+    ) -> Dict[str, Any]:
+        tenant = request.state.tenant
+        voice_call = await maybe_await(db_session.for_tenant(tenant).get("voice_calls", call_id))
+        if voice_call is None:
+            raise HTTPException(status_code=404, detail="Voice call not found.")
+        return {
+            "id": voice_call.id,
+            "lead_id": voice_call.lead_id,
+            "status": voice_call.status,
+            "outcome": voice_call.outcome,
+            "summary": voice_call.summary,
+            "duration_seconds": voice_call.duration_seconds,
+            "called_at": (voice_call.started_at or voice_call.created_at).isoformat() if (voice_call.started_at or voice_call.created_at) else "",
+            "created_at": voice_call.created_at.isoformat() if voice_call.created_at else "",
+            "transcript": voice_call.transcript,
+        }
 
     @app.get("/billing/plans")
     async def billing_plans(

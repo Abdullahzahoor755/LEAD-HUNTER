@@ -486,6 +486,63 @@ async def test_voice_campaign_valid_request_enqueues_voice_outreach_job() -> Non
 
 
 @pytest.mark.anyio
+async def test_voice_calls_list_is_tenant_scoped_and_excludes_transcript() -> None:
+    db = build_memory_session()
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        first = await _signup(client, "tenant-voice-list-a")
+        second = await _signup(client, "tenant-voice-list-b")
+        first_tenant = TenantContext(tenant_id=first["tenant_id"], user_id=first["user_id"])
+        second_tenant = TenantContext(tenant_id=second["tenant_id"], user_id=second["user_id"])
+        db.voice_calls.save(
+            VoiceCall(
+                tenant_id=first_tenant.tenant_id,
+                lead_id="lead-a",
+                provider_call_id="vapi-a",
+                status="completed",
+                outcome="interested",
+                summary="Safe summary",
+                duration_seconds=30,
+                transcript="Sensitive transcript",
+            )
+        )
+        db.voice_calls.save(VoiceCall(tenant_id=second_tenant.tenant_id, lead_id="lead-b", provider_call_id="vapi-b"))
+        response = await client.get("/voice/calls", headers=_auth_headers(first["token"]))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["items"]) == 1
+    item = payload["items"][0]
+    assert item["lead_id"] == "lead-a"
+    assert "transcript" not in item
+    assert "Sensitive transcript" not in response.text
+
+
+@pytest.mark.anyio
+async def test_voice_call_detail_enforces_tenant_isolation() -> None:
+    db = build_memory_session()
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        first = await _signup(client, "tenant-voice-detail-a")
+        second = await _signup(client, "tenant-voice-detail-b")
+        second_tenant = TenantContext(tenant_id=second["tenant_id"], user_id=second["user_id"])
+        other_call = db.voice_calls.save(
+            VoiceCall(tenant_id=second_tenant.tenant_id, lead_id="lead-b", provider_call_id="vapi-b", transcript="Private")
+        )
+        response = await client.get(f"/voice/calls/{other_call.id}", headers=_auth_headers(first["token"]))
+        own_call = db.voice_calls.save(
+            VoiceCall(tenant_id=first["tenant_id"], lead_id="lead-a", provider_call_id="vapi-a", transcript="Own transcript")
+        )
+        own_response = await client.get(f"/voice/calls/{own_call.id}", headers=_auth_headers(first["token"]))
+
+    assert response.status_code == 404
+    assert own_response.status_code == 200
+    assert own_response.json()["transcript"] == "Own transcript"
+
+
+@pytest.mark.anyio
 async def test_voice_outreach_agent_skips_leads_without_phone(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.providers.vapi.client import VapiClient
 

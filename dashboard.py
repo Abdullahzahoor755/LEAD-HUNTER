@@ -2770,6 +2770,139 @@ def render_whatsapp_crm_page(tenant: TenantContext) -> None:
         render_whatsapp_crm_row(row, int(index) if isinstance(index, int) else 0)
 
 
+@st.cache_data(ttl=20, show_spinner=False)
+def load_voice_calls(_tenant: TenantContext | None = None, limit: int = 50) -> List[Dict[str, Any]]:
+    response = api_request("GET", f"/voice/calls?limit={max(1, min(100, int(limit or 50)))}")
+    payload = response.json()
+    if not response.is_success:
+        raise RuntimeError(str(payload.get("detail", "Could not load voice calls.")))
+    items = payload.get("items", [])
+    return list(items) if isinstance(items, list) else []
+
+
+def render_voice_calls_page(tenant: TenantContext) -> None:
+    render_page_header("Voice Calls", "Review Vapi call outcomes and start small, safe voice campaigns.", "Voice")
+    try:
+        status_response = api_request("GET", "/voice/agent/status", timeout=8)
+        status_payload = status_response.json()
+        if not status_response.is_success:
+            raise RuntimeError(str(status_payload.get("detail", "Voice provider status unavailable.")))
+    except Exception as error:
+        status_payload = {}
+        st.warning(f"Voice provider status unavailable: {error}")
+
+    st.markdown(
+        '<div class="metric-grid">'
+        + render_metric_card("Configured", "Yes" if status_payload.get("configured") else "No")
+        + render_metric_card("Provider Reachable", "Yes" if status_payload.get("provider_reachable") else "No")
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    try:
+        calls = load_voice_calls(tenant, 50)
+    except Exception as error:
+        st.warning(f"Could not load voice calls: {error}")
+        calls = []
+
+    metrics = [
+        render_metric_card("Total Calls", len(calls)),
+        render_metric_card("Interested", sum(1 for item in calls if item.get("outcome") == "interested")),
+        render_metric_card("Callbacks", sum(1 for item in calls if item.get("outcome") == "callback")),
+        render_metric_card("No Answer", sum(1 for item in calls if item.get("outcome") == "no_answer")),
+        render_metric_card("Failed", sum(1 for item in calls if item.get("status") == "failed")),
+    ]
+    st.markdown('<div class="metric-grid">' + "".join(metrics) + "</div>", unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        status_filter = st.selectbox("Status", ["All", "active", "completed", "failed", "pending"], key="voice_status_filter")
+    with c2:
+        outcome_filter = st.selectbox("Outcome", ["All", "interested", "callback", "not_interested", "no_answer", "voicemail", "unknown"], key="voice_outcome_filter")
+    with c3:
+        sort_order = st.selectbox("Sort", ["Newest first", "Oldest first"], key="voice_sort")
+
+    filtered_calls = list(calls)
+    if status_filter != "All":
+        filtered_calls = [item for item in filtered_calls if item.get("status") == status_filter]
+    if outcome_filter != "All":
+        filtered_calls = [item for item in filtered_calls if item.get("outcome") == outcome_filter]
+    filtered_calls = sorted(filtered_calls, key=lambda item: str(item.get("created_at", "")), reverse=sort_order == "Newest first")
+    visible_calls = filtered_calls[:20]
+    if visible_calls:
+        st.dataframe(
+            pd.DataFrame(visible_calls)[["id", "lead_id", "status", "outcome", "summary", "duration_seconds", "called_at"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        render_empty_state("No voice calls yet", "Start a small voice campaign from leads with phone numbers.")
+
+    call_labels = {str(item.get("id", "")): f"{item.get('status', '')} | {item.get('outcome', '') or 'unknown'} | {item.get('created_at', '')}" for item in visible_calls}
+    if call_labels:
+        selected_call_id = st.selectbox("Select a call", list(call_labels.keys()), format_func=lambda item: call_labels.get(item, item), key="voice_call_detail_id")
+        if selected_call_id:
+            try:
+                detail_response = api_request("GET", f"/voice/calls/{selected_call_id}", timeout=8)
+                detail = detail_response.json()
+                if not detail_response.is_success:
+                    raise RuntimeError(str(detail.get("detail", "Could not load voice call.")))
+                with st.expander("Transcript", expanded=False):
+                    st.markdown(f"**Outcome:** {html.escape(str(detail.get('outcome') or 'unknown'))}")
+                    st.markdown(f"**Summary:** {html.escape(str(detail.get('summary') or ''))}")
+                    transcript = str(detail.get("transcript") or "").strip()
+                    st.text_area("Transcript", value=transcript or "No transcript available.", height=220, disabled=True)
+            except Exception as error:
+                st.warning(f"Could not load selected call: {error}")
+
+    try:
+        leads_frame = load_dashboard_data(tenant)
+    except Exception as error:
+        st.warning(f"Could not load leads for voice campaign: {error}")
+        leads_frame = pd.DataFrame()
+    phone_ready = leads_frame[leads_frame["phone"].astype(str).str.strip() != ""] if not leads_frame.empty and "phone" in leads_frame else pd.DataFrame()
+    lead_labels = {
+        str(row["id"]): f"{str(row.get('company') or row.get('company_url') or row['id'])[:70]}"
+        for _, row in phone_ready.head(100).iterrows()
+        if str(row.get("id", "")).strip()
+    }
+    st.markdown('<div class="section-title">Start Voice Campaign</div>', unsafe_allow_html=True)
+    selected_leads = st.multiselect(
+        "Choose up to 5 leads with phone numbers",
+        list(lead_labels.keys()),
+        format_func=lambda item: lead_labels.get(item, item),
+        max_selections=5,
+        key="voice_campaign_leads",
+    )
+    if st.button("Start Voice Campaign", key="start_voice_campaign", use_container_width=True, disabled=not selected_leads):
+        try:
+            response = api_request("POST", "/voice/campaign", json={"lead_ids": selected_leads[:5], "max_calls": min(5, len(selected_leads))}, timeout=10)
+            payload = response.json()
+            if not response.is_success:
+                raise RuntimeError(str(payload.get("detail", "Could not start voice campaign.")))
+            load_voice_calls.clear()
+            st.success(f"Voice campaign queued: {payload.get('job_id', '')} ({payload.get('status', 'queued')})")
+        except Exception as error:
+            st.warning(f"Could not start voice campaign: {error}")
+
+    single_lead_id = st.selectbox(
+        "Single call lead",
+        [""] + list(lead_labels.keys()),
+        format_func=lambda item: "Choose a lead" if not item else lead_labels.get(item, item),
+        key="voice_single_call_lead",
+    )
+    if st.button("Start Single Call", key="start_single_voice_call", use_container_width=True, disabled=not single_lead_id):
+        try:
+            response = api_request("POST", f"/voice/call/{single_lead_id}", timeout=10)
+            payload = response.json()
+            if not response.is_success:
+                raise RuntimeError(str(payload.get("detail", "Could not start voice call.")))
+            load_voice_calls.clear()
+            st.success(f"Voice call started: {payload.get('vapi_call_id', '')}")
+        except Exception as error:
+            st.warning(f"Could not start voice call: {error}")
+
+
 def render_lead_action_buttons(row: pd.Series, index: int) -> None:
     lead_id = str(row.get("id", "") or "").strip()
     if not lead_id:
@@ -4472,7 +4605,7 @@ def render_sidebar_navigation() -> Dict[str, str]:
     if refresh_enabled and st_autorefresh:
         st_autorefresh(interval=45_000, key="dashboard_refresh")
 
-    modules = ["Dashboard", "Generate Leads", "Leads", "Email CRM", "WhatsApp CRM", "Marketing Kit"]
+    modules = ["Dashboard", "Generate Leads", "Leads", "Email CRM", "WhatsApp CRM", "Marketing Kit", "Voice Calls"]
     if is_admin_user():
         modules.append("Admin Panel")
     account_modules = ["Billing", "Settings"]
@@ -4562,6 +4695,8 @@ def main() -> None:
         render_whatsapp_crm_page(tenant)
     elif module == "Marketing Kit":
         render_marketing_campaign_page(tenant, page)
+    elif module == "Voice Calls":
+        render_voice_calls_page(tenant)
     elif module == "Billing":
         render_module_header("Billing", "Manage plans, billing, and workspace access.")
         render_billing_page()
