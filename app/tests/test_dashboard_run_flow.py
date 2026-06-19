@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
+import httpx
 import pytest
 
 
@@ -43,6 +44,8 @@ class _FakeStreamlit:
         self.session_state: dict[str, Any] = {}
         self.query_params: dict[str, Any] = {}
         self.text_input_calls: list[tuple[str, dict[str, Any]]] = []
+        self.warning_calls: list[tuple[Any, tuple[Any, ...], dict[str, Any]]] = []
+        self.info_calls: list[tuple[Any, tuple[Any, ...], dict[str, Any]]] = []
         self.rerun_count = 0
         self.sidebar = _FakeSidebar(self)
 
@@ -84,6 +87,11 @@ class _FakeStreamlit:
         return None
 
     def info(self, *args: Any, **kwargs: Any) -> None:
+        self.info_calls.append((args[0] if args else "", args, kwargs))
+        return None
+
+    def warning(self, *args: Any, **kwargs: Any) -> None:
+        self.warning_calls.append((args[0] if args else "", args, kwargs))
         return None
 
     def dataframe(self, *args: Any, **kwargs: Any) -> None:
@@ -253,6 +261,28 @@ def test_completed_lead_generation_job_triggers_dashboard_refresh(monkeypatch) -
     assert fake_st.session_state["active_lead_generation_job_id"] == ""
     assert fake_st.session_state["lead_generation_busy"] is False
     assert fake_st.rerun_count == 1
+
+
+def test_unreachable_lead_generation_job_status_does_not_crash(monkeypatch) -> None:
+    import dashboard
+
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["active_lead_generation_job_id"] = "job-unreachable"
+    fake_st.session_state["lead_generation_busy"] = True
+    monkeypatch.setattr(dashboard, "st", fake_st)
+
+    def fake_api_request(method: str, path: str, **kwargs: Any) -> _FakeResponse:
+        raise httpx.RequestError("transport unavailable")
+
+    monkeypatch.setattr(dashboard, "api_request", fake_api_request)
+
+    active = dashboard.render_active_lead_generation_job()
+
+    assert active is False
+    assert fake_st.session_state["active_lead_generation_job_id"] == ""
+    assert fake_st.session_state["lead_generation_busy"] is False
+    assert any(call[0] == "Could not refresh job status right now." for call in fake_st.warning_calls)
+    assert any(call[0] == "No active jobs." for call in fake_st.info_calls)
 
 
 def test_stale_lead_generation_job_is_not_active() -> None:

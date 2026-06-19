@@ -1528,7 +1528,7 @@ def api_headers() -> Dict[str, str]:
 
 
 def api_request(method: str, path: str, **kwargs: Any) -> httpx.Response:
-    timeout = kwargs.pop("timeout", 60)
+    timeout = kwargs.pop("timeout", 15)
     headers = dict(kwargs.pop("headers", {}) or {})
     headers.update(api_headers())
     with httpx.Client(timeout=timeout) as client:
@@ -2016,12 +2016,17 @@ def start_lead_generation_job(payload: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def load_job_status(job_id: str) -> Dict[str, Any]:
+def load_job_status(job_id: str) -> Dict[str, Any] | None:
     if not job_id:
         return {}
-    response = api_request("GET", f"/jobs/{job_id}/status")
-    body = parse_api_json(response)
-    return body if response.is_success else {}
+    try:
+        response = api_request("GET", f"/jobs/{job_id}/status", timeout=12)
+        body = parse_api_json(response)
+    except (httpx.RequestError, httpx.TimeoutException, httpx.HTTPError):
+        return None
+    except Exception:
+        return None
+    return body if response.is_success else None
 
 
 def load_job_events(job_id: str) -> List[Dict[str, Any]]:
@@ -2066,6 +2071,12 @@ def render_active_lead_generation_job() -> bool:
     if not job_id:
         return False
     status = load_job_status(job_id)
+    if status is None:
+        st.warning("Could not refresh job status right now.")
+        st.info("No active jobs.")
+        st.session_state["active_lead_generation_job_id"] = ""
+        st.session_state["lead_generation_busy"] = False
+        return False
     if not status:
         st.session_state["active_lead_generation_job_id"] = ""
         st.session_state["lead_generation_busy"] = False
