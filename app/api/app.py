@@ -16,12 +16,12 @@ from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPExc
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from app.configs.settings import settings
+from app.configs.settings import ENV_FILE_LOADED, settings
 from app.api.public_pages import router as public_pages_router
 from app.middleware.auth import AuthTenantMiddleware
 from app.middleware.security import InMemoryRateLimitMiddleware, SecurityHeadersMiddleware
 from app.providers.registry import build_provider_registry
-from app.providers.vapi.client import VapiCallError, VapiClient, VapiConfigurationError
+from app.providers.vapi.client import VapiCallError, VapiClient, VapiConfigurationError, VapiProviderError
 from app.providers.vapi.webhooks import parse_vapi_webhook
 from app.core.auth import create_jwt_token, decode_jwt_token, get_plan_limits, is_plan_gated_agent, validate_production_jwt_secret
 from app.core.models import Job, Lead, TenantContext, VoiceCall
@@ -1512,6 +1512,8 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
             "configured": client.configured,
             "api_key_present": bool(client.api_key),
             "assistant_id_present": bool(client.assistant_id),
+            "base_url_present": bool(client.base_url),
+            "env_file_loaded": bool(ENV_FILE_LOADED),
             "provider_reachable": await client.provider_reachable(),
         }
 
@@ -1631,6 +1633,33 @@ def create_fastapi_app(db: DatabaseSession | None = None) -> FastAPI:
                 "Voice provider is not configured.",
             )
             raise HTTPException(status_code=503, detail="Voice provider is not configured yet.") from error
+        except VapiProviderError as error:
+            voice_call.status = "failed"
+            voice_call.summary = error.safe_message or "Voice provider call failed."
+            voice_call.metadata = {
+                **voice_call.metadata,
+                "error": "vapi_call_failed",
+                "provider_status": str(error.status_code),
+                "provider_code": error.provider_code,
+            }
+            await maybe_await(db_session.for_tenant(tenant).save("voice_calls", voice_call))
+            LOGGER.warning(
+                "voice_call_failed tenant_id=%s lead_id=%s provider_status=%s provider_message=%s",
+                tenant.tenant_id,
+                lead.id,
+                error.status_code,
+                error.safe_message,
+            )
+            if str(os.getenv("DEBUG", "") or "").strip().lower() in {"1", "true", "yes", "on"}:
+                content: Dict[str, Any] = {
+                    "detail": "Voice call could not be started right now.",
+                    "provider_status": error.status_code,
+                    "provider_message": error.safe_message,
+                }
+                if error.provider_code:
+                    content["provider_code"] = error.provider_code
+                return JSONResponse(status_code=502, content=content)
+            raise HTTPException(status_code=502, detail="Voice call could not be started right now.") from error
         except VapiCallError as error:
             voice_call.status = "failed"
             voice_call.summary = "Voice provider call failed."

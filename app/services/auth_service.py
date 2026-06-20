@@ -64,7 +64,7 @@ class AuthService:
             tenant_name=organization_name,
             tenant_slug=tenant_slug,
         )
-        resolved_tenant_id = tenant_id.strip() if (tenant_id and tenant_id.strip()) else uuid4().hex
+        resolved_tenant_id = tenant_id.strip() if str(tenant_id or "").strip() else uuid4().hex
         normalized_slug = await self._unique_public_signup_slug(organization_name)
         normalized_plan = normalize_subscription_plan(plan)
         tenant = await self.tenant_service.create_tenant(
@@ -165,7 +165,7 @@ class AuthService:
         return payload
 
     async def enforce_usage_limit(self, tenant: Tenant, metric: str, amount: int = 1) -> Dict[str, int]:
-        limits = get_plan_limits(tenant.subscription_plan or "Starter")
+        limits = get_plan_limits(tenant.subscription_plan or "Free")
         if metric not in limits:
             raise UsageLimitExceededError(f"Unknown usage metric: {metric}")
         usage = dict(tenant.settings.get("usage", {}))
@@ -253,7 +253,7 @@ class AuthService:
         return slug[:48].strip("-")
 
     async def _enforce_team_member_limit(self, tenant: Tenant) -> None:
-        limits = get_plan_limits(tenant.subscription_plan or "Starter")
+        limits = get_plan_limits(tenant.subscription_plan or "Free")
         existing_users = await maybe_await(self.db.users.list(tenant.tenant_id))
         if len(existing_users) >= limits["team_members"]:
             raise UsageLimitExceededError(

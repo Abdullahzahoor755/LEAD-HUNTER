@@ -2790,15 +2790,45 @@ def safe_voice_api_json(response: httpx.Response) -> Dict[str, Any] | None:
     content_type = str(headers.get("content-type", "") if hasattr(headers, "get") else "").lower()
     if "application/json" not in content_type:
         safe_text = str(getattr(response, "text", "") or "")[:160]
-        print(f"Voice Calls API unavailable status={status_code} body={safe_text!r}")
+        debug_voice_api_response(response, status_code, content_type, safe_text)
         return None
     try:
         payload = response.json()
     except ValueError:
         safe_text = str(getattr(response, "text", "") or "")[:160]
-        print(f"Voice Calls API invalid JSON status={status_code} body={safe_text!r}")
+        debug_voice_api_response(response, status_code, content_type, safe_text)
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def debug_voice_api_response(response: httpx.Response, status_code: int, content_type: str, safe_text: str) -> None:
+    debug_enabled = str(os.getenv("DEBUG", "") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if not debug_enabled:
+        return
+    request = getattr(response, "request", None)
+    requested_url = str(getattr(request, "url", "") or "")
+    print(
+        "Voice Calls API debug "
+        f"url={requested_url!r} status={status_code} content_type={content_type!r} body={safe_text[:120]!r}"
+    )
+
+
+def voice_call_error_message(payload: Dict[str, Any]) -> str:
+    detail = payload.get("detail", "Could not start voice call.")
+    if not (str(os.getenv("DEBUG", "") or "").strip().lower() in {"1", "true", "yes", "on"}):
+        if isinstance(detail, dict):
+            return str(detail.get("detail") or "Could not start voice call.")
+        return str(detail)
+    diagnostic = detail if isinstance(detail, dict) else payload
+    message = str(diagnostic.get("detail") or detail or "Could not start voice call.")
+    provider_status = diagnostic.get("provider_status")
+    provider_message = str(diagnostic.get("provider_message") or "").strip()
+    if provider_status or provider_message:
+        suffix = f" Provider status: {provider_status or 'unknown'}."
+        if provider_message:
+            suffix += f" Provider message: {provider_message}"
+        return f"{message}{suffix}"
+    return message
 
 
 def render_voice_calls_page(tenant: TenantContext) -> None:
@@ -2919,7 +2949,7 @@ def render_voice_calls_page(tenant: TenantContext) -> None:
             response = api_request("POST", f"/voice/call/{single_lead_id}", timeout=10)
             payload = response.json()
             if not response.is_success:
-                raise RuntimeError(str(payload.get("detail", "Could not start voice call.")))
+                raise RuntimeError(voice_call_error_message(payload))
             load_voice_calls.clear()
             st.success(f"Voice call started: {payload.get('vapi_call_id', '')}")
         except Exception as error:
@@ -3291,6 +3321,9 @@ def render_ai_provider_settings() -> None:
         enabled_input = st.checkbox("Enabled", value=enabled or selected_provider == "fallback")
         submitted = st.form_submit_button("Save AI Provider", use_container_width=True)
     if submitted:
+        if selected_provider != current_provider and selected_provider != "fallback" and not api_key.strip():
+            st.error("Enter an API key when changing AI providers.")
+            return
         response = api_request(
             "POST",
             "/settings/providers/ai",

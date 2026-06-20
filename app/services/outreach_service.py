@@ -470,6 +470,8 @@ class OutreachService:
 
     def outreach_recipient(self, lead: Lead) -> str:
         email = str(lead.verified_email or "").strip().lower()
+        if dict(lead.metadata or {}).get("email_channel_eligible") is False or self.lead_service._is_generic_email(email):
+            return ""
         if not email or "@" not in email:
             return ""
         local, _, domain = email.partition("@")

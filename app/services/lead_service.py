@@ -68,7 +68,12 @@ class LeadService:
         "government": "Government",
         "public sector": "Government",
     }
-    GENERIC_EMAIL_PREFIXES = ("info@", "admin@", "contact@", "sales@", "support@", "hello@", "enquiries@", "inquiries@")
+    GENERIC_EMAIL_PREFIXES = tuple(
+        f"{prefix}@" for prefix in (
+            "info", "sales", "commerce", "media", "customercare", "support",
+            "contact", "trading", "admin", "hello", "enquiries", "marketing",
+        )
+    )
 
     def __init__(self, db: DatabaseSession | AsyncDatabaseSession) -> None:
         self.db = db
@@ -179,12 +184,25 @@ class LeadService:
         normalized.phone = normalized_phone
         normalized.metadata["phone"] = normalized_phone
         normalized.metadata["whatsapp_ready"] = self.whatsapp_ready(normalized_phone)
+        generic_email = self._is_generic_email(normalized.email or normalized.verified_email)
+        normalized.metadata["generic_email"] = generic_email
+        normalized.metadata["email_channel_eligible"] = not generic_email
+        normalized.metadata["phone_only_eligible"] = bool(generic_email and normalized_phone)
+        if generic_email:
+            normalized.metadata["outreach_readiness"] = "phone_only" if normalized_phone else "research_needed"
+        if original_phone and not normalized_phone:
+            note = "invalid phone format removed (failed E.164 validation)"
+            normalized.metadata["save_reason_note"] = note
+            normalized.service_reason = f"{normalized.service_reason}; {note}".strip("; ")[:220]
+            normalized.reason = normalized.service_reason
         normalized.metadata.setdefault("whatsapp_status", "not_contacted")
         normalized.metadata["readiness"] = self.lead_readiness(
             verified_email=normalized.verified_email,
             phone=normalized.phone,
             company_url=normalized.company_url or normalized.website,
         )
+        if generic_email:
+            normalized.metadata["readiness"] = "phone_ready" if normalized_phone else "research_needed"
         normalized.metadata["lead_readiness_score"] = self.lead_readiness_score(
             verified_email=normalized.verified_email,
             likely_email=email_result["likely_email"],
@@ -274,7 +292,9 @@ class LeadService:
         raw = str(phone or "").strip()
         if not raw:
             return ""
-        candidate = re.sub(r"[^\d+]", "", raw)
+        candidate = re.sub(r"[\s().-]", "", raw)
+        if not re.fullmatch(r"\+?\d{10,15}", candidate):
+            return ""
         if candidate.startswith("00"):
             candidate = f"+{candidate[2:]}"
         if candidate.count("+") > 1:
@@ -282,7 +302,7 @@ class LeadService:
         if "+" in candidate and not candidate.startswith("+"):
             return ""
         digits = re.sub(r"\D", "", candidate)
-        if not 8 <= len(digits) <= 15:
+        if not 10 <= len(digits) <= 15 or digits.startswith("0") or len(set(digits)) < 3:
             return ""
         return f"+{digits}" if candidate.startswith("+") else digits
 

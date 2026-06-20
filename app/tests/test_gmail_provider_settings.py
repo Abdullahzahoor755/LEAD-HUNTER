@@ -134,6 +134,8 @@ async def test_gmail_oauth_start_returns_authorization_url(monkeypatch: pytest.M
 async def test_gmail_oauth_start_rejects_missing_frontend_url_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_google_oauth(monkeypatch)
     monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    monkeypatch.setenv("SECRET_KEY", "stable-production-secret-for-tests")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://app_user:strong-test-password@db.internal:5432/lead_hunter")
     monkeypatch.delenv("FRONTEND_BASE_URL", raising=False)
     monkeypatch.delenv("APP_FRONTEND_URL", raising=False)
     monkeypatch.setattr("app.configs.settings.settings.frontend_base_url", "")
@@ -152,6 +154,8 @@ async def test_gmail_oauth_start_rejects_missing_frontend_url_in_production(monk
 async def test_gmail_oauth_start_rejects_localhost_frontend_url_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_google_oauth(monkeypatch)
     monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    monkeypatch.setenv("SECRET_KEY", "stable-production-secret-for-tests")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://app_user:strong-test-password@db.internal:5432/lead_hunter")
     monkeypatch.setenv("FRONTEND_BASE_URL", "http://127.0.0.1:8501")
     monkeypatch.setattr("app.api.app.settings.frontend_base_url", "")
     app = create_fastapi_app(db=build_memory_session())
@@ -217,6 +221,69 @@ async def test_gmail_oauth_callback_validates_state_after_new_app_instance(monke
 
 
 @pytest.mark.anyio
+async def test_gmail_oauth_callback_allows_localhost_frontend_in_development(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_google_oauth(monkeypatch)
+    monkeypatch.delenv("RAILWAY_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("FRONTEND_BASE_URL", "http://127.0.0.1:8501")
+
+    async def fake_exchange(code: str, redirect_uri: str) -> dict[str, object]:
+        return {"refresh_token": "refresh-token", "access_token": "access-token", "expires_in": 3600}
+
+    async def fake_profile(access_token: str) -> str:
+        return "sender-local@gmail.com"
+
+    monkeypatch.setattr("app.api.app.exchange_gmail_oauth_code", fake_exchange)
+    monkeypatch.setattr("app.api.app.fetch_gmail_profile_email", fake_profile)
+    app = create_fastapi_app(db=build_memory_session())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        signup = await _signup(client, tenant_id="tenant-oauth-localhost")
+        state = await _oauth_state(client, signup["token"])
+        response = await client.get(
+            "/settings/providers/gmail/oauth/callback",
+            params={"code": "auth-code", "state": state},
+        )
+
+    assert response.status_code == 302
+    assert response.headers["location"].startswith("http://127.0.0.1:8501/")
+    assert "gmail_oauth=success" in response.headers["location"]
+
+
+@pytest.mark.anyio
+async def test_gmail_oauth_callback_uses_secret_key_when_jwt_secret_is_weak(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_google_oauth(monkeypatch)
+    monkeypatch.setenv("JWT_SECRET", "change-me")
+    monkeypatch.setenv("SECRET_KEY", "stable-secret-key-for-oauth-state")
+
+    async def fake_exchange(code: str, redirect_uri: str) -> dict[str, object]:
+        return {"refresh_token": "refresh-token", "access_token": "access-token", "expires_in": 3600}
+
+    async def fake_profile(access_token: str) -> str:
+        return "sender-secret-key@gmail.com"
+
+    monkeypatch.setattr("app.api.app.exchange_gmail_oauth_code", fake_exchange)
+    monkeypatch.setattr("app.api.app.fetch_gmail_profile_email", fake_profile)
+    db = build_memory_session()
+    start_app = create_fastapi_app(db=db)
+    start_transport = httpx.ASGITransport(app=start_app)
+    async with httpx.AsyncClient(transport=start_transport, base_url="http://testserver") as client:
+        signup = await _signup(client, tenant_id="tenant-oauth-secret-key")
+        state = await _oauth_state(client, signup["token"])
+
+    callback_app = create_fastapi_app(db=db)
+    callback_transport = httpx.ASGITransport(app=callback_app)
+    async with httpx.AsyncClient(transport=callback_transport, base_url="http://testserver") as client:
+        response = await client.get(
+            "/settings/providers/gmail/oauth/callback",
+            params={"code": "auth-code", "state": state},
+        )
+
+    assert response.status_code == 302
+    assert "gmail_oauth=success" in response.headers["location"]
+
+
+@pytest.mark.anyio
 async def test_gmail_oauth_callback_rejects_state_for_missing_user(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_google_oauth(monkeypatch)
     db = build_memory_session()
@@ -237,7 +304,7 @@ async def test_gmail_oauth_callback_rejects_state_for_missing_user(monkeypatch: 
 
     assert response.status_code == 302
     assert "gmail_oauth=error" in response.headers["location"]
-    assert "state+was+invalid+or+expired" in response.headers["location"]
+    assert "could+not+be+verified" in response.headers["location"]
 
 
 @pytest.mark.anyio

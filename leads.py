@@ -87,6 +87,10 @@ PROMPT_FILES = {
     "spec": "spec.md",
     "claude": "claude.md",
 }
+GENERIC_EMAIL_PREFIXES = (
+    "info", "sales", "commerce", "media", "customercare", "support",
+    "contact", "trading", "admin", "hello", "enquiries", "marketing",
+)
 
 EXCLUDED_DOMAINS = (
     "github.com",
@@ -231,11 +235,14 @@ def lead_quality_grade(website: str, metadata: Dict[str, Any], email: str = "", 
         score += 2
     if str(metadata.get("contact_page", "") or "").strip():
         score += 2
-    if str(email or "").strip():
+    generic_email = is_generic_email_address(email)
+    if str(email or "").strip() and not generic_email:
         score += 2
     if str(phone or "").strip():
         score += 1
-    if score >= 8 and str(email or "").strip():
+    if generic_email:
+        score = max(0, score - 2)
+    if score >= 8 and str(email or "").strip() and not generic_email:
         return "A"
     if score >= 5:
         return "B"
@@ -454,6 +461,39 @@ def load_spec_prompt() -> str:
 
 def load_claude_prompt() -> str:
     return load_text_file(PROMPT_FILES["claude"])
+
+
+def build_lead_analysis_prompts(website_text: str) -> Tuple[str, str]:
+    """Build the provider-agnostic lead scoring prompts."""
+    system_prompt = "\n\n".join(
+        part for part in [load_skill_prompt(), load_spec_prompt(), load_claude_prompt()] if part
+    ) or (
+        "You are an AI lead qualification assistant for a B2B IT system integrator. "
+        "Analyze company website content and return only valid JSON."
+    )
+    user_prompt = (
+        "Analyze the following company website content and decide whether the company is a good B2B lead "
+        "for IT services such as cloud, infrastructure, cybersecurity, managed services, software "
+        "integration, or enterprise automation.\n\n"
+        "If the website belongs to a directory, publisher, forum, social platform, government entity, "
+        "job board, or content aggregator instead of an operating company, mark needs_it_services as false "
+        "and give a low lead_score.\n\n"
+        "Also detect buying intent, service demand, and urgency from the website wording. "
+        "Score each on a 0-100 scale and summarize why.\n\n"
+        "Crucially, look for any email address mentioned in the text. If you find one, return it in 'extracted_email'.\n\n"
+        "Return only valid JSON in this exact structure:\n"
+        '{\n  "company_summary": "",\n  "industry": "",\n  "needs_it_services": true,\n  "extracted_email": "",\n'
+        '  "lead_score": 1,\n  "reason": "",\n'
+        '  "intent_analysis": {\n'
+        '    "buying_intent_score": 0,\n'
+        '    "service_demand_score": 0,\n'
+        '    "urgency_score": 0,\n'
+        '    "intent_summary": "",\n'
+        '    "signals": []\n'
+        "  }\n}\n\n"
+        f"Website content:\n{website_text}\n"
+    )
+    return system_prompt, user_prompt
 
 
 def get_candidate_models() -> List[str]:
@@ -1330,17 +1370,21 @@ def extract_first_email(text: str) -> str:
 
 
 def normalize_phone(phone: str) -> str:
-    cleaned = re.sub(r"\s+", " ", phone).strip(" -.,;")
-    digits = re.sub(r"\D", "", cleaned)
-    if len(digits) < 7 or len(digits) > 15:
+    raw = str(phone or "").strip()
+    if not raw:
         return ""
-    if re.fullmatch(r"20\d{2}[-/.\s]\d{1,2}[-/.\s]\d{1,2}", cleaned):
+    cleaned = re.sub(r"[\s().-]", "", raw)
+    if not re.fullmatch(r"\+?\d{10,15}", cleaned):
         return ""
-    if re.fullmatch(r"\d{1,2}[-/.\s]\d{1,2}[-/.\s]20\d{2}", cleaned):
+    digits = cleaned.lstrip("+")
+    if digits.startswith("0") or len(set(digits)) < 3:
         return ""
-    if re.fullmatch(r"\d{4}[-/.\s]\d{2}[-/.\s]\d{2}", cleaned):
-        return ""
-    return cleaned
+    return f"+{digits}" if cleaned.startswith("+") else digits
+
+
+def is_generic_email_address(email: str) -> bool:
+    local_part = str(email or "").strip().lower().partition("@")[0]
+    return local_part in GENERIC_EMAIL_PREFIXES
 
 
 def extract_first_phone(text: str) -> str:
@@ -1711,7 +1755,7 @@ def score_lead(
     email = contact_info.get("email", "")
     phone = contact_info.get("phone", "")
 
-    email_score = FIT_SCORE_EMAIL if is_valid_email(email) else 0
+    email_score = FIT_SCORE_EMAIL if is_valid_email(email) and not is_generic_email_address(email) else 0
     phone_score = FIT_SCORE_PHONE if phone else 0
     relevance_score, relevance_reason = compute_business_relevance_score(analysis, website_text)
     quality_score, quality_reason = compute_website_quality_score(
@@ -1736,7 +1780,7 @@ def score_lead(
         score_reasons.append(f"status={lead_status}")
 
     if not email_score:
-        score_reasons.append("missing email -> marked no_email")
+        score_reasons.append("generic or missing email -> not email-outreach eligible")
 
     return {
         "lead_score": total_score,
@@ -1801,35 +1845,7 @@ def analyze_lead_with_claude(website_text: str) -> Dict[str, Any]:
         LOGGER.warning("Empty website text received for Claude analysis.")
         return {}
 
-    skill_prompt = load_skill_prompt()
-    spec_prompt = load_spec_prompt()
-    claude_prompt = load_claude_prompt()
-    system_prompt = "\n\n".join(part for part in [skill_prompt, spec_prompt, claude_prompt] if part) or (
-        "You are an AI lead qualification assistant for a B2B IT system integrator. "
-        "Analyze company website content and return only valid JSON."
-    )
-    user_prompt = (
-        "Analyze the following company website content and decide whether the company is a good B2B lead "
-        "for IT services such as cloud, infrastructure, cybersecurity, managed services, software "
-        "integration, or enterprise automation.\n\n"
-        "If the website belongs to a directory, publisher, forum, social platform, government entity, "
-        "job board, or content aggregator instead of an operating company, mark needs_it_services as false "
-        "and give a low lead_score.\n\n"
-        "Also detect buying intent, service demand, and urgency from the website wording. "
-        "Score each on a 0-100 scale and summarize why.\n\n"
-        "Crucially, look for any email address mentioned in the text. If you find one, return it in 'extracted_email'.\n\n"
-        "Return only valid JSON in this exact structure:\n"
-        '{\n  "company_summary": "",\n  "industry": "",\n  "needs_it_services": true,\n  "extracted_email": "",\n'
-        '  "lead_score": 1,\n  "reason": "",\n'
-        '  "intent_analysis": {\n'
-        '    "buying_intent_score": 0,\n'
-        '    "service_demand_score": 0,\n'
-        '    "urgency_score": 0,\n'
-        '    "intent_summary": "",\n'
-        '    "signals": []\n'
-        "  }\n}\n\n"
-        f"Website content:\n{website_text}\n"
-    )
+    system_prompt, user_prompt = build_lead_analysis_prompts(website_text)
     try:
         parsed = run_claude_json(system_prompt, user_prompt, max_tokens=900, temperature=0)
     except Exception as error:
@@ -2458,11 +2474,12 @@ def is_qualified_lead(analysis: Dict[str, Any]) -> bool:
     return bool(beta_lead_readiness(analysis))
 
 
-def process_website(website: str, query: str = "", ai_mode: str = "") -> Dict[str, Any]:
+def process_website(website: str, query: str = "", ai_mode: str = "", ai_runtime: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     scraped = run_agent(ScraperAgent(), {"website": website})
     cleaned = run_agent(CleaningAgent(), scraped)
     cleaned["query"] = query
     cleaned["ai_mode"] = ai_mode
+    cleaned["_ai_runtime"] = dict(ai_runtime or {})
     scored = run_agent(ScoringAgent(), cleaned)
     result = scored["lead"]
 
@@ -2481,6 +2498,7 @@ def process_query(
     ai_mode: str = "",
     niche: str = "",
     location: str = "",
+    ai_runtime: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     global LAST_PIPELINE_EVENTS, LAST_PIPELINE_STATS
     import logging as _lg; _lg.getLogger("TRACE").info("TRACE process_query called query=%s limit=%s niche=%s location=%s ai_mode=%s", query, limit, niche, location, ai_mode)
@@ -2533,7 +2551,7 @@ def process_query(
         return leads
 
     with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(1, len(candidate_websites)))) as executor:
-        future_to_website = {executor.submit(process_website, website, query, ai_mode): website for website in candidate_websites}
+        future_to_website = {executor.submit(process_website, website, query, ai_mode, ai_runtime): website for website in candidate_websites}
         for future in as_completed(future_to_website):
             website = future_to_website[future]
             try:
@@ -2612,7 +2630,7 @@ def process_query(
     return leads
 
 
-def generate_leads(limit: int = DEFAULT_LEAD_LIMIT, ai_mode: str = "") -> List[Dict[str, Any]]:
+def generate_leads(limit: int = DEFAULT_LEAD_LIMIT, ai_mode: str = "", ai_runtime: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     global GENERATED_LEADS
     load_environment()
     LOGGER.info("Generating leads...")
@@ -2634,7 +2652,7 @@ def generate_leads(limit: int = DEFAULT_LEAD_LIMIT, ai_mode: str = "") -> List[D
         if len(all_leads) >= limit:
             break
         try:
-            leads = process_query(query, seen_websites, limit=limit - len(all_leads), ai_mode=ai_mode)
+            leads = process_query(query, seen_websites, limit=limit - len(all_leads), ai_mode=ai_mode, ai_runtime=ai_runtime)
             all_leads.extend(leads)
             LOGGER.info("Query complete: %s -> %s qualified lead(s) added.", query, len(leads))
         except Exception as error:

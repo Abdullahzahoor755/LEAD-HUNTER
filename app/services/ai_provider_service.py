@@ -50,9 +50,12 @@ class AIProviderService:
         settings = dict(tenant_record.settings or {})
         providers = dict(settings.get("providers", {}))
         existing_ai = dict(providers.get("ai", {}))
+        existing_provider = self.normalize_provider(str(existing_ai.get("provider") or "fallback"))
         api_key_encrypted = str(existing_ai.get("api_key_encrypted", "") or "")
         if normalized_provider == "fallback":
             api_key_encrypted = ""
+        elif normalized_provider != existing_provider and not str(api_key or "").strip():
+            raise AIProviderNotConfigured("API key is required when changing AI providers.")
         elif str(api_key or "").strip():
             api_key_encrypted = encrypt_secret(str(api_key).strip())
         elif not api_key_encrypted and enabled:

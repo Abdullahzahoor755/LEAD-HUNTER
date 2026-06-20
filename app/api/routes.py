@@ -28,7 +28,7 @@ async def post_signup(
     email: str,
     password: str,
     full_name: str,
-    plan: str = "Starter",
+    plan: str = "Free",
 ) -> Dict[str, Any]:
     return await api.signup(
         tenant_id=tenant_id,

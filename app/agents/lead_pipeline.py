@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import os
+import asyncio
 import re
 from datetime import timedelta
 from typing import Any, Dict
@@ -207,16 +207,42 @@ class ScoringAgent(JsonAgent):
             "email_confidence": str(input_json.get("email_confidence", "")).strip(),
             "lead_readiness_score": int(input_json.get("lead_readiness_score", 0) or 0),
         }
+        original_phone = contact_info["phone"]
+        contact_info["phone"] = legacy.normalize_phone(original_phone)
+        safety_notes: list[str] = []
+        if original_phone and not contact_info["phone"]:
+            safety_notes.append("invalid phone format removed (failed E.164 validation)")
         query = str(input_json.get("query", "")).strip()
         forced_ai_mode = str(input_json.get("ai_mode", "")).strip().lower()
-        claude_available = bool(os.getenv("ANTHROPIC_API_KEY", "").strip())
         analysis: Dict[str, Any] = {}
-        ai_mode = "claude"
-        if website_text and forced_ai_mode != "fallback" and claude_available:
-            analysis = legacy.analyze_lead_with_claude(website_text)
+        ai_mode = "provider"
+        ai_runtime = dict(input_json.get("_ai_runtime", {}) or {})
+        if website_text and forced_ai_mode != "fallback":
+            analysis, ai_mode = self._provider_analysis(website_text, ai_runtime)
         if forced_ai_mode == "fallback" or not analysis:
             ai_mode = "fallback"
-            analysis = self._fallback_analysis(query=query, website_text=website_text, company_name=contact_info["company_name"])
+            if forced_ai_mode == "fallback":
+                legacy.LOGGER.info("AI scoring skipped provider=fallback reason=plan_or_explicit_fallback website=%s", website)
+
+            safe_name, name_note = self._validated_company_name(contact_info["company_name"], website)
+            contact_info["company_name"] = safe_name
+            notes = [*safety_notes, *[note for note in [name_note] if note]]
+
+            generic_email = legacy.is_generic_email_address(contact_info["email"])
+            phone_only = bool(generic_email and contact_info["phone"])
+            if phone_only:
+                notes.append("generic email — phone channel only")
+            elif generic_email:
+                notes.append("generic email — deprioritized; no valid phone channel")
+            safety_notes = notes
+            analysis = self._fallback_analysis(
+                query=query,
+                website_text=website_text,
+                company_name=contact_info["company_name"],
+                notes=notes,
+            )
+            analysis["generic_email"] = generic_email
+            analysis["phone_only_eligible"] = phone_only
         analysis["ai_mode"] = ai_mode
         extracted_email = str(analysis.get("extracted_email", "")).strip().lower()
         if not contact_info["email"] and extracted_email and legacy.is_valid_email(extracted_email):
@@ -226,6 +252,15 @@ class ScoringAgent(JsonAgent):
             contact_info["email_candidates"].append(
                 {"email": extracted_email, "source": "ai_extracted", "page_url": website, "confidence": "verified_email"}
             )
+        generic_email = legacy.is_generic_email_address(contact_info["email"])
+        phone_only = bool(generic_email and contact_info["phone"])
+        analysis["generic_email"] = generic_email
+        analysis["phone_only_eligible"] = phone_only
+        if ai_mode != "fallback":
+            if phone_only:
+                safety_notes.append("generic email — phone channel only")
+            elif generic_email:
+                safety_notes.append("generic email — deprioritized; no valid phone channel")
         scored = legacy.score_lead(
             website=website,
             contact_info=contact_info,
@@ -282,8 +317,17 @@ class ScoringAgent(JsonAgent):
             "scrape_status": str(input_json.get("scrape_status", "")).strip() or lead_status,
             "lead_status": lead_status,
             "ai_mode": ai_mode,
+            "generic_email": bool(analysis.get("generic_email", legacy.is_generic_email_address(contact_info["email"]))),
+            "email_channel_eligible": not bool(analysis.get("generic_email", legacy.is_generic_email_address(contact_info["email"]))),
+            "phone_only_eligible": bool(analysis.get("phone_only_eligible", False)),
+            "save_reason_note": "; ".join(dict.fromkeys(safety_notes)),
         }
-        lead["readiness"] = legacy.beta_lead_readiness(lead)
+        if lead["phone_only_eligible"]:
+            lead["readiness"] = "phone_ready"
+        elif lead["generic_email"]:
+            lead["readiness"] = "research_needed"
+        else:
+            lead["readiness"] = legacy.beta_lead_readiness(lead)
         lead["qualified"] = legacy.is_qualified_lead(lead)
         lead["decision"] = "accepted" if lead["qualified"] else "stored_partial"
         if not lead["qualified"]:
@@ -295,9 +339,82 @@ class ScoringAgent(JsonAgent):
 
         return {"lead": lead, "analysis": analysis, "quality_filter": quality_filter}
 
-    def _fallback_analysis(self, query: str, website_text: str, company_name: str) -> Dict[str, Any]:
+    def _provider_analysis(self, website_text: str, runtime: Dict[str, Any]) -> tuple[Dict[str, Any], str]:
+        import leads as legacy
+
+        tenant = runtime.get("tenant")
+        if tenant is None:
+            legacy.LOGGER.info("AI scoring skipped provider=unconfigured reason=tenant_provider_runtime_unavailable")
+            return {}, "fallback"
+
+        async def call_provider() -> tuple[Dict[str, Any], str]:
+            from app.services.ai_provider_service import AIProviderService
+            from app.db.session import get_async_db_session
+
+            async with get_async_db_session() as db:
+                service = AIProviderService(db)
+                status = await service.status(tenant)
+                provider = str(status.get("provider", "fallback") or "fallback")
+                if not status.get("configured") or not status.get("enabled") or provider == "fallback":
+                    raise RuntimeError(f"provider_not_configured:{provider}")
+                system_prompt, user_prompt = legacy.build_lead_analysis_prompts(website_text)
+                result = await service.generate_text(
+                    tenant=tenant,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    json_mode=True,
+                    temperature=0,
+                    max_tokens=900,
+                )
+                return dict(result), provider
+
+        provider = "unknown"
+        try:
+            analysis, provider = asyncio.run(call_provider())
+            legacy.LOGGER.info("AI scoring completed provider=%s mode=provider", provider)
+            return analysis, provider
+        except Exception as error:
+            safe_error = self._safe_provider_error(error)
+            provider_match = re.search(r"provider_not_configured:([a-z]+)", safe_error)
+            if provider_match:
+                provider = provider_match.group(1)
+            status_code = getattr(getattr(error, "response", None), "status_code", "")
+            legacy.LOGGER.warning(
+                "AI scoring failed provider=%s status_code=%s reason=%s; fallback=python",
+                provider,
+                status_code or "unavailable",
+                safe_error,
+            )
+            return {}, "fallback"
+
+    @staticmethod
+    def _safe_provider_error(error: Exception) -> str:
+        text = f"{type(error).__name__}: {error}"
+        text = re.sub(r"\b(?:sk|gsk|AIza)[A-Za-z0-9._-]{8,}\b", "[redacted]", text)
+        text = re.sub(r"(?i)(api[_-]?key|authorization|token)(\s*[:=]\s*)\S+", r"\1\2[redacted]", text)
+        return re.sub(r"\s+", " ", text).strip()[:300]
+
+    @staticmethod
+    def _validated_company_name(company_name: str, website: str) -> tuple[str, str]:
+        import leads as legacy
+
+        candidate = re.sub(r"\s+", " ", str(company_name or "")).strip()
+        words = candidate.split()
+        invalid_start = bool(words and words[0].lower().strip(".,:;!?") in {
+            "i", "we", "our", "they", "read", "get", "want", "discover", "learn", "see", "find",
+        })
+        invalid = bool('"' in candidate or "'" in candidate or len(words) > 12 or invalid_start)
+        if candidate and not invalid:
+            return candidate, ""
+        domain = legacy.root_domain_from_url(website).split(".")[0]
+        fallback = re.sub(r"[-_]+", " ", domain).strip().title() or "Unknown Company"
+        return fallback, "company name extraction fallback used — scraped text rejected as non-name"
+
+    def _fallback_analysis(self, query: str, website_text: str, company_name: str, notes: list[str] | None = None) -> Dict[str, Any]:
         industry = self._industry_from_query(query)
         reason = self._service_reason(industry=industry, query=query, company_name=company_name)
+        if notes:
+            reason = f"{reason} {'; '.join(notes)}"
         signals = [signal for signal in [industry, query] if signal]
         return {
             "company_summary": self._summary_from_text(website_text, company_name),
@@ -316,6 +433,8 @@ class ScoringAgent(JsonAgent):
         }
 
     def _industry_from_query(self, query: str) -> str:
+        # TODO: full country/industry semantic relevance matching requires AI scoring (see Task A) —
+        # this fallback only catches obvious mismatches.
         lowered = str(query or "").lower()
         for industry, keywords in self.INDUSTRY_KEYWORDS.items():
             if any(re.search(rf"\b{re.escape(keyword)}\b", lowered) for keyword in keywords):

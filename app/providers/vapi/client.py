@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import re
 from typing import Any, Dict
 
 import httpx
 
-from app.configs.settings import settings
+from app.configs import settings as settings_module
 
 
 class VapiConfigurationError(RuntimeError):
@@ -18,6 +20,46 @@ class VapiCallError(RuntimeError):
     """Raised when Vapi rejects or cannot create a call."""
 
 
+class VapiProviderError(VapiCallError):
+    """Raised with safe diagnostics when Vapi returns an error response."""
+
+    def __init__(self, status_code: int, safe_message: str, provider_code: str = "") -> None:
+        self.status_code = status_code
+        self.safe_message = safe_message
+        self.provider_code = provider_code
+        super().__init__(safe_message)
+
+
+BEARER_PATTERN = re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+KEY_VALUE_SECRET_PATTERN = re.compile(r"(api[_-]?key|token|secret|authorization)(['\"\s:=]+)([A-Za-z0-9._~+/=-]{8,})", re.IGNORECASE)
+
+
+def safe_provider_error(response: httpx.Response) -> tuple[str, str]:
+    provider_code = ""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    if isinstance(payload, dict):
+        provider_code = str(payload.get("code") or payload.get("errorCode") or payload.get("error_code") or "").strip()
+        message = payload.get("message") or payload.get("error") or payload.get("detail") or payload
+        if isinstance(message, (dict, list)):
+            raw_message = json.dumps(message, default=str)
+        else:
+            raw_message = str(message or "")
+    else:
+        raw_message = str(response.text or "")
+    return _redact_provider_text(raw_message)[:300], _redact_provider_text(provider_code)[:80]
+
+
+def _redact_provider_text(value: str) -> str:
+    redacted = str(value or "")
+    redacted = BEARER_PATTERN.sub("Bearer [redacted]", redacted)
+    redacted = KEY_VALUE_SECRET_PATTERN.sub(lambda match: f"{match.group(1)}{match.group(2)}[redacted]", redacted)
+    api_key = str(settings_module.settings.vapi_api_key or "")
+    return redacted.replace(api_key, "[redacted]") if api_key else redacted
+
+
 @dataclass(slots=True)
 class VapiClient:
     api_key: str = ""
@@ -26,11 +68,11 @@ class VapiClient:
 
     def __post_init__(self) -> None:
         if not self.api_key:
-            self.api_key = str(settings.vapi_api_key or "").strip()
+            self.api_key = str(settings_module.settings.vapi_api_key or "").strip()
         if not self.assistant_id:
-            self.assistant_id = str(settings.vapi_assistant_id or "").strip()
+            self.assistant_id = str(settings_module.settings.vapi_assistant_id or "").strip()
         if not self.base_url:
-            self.base_url = str(settings.vapi_base_url or "https://api.vapi.ai").strip().rstrip("/")
+            self.base_url = str(settings_module.settings.vapi_base_url or "https://api.vapi.ai").strip().rstrip("/")
 
     @property
     def configured(self) -> bool:
@@ -62,8 +104,12 @@ class VapiClient:
         clean_phone = str(phone_number or "").strip()
         if not clean_phone:
             raise VapiCallError("A phone number is required to create a Vapi call.")
+        phone_number_id = str(settings_module.settings.vapi_phone_number_id or "").strip()
+        if not phone_number_id:
+            raise VapiProviderError(0, "VAPI_PHONE_NUMBER_ID not configured")
         payload: Dict[str, Any] = {
             "assistantId": self.assistant_id,
+            "phoneNumberId": phone_number_id,
             "customer": {"number": clean_phone},
         }
         request_metadata = dict(metadata or {})
@@ -84,7 +130,10 @@ class VapiClient:
         except httpx.HTTPError as error:
             raise VapiCallError("Vapi call request failed safely.") from error
         if response.status_code >= 400:
-            raise VapiCallError(f"Vapi call request failed with status {response.status_code}.")
+            safe_message, provider_code = safe_provider_error(response)
+            if not safe_message:
+                safe_message = f"Vapi call request failed with status {response.status_code}."
+            raise VapiProviderError(response.status_code, safe_message, provider_code)
         try:
             data = response.json()
         except ValueError as error:

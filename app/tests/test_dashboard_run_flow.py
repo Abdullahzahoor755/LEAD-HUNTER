@@ -837,6 +837,24 @@ def test_voice_call_detail_handles_non_json_response_safely(monkeypatch) -> None
     assert all("<html>" not in item for item in warnings)
 
 
+def test_voice_call_error_message_debug_toggle(monkeypatch) -> None:
+    import dashboard
+
+    payload = {
+        "detail": "Voice call could not be started right now.",
+        "provider_status": 400,
+        "provider_message": "Number is not verified.",
+    }
+
+    monkeypatch.delenv("DEBUG", raising=False)
+    assert dashboard.voice_call_error_message(payload) == "Voice call could not be started right now."
+
+    monkeypatch.setenv("DEBUG", "1")
+    message = dashboard.voice_call_error_message(payload)
+    assert "Provider status: 400" in message
+    assert "Number is not verified." in message
+
+
 def test_auth_role_supports_common_response_shapes(monkeypatch) -> None:
     import dashboard
 

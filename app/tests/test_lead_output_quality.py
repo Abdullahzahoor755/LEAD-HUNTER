@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from contextlib import asynccontextmanager
 
 import app.agents.outreach as outreach_module
 import leads as legacy_leads
@@ -51,7 +52,7 @@ def test_lead_quality_grade_and_email_quality_helpers() -> None:
         email="info@acmesoft.example",
         phone="+123",
     )
-    assert grade == "A"
+    assert grade == "B"
 
 
 def test_beta_acceptance_allows_low_score_verified_email_lead() -> None:
@@ -304,6 +305,114 @@ def test_scoring_agent_falls_back_when_claude_key_is_missing(monkeypatch: pytest
     assert "retail" in lead["analysis_reason"].lower()
 
 
+def test_fallback_scoring_applies_name_email_and_phone_safety() -> None:
+    phone_only = ScoringAgent().run(
+        {
+            "website": "https://prismatic-technologies.com",
+            "website_text": "Our services include managed technology and customer support. " * 20,
+            "company_name": 'We "want you to read what our happy customers say about working with us today"',
+            "email": "info@prismatic-technologies.com",
+            "phone": "+923001234567",
+            "query": "technology companies in Pakistan",
+            "ai_mode": "fallback",
+        }
+    )["lead"]
+    assert phone_only["company_name"] == "Prismatic Technologies"
+    assert phone_only["phone_only_eligible"] is True
+    assert phone_only["email_channel_eligible"] is False
+    assert phone_only["readiness"] == "phone_ready"
+    assert "company name extraction fallback used" in phone_only["analysis_reason"]
+    assert "generic email — phone channel only" in phone_only["analysis_reason"]
+
+    invalid_phone = ScoringAgent().run(
+        {
+            "website": "https://direct-example.com",
+            "website_text": "Business services and solutions. " * 20,
+            "company_name": "Direct Example",
+            "email": "jane@direct-example.com",
+            "phone": "20122023",
+            "query": "technology companies",
+            "ai_mode": "fallback",
+        }
+    )["lead"]
+    assert invalid_phone["phone"] == ""
+    assert "invalid phone format removed" in invalid_phone["analysis_reason"]
+
+
+def test_scoring_agent_uses_tenant_configured_groq_for_five_samples(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.models import Tenant, TenantContext
+    from app.db.session import build_memory_session
+    from app.services.ai_provider_service import AIProviderService
+
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-groq-scoring")
+    db.tenants.save(
+        Tenant(
+            tenant_id=tenant.tenant_id,
+            name="Groq Tenant",
+            settings={
+                "providers": {
+                    "ai": {
+                        "provider": "groq",
+                        "model": "llama-3.1-8b-instant",
+                        "api_key_encrypted": "configured-secret-placeholder",
+                        "enabled": True,
+                    }
+                }
+            },
+        )
+    )
+
+    @asynccontextmanager
+    async def fake_db_session():
+        yield db
+
+    prompts: list[str] = []
+
+    async def fake_generate(self, tenant, system_prompt, user_prompt, **kwargs):
+        prompts.append(system_prompt)
+        return {
+            "company_summary": "Operating technology company",
+            "industry": "Technology",
+            "needs_it_services": True,
+            "extracted_email": "",
+            "lead_score": 80,
+            "reason": "AI-qualified operating company.",
+            "intent_analysis": {
+                "buying_intent_score": 70,
+                "service_demand_score": 75,
+                "urgency_score": 40,
+                "intent_summary": "Technology demand detected.",
+                "signals": ["managed services"],
+            },
+        }
+
+    monkeypatch.setattr("app.db.session.get_async_db_session", fake_db_session)
+    monkeypatch.setattr(AIProviderService, "generate_text", fake_generate)
+
+    results = [
+        ScoringAgent().run(
+            {
+                "website": f"https://sample-{index}.example",
+                "website_text": "Managed services, cloud infrastructure and business automation. " * 10,
+                "company_name": f"Sample {index}",
+                "email": f"person{index}@sample-{index}.example",
+                "phone": "+923001234567",
+                "query": "technology companies in Pakistan",
+                "_ai_runtime": {"tenant": tenant},
+            }
+        )["lead"]
+        for index in range(5)
+    ]
+
+    assert [lead["ai_mode"] for lead in results] == ["groq"] * 5
+    assert len(prompts) == 5
+    expected_prompt = "\n\n".join(
+        [legacy_leads.load_skill_prompt(), legacy_leads.load_spec_prompt(), legacy_leads.load_claude_prompt()]
+    )
+    assert prompts == [expected_prompt] * 5
+
+
 def test_contact_extraction_reads_mailto_footer_structured_and_careers(monkeypatch: pytest.MonkeyPatch) -> None:
     pages = {
         "https://acme.test": {
@@ -338,7 +447,7 @@ def test_contact_extraction_reads_mailto_footer_structured_and_careers(monkeypat
     contact = legacy_leads.extract_contact_info("https://acme.test")
 
     assert contact["email"] == "sales@acme.test"
-    assert contact["phone"] == "+1 555 123 4567"
+    assert contact["phone"] == "+15551234567"
     assert contact["email_confidence"] == "verified_email"
     assert contact["lead_readiness_score"] == 100
     sources = {item["source"] for item in contact["email_candidates"]}
@@ -443,8 +552,8 @@ async def test_api_exports_only_standardized_lead_fields() -> None:
         assert row["phone"] == ""
         assert row["likely_email"] == ""
         assert row["email_confidence"] == "verified_email"
-        assert row["readiness"] == "email_ready"
-        assert row["readiness_label"] == "Email Ready"
+        assert row["readiness"] == "research_needed"
+        assert row["readiness_label"] == "Research Needed"
         assert row["lead_readiness_score"] == 100
         assert row["service_reason"] == "Strong business fit"
         assert row["save_reason"] == "Strong business fit"
@@ -478,7 +587,7 @@ async def test_readiness_metadata_is_saved_for_email_phone_and_research_leads() 
         Lead(
             tenant_id=tenant.tenant_id,
             company_url="https://email-ready.test",
-            verified_email="info@email-ready.test",
+            verified_email="jane@email-ready.test",
         ),
     )
     phone_ready = await service.upsert_lead(
@@ -1182,7 +1291,8 @@ async def test_free_plan_lead_generation_uses_fallback_without_anthropic_key(mon
     saved = db.for_tenant(tenant).list("leads")[0]
     assert result["status"] == "SUCCESS"
     assert saved.industry == "Logistics"
-    assert saved.service_reason == "Low intent signals - saved for reference only."
+    assert saved.service_reason == "generic email — deprioritized; no valid phone channel"
+    assert saved.metadata["email_channel_eligible"] is False
     assert saved.metadata["ai_mode"] == "fallback"
 
 
@@ -1402,8 +1512,8 @@ async def test_outreach_agent_uses_tenant_gmail_provider(monkeypatch: pytest.Mon
             tenant_id=tenant.tenant_id,
             company="Acme",
             website="https://acme.test",
-            verified_email="info@acme.test",
-            email="info@acme.test",
+            verified_email="jane@acme.test",
+            email="jane@acme.test",
             reason="Good fit",
             score=80,
             status="pending",
@@ -1416,6 +1526,6 @@ async def test_outreach_agent_uses_tenant_gmail_provider(monkeypatch: pytest.Mon
 
     assert result["sent_messages"] == 1
     assert fake_provider.sent[0][0] == tenant.tenant_id
-    assert fake_provider.sent[0][1] == "info@acme.test"
+    assert fake_provider.sent[0][1] == "jane@acme.test"
     assert fake_provider.sent[0][2]
     assert "unsubscribe" in fake_provider.sent[0][3].lower()

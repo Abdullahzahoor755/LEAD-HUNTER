@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import logging
 
 import httpx
@@ -10,7 +11,7 @@ from app.agents.base import AgentRequest
 from app.agents.voice_outreach import VoiceOutreachAgent
 from app.core.models import Lead, TenantContext, VoiceCall
 from app.db.session import build_memory_session
-from app.providers.vapi.client import VapiCallError
+from app.providers.vapi.client import VapiCallError, VapiProviderError, safe_provider_error
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -71,6 +72,8 @@ async def test_voice_agent_status_does_not_expose_secret(monkeypatch: pytest.Mon
         "configured": True,
         "api_key_present": True,
         "assistant_id_present": True,
+        "base_url_present": True,
+        "env_file_loaded": True,
         "provider_reachable": True,
     }
     assert "api_key" not in payload
@@ -95,6 +98,8 @@ async def test_voice_agent_status_reports_missing_config(monkeypatch: pytest.Mon
         "configured": False,
         "api_key_present": False,
         "assistant_id_present": False,
+        "base_url_present": True,
+        "env_file_loaded": True,
         "provider_reachable": False,
     }
 
@@ -122,8 +127,39 @@ async def test_voice_agent_status_handles_unreachable_provider(monkeypatch: pyte
         "configured": True,
         "api_key_present": True,
         "assistant_id_present": True,
+        "base_url_present": True,
+        "env_file_loaded": True,
         "provider_reachable": False,
     }
+
+
+@pytest.mark.anyio
+async def test_voice_agent_status_uses_vapi_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.configs import settings as settings_module
+    from app.providers.vapi import client as vapi_client_module
+
+    monkeypatch.setenv("VAPI_API_KEY", "env-vapi-key")
+    monkeypatch.setenv("VAPI_ASSISTANT_ID", "env-assistant-id")
+    monkeypatch.setenv("VAPI_BASE_URL", "https://api.vapi.ai")
+    importlib.reload(settings_module)
+
+    async def fake_provider_reachable(self) -> bool:
+        return True
+
+    monkeypatch.setattr(vapi_client_module.VapiClient, "provider_reachable", fake_provider_reachable)
+    app = create_fastapi_app(db=build_memory_session())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        auth = await _signup(client, "tenant-voice-env-status")
+        response = await client.get("/voice/agent/status", headers=_auth_headers(auth["token"]))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["configured"] is True
+    assert payload["api_key_present"] is True
+    assert payload["assistant_id_present"] is True
+    assert payload["base_url_present"] is True
+    assert "env-vapi-key" not in response.text
 
 
 @pytest.mark.anyio
@@ -381,6 +417,80 @@ async def test_voice_call_vapi_failure_marks_call_failed(monkeypatch: pytest.Mon
     assert calls[0].summary == "Voice provider call failed."
 
 
+def test_vapi_provider_error_redacts_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.configs import settings as settings_module
+
+    secret = "super-secret-vapi-key"
+    monkeypatch.setattr(settings_module.settings, "vapi_api_key", secret)
+    response = httpx.Response(
+        400,
+        json={"code": "bad_request", "message": f"Invalid request Authorization: Bearer {secret} api_key={secret}"},
+    )
+
+    safe_message, provider_code = safe_provider_error(response)
+
+    assert provider_code == "bad_request"
+    assert secret not in safe_message
+    assert "[redacted]" in safe_message
+
+
+@pytest.mark.anyio
+async def test_voice_call_provider_failure_debug_response_includes_safe_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.providers.vapi.client import VapiClient
+
+    secret = "super-secret-vapi-key"
+
+    async def fake_create_call(self, *, phone_number: str, lead_id: str = "", metadata: dict | None = None) -> dict:
+        raise VapiProviderError(400, f"Number is not verified. Bearer [redacted]", "bad_request")
+
+    monkeypatch.setenv("DEBUG", "1")
+    monkeypatch.setattr(VapiClient, "create_call", fake_create_call)
+    db = build_memory_session()
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        auth = await _signup(client, "tenant-voice-provider-debug")
+        tenant = TenantContext(tenant_id=auth["tenant_id"], user_id=auth["user_id"])
+        lead = db.for_tenant(tenant).save("leads", Lead(tenant_id=tenant.tenant_id, phone="+15551234567"))
+        response = await client.post(f"/voice/call/{lead.id}", headers=_auth_headers(auth["token"]))
+
+    assert response.status_code == 502
+    payload = response.json()
+    assert payload["detail"] == "Voice call could not be started right now."
+    assert payload["provider_status"] == 400
+    assert payload["provider_message"] == "Number is not verified. Bearer [redacted]"
+    assert payload["provider_code"] == "bad_request"
+    assert secret not in response.text
+    calls = db.voice_calls.list(auth["tenant_id"])
+    assert calls[0].summary == "Number is not verified. Bearer [redacted]"
+
+
+@pytest.mark.anyio
+async def test_voice_call_provider_failure_non_debug_hides_provider_details(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.providers.vapi.client import VapiClient
+
+    async def fake_create_call(self, *, phone_number: str, lead_id: str = "", metadata: dict | None = None) -> dict:
+        raise VapiProviderError(400, "Number is not verified.", "bad_request")
+
+    monkeypatch.delenv("DEBUG", raising=False)
+    monkeypatch.setattr(VapiClient, "create_call", fake_create_call)
+    db = build_memory_session()
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        auth = await _signup(client, "tenant-voice-provider-non-debug")
+        tenant = TenantContext(tenant_id=auth["tenant_id"], user_id=auth["user_id"])
+        lead = db.for_tenant(tenant).save("leads", Lead(tenant_id=tenant.tenant_id, phone="+15551234567"))
+        response = await client.post(f"/voice/call/{lead.id}", headers=_auth_headers(auth["token"]))
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Voice call could not be started right now."}
+    assert "provider_status" not in response.text
+    assert "Number is not verified" not in response.text
+    calls = db.voice_calls.list(auth["tenant_id"])
+    assert calls[0].summary == "Number is not verified."
+
+
 @pytest.mark.anyio
 async def test_voice_call_logs_and_errors_do_not_expose_vapi_api_key(
     monkeypatch: pytest.MonkeyPatch,
@@ -530,6 +640,40 @@ async def test_voice_calls_list_returns_json_on_empty_data() -> None:
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/json")
     assert response.json() == {"items": []}
+
+
+@pytest.mark.anyio
+async def test_voice_calls_list_returns_json_on_repository_failure() -> None:
+    class BrokenVoiceCallRepository:
+        def list(self, tenant_id: str) -> list:
+            raise RuntimeError("voice_calls table missing")
+
+        def list_all(self) -> list:
+            return []
+
+        def get(self, tenant_id: str, item_id: str) -> None:
+            return None
+
+        def save(self, item):
+            return item
+
+        def delete(self, tenant_id: str, item_id: str) -> bool:
+            return False
+
+        def find_by_provider_call_id(self, provider_call_id: str) -> None:
+            return None
+
+    db = build_memory_session()
+    app = create_fastapi_app(db=db)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        auth = await _signup(client, "tenant-voice-list-broken")
+        db.voice_calls = BrokenVoiceCallRepository()
+        response = await client.get("/voice/calls", headers=_auth_headers(auth["token"]))
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"detail": "Voice calls could not be loaded right now."}
 
 
 @pytest.mark.anyio

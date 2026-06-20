@@ -64,6 +64,7 @@ class LeadGenerationAgent(BaseAgent):
             return {"status": "FAILED", "message": output["message"], "data": output}
 
         try:
+            ai_runtime = {"tenant": request.tenant}
             if query:
                 try:
                     raw_leads = legacy_leads.process_query(
@@ -73,13 +74,14 @@ class LeadGenerationAgent(BaseAgent):
                         ai_mode=ai_mode,
                         niche=niche,
                         location=location,
+                        ai_runtime=ai_runtime,
                     )
                 except TypeError as error:
                     if "unexpected keyword argument" not in str(error):
                         raise
                     raw_leads = legacy_leads.process_query(query, seen_websites=set(), limit=limit, ai_mode=ai_mode)
             else:
-                raw_leads = legacy_leads.generate_leads(limit=limit, ai_mode=ai_mode)
+                raw_leads = legacy_leads.generate_leads(limit=limit, ai_mode=ai_mode, ai_runtime=ai_runtime)
             pipeline_stats = self._pipeline_stats(raw_leads)
             pipeline_events = self._pipeline_events()
             await self._record_job_progress(db, request.tenant, job_id, pipeline_stats, pipeline_events)
@@ -190,7 +192,10 @@ class LeadGenerationAgent(BaseAgent):
             output["a_grade_leads"] = sum(1 for item in saved if str(item.metadata.get("lead_quality_grade", "")) == "A")
             output["b_grade_leads"] = sum(1 for item in saved if str(item.metadata.get("lead_quality_grade", "")) == "B")
             output["no_email_leads"] = sum(1 for item in saved if not item.verified_email)
-            output["outreach_ready_leads"] = sum(1 for item in saved if item.verified_email)
+            output["outreach_ready_leads"] = sum(
+                1 for item in saved
+                if item.verified_email and dict(item.metadata or {}).get("email_channel_eligible") is not False
+            )
             await self._record_job_progress(db, request.tenant, job_id, output, pipeline_events, completed=True)
             agent_run = AgentRun(
                 tenant_id=tenant_id,
@@ -301,6 +306,7 @@ class LeadGenerationAgent(BaseAgent):
     def _service_reason_from_raw(self, item: Dict[str, Any]) -> str:
         quality_filter = item.get("quality_filter", {}) if isinstance(item.get("quality_filter", {}), dict) else {}
         candidates = (
+            item.get("save_reason_note", ""),
             item.get("reason", ""),
             quality_filter.get("reason", ""),
             item.get("quality_reason", ""),

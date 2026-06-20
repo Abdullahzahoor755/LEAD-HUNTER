@@ -15,30 +15,25 @@ from urllib.parse import urlparse
 from app.configs.settings import settings
 
 DEFAULT_JWT_SECRET = "dev-secret-change-me"
+WEAK_JWT_SECRETS = {"", DEFAULT_JWT_SECRET, "change-me", "changeme", "secret", "password"}
 
 PLAN_LIMITS: Dict[str, Dict[str, int]] = {
     "Free": {
-        "monthly_leads": 250,
-        "monthly_emails": 0,
+        "monthly_leads": 50,
+        "monthly_emails": 50,
         "monthly_reply_checks": 0,
         "team_members": 1,
     },
-    "Starter": {
-        "monthly_leads": 250,
-        "monthly_emails": 500,
-        "monthly_reply_checks": 1000,
-        "team_members": 1,
-    },
     "Pro": {
-        "monthly_leads": 2500,
-        "monthly_emails": 5000,
-        "monthly_reply_checks": 10000,
+        "monthly_leads": 1000,
+        "monthly_emails": 1000,
+        "monthly_reply_checks": 1000,
         "team_members": 5,
     },
     "Agency": {
-        "monthly_leads": 25000,
-        "monthly_emails": 50000,
-        "monthly_reply_checks": 100000,
+        "monthly_leads": 999999999,
+        "monthly_emails": 999999999,
+        "monthly_reply_checks": 999999999,
         "team_members": 25,
     },
 }
@@ -70,16 +65,32 @@ def verify_password(password: str, password_hash: str) -> bool:
     return hmac.compare_digest(candidate, password_hash)
 
 
+def _jwt_secret_candidates() -> tuple[str, ...]:
+    return (
+        str(os.getenv("JWT_SECRET") or "").strip(),
+        str(os.getenv("SECRET_KEY") or "").strip(),
+        str(settings.jwt_secret or "").strip(),
+    )
+
+
 def get_jwt_secret() -> str:
-    return settings.jwt_secret or os.getenv("JWT_SECRET", DEFAULT_JWT_SECRET)
+    for candidate in _jwt_secret_candidates():
+        if candidate and candidate.lower() not in WEAK_JWT_SECRETS:
+            return candidate
+    for candidate in _jwt_secret_candidates():
+        if candidate:
+            return candidate
+    return DEFAULT_JWT_SECRET
 
 
 def validate_production_jwt_secret() -> None:
+    railway_environment = str(os.getenv("RAILWAY_ENVIRONMENT") or "").strip().lower()
     environment = str(os.getenv("APP_ENV") or os.getenv("ENV") or settings.environment or "development").strip().lower()
-    secret = str(settings.jwt_secret or os.getenv("JWT_SECRET") or "").strip()
-    if environment == "production" and (not secret or secret == DEFAULT_JWT_SECRET):
-        raise RuntimeError("JWT_SECRET must be set to a non-default value in production.")
-    if environment != "production":
+    is_production = railway_environment in {"production", "prod"} or environment in {"production", "prod"}
+    secret = get_jwt_secret().strip()
+    if is_production and secret.lower() in WEAK_JWT_SECRETS:
+        raise RuntimeError("JWT_SECRET or SECRET_KEY must be set to a non-default value in production.")
+    if not is_production:
         return
     encryption_key = str(os.getenv("SECRET_ENCRYPTION_KEY") or settings.secret_encryption_key or "").strip()
     if not encryption_key:
@@ -123,6 +134,8 @@ def decode_jwt_token(token: str) -> Dict[str, Any]:
 
 def normalize_subscription_plan(plan_name: str) -> str:
     normalized = str(plan_name or "").strip().title()
+    if normalized == "Starter":
+        normalized = "Free"
     if normalized not in PLAN_LIMITS:
         raise ValueError(f"Unsupported subscription plan: {plan_name}")
     return normalized

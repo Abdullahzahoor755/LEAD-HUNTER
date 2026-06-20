@@ -7,6 +7,14 @@ from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Dict
 
+from dotenv import load_dotenv
+
+
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+ENV_FILE_LOADED = ENV_FILE.exists()
+if ENV_FILE_LOADED:
+    load_dotenv(dotenv_path=ENV_FILE, override=False)
+
 
 def Field(default: str = "", alias: str = ""):
     """Small env-alias helper for this dataclass settings module."""
@@ -68,6 +76,7 @@ class Settings:
     google_auth_redirect_uri: str = Field(default="", alias="GOOGLE_AUTH_REDIRECT_URI")
     vapi_api_key: str = Field(default="", alias="VAPI_API_KEY")
     vapi_assistant_id: str = Field(default="", alias="VAPI_ASSISTANT_ID")
+    vapi_phone_number_id: str = Field(default="", alias="VAPI_PHONE_NUMBER_ID")
     vapi_base_url: str = Field(default="https://api.vapi.ai", alias="VAPI_BASE_URL")
     frontend_base_url: str = dataclass_field(
         default_factory=lambda: os.getenv("FRONTEND_BASE_URL", os.getenv("APP_FRONTEND_URL", ""))
