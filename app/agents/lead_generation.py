@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+from functools import partial
 import logging
 import os
 import re
 import traceback
 from typing import Any, Dict, List
+
+from anyio import to_thread
 
 from app.agents.base import AgentRequest, BaseAgent
 from app.core.auth import has_pro_features
@@ -24,6 +28,13 @@ LOGGER = logging.getLogger(__name__)
 class LeadGenerationAgent(BaseAgent):
     name = "lead_generation"
 
+    @staticmethod
+    async def _run_legacy_pipeline(function, /, *args, **kwargs):
+        call = partial(function, *args, **kwargs)
+        if getattr(function, "__module__", "") != "leads":
+            return call()
+        return await to_thread.run_sync(call)
+
     async def run(self, request: AgentRequest, db: DatabaseSession | AsyncDatabaseSession) -> Dict[str, Any]:
         tenant_id = request.tenant.tenant_id
         job_id = str(request.payload.get("_job_id", "") or "").strip()
@@ -37,6 +48,8 @@ class LeadGenerationAgent(BaseAgent):
         lead_service = LeadService(db)
         ai_mode = "fallback" if not await self._tenant_has_pro_features(db, tenant_id) else ""
         legacy_leads.load_environment()
+        demo_mode_enabled = legacy_leads.leadgen_demo_mode_enabled()
+        LOGGER.info("Lead generation configuration tenant=%s demo_mode_enabled=%s", tenant_id, demo_mode_enabled)
         missing_keys = self._missing_required_keys()
         if missing_keys:
             output = self._empty_output(
@@ -64,10 +77,14 @@ class LeadGenerationAgent(BaseAgent):
             return {"status": "FAILED", "message": output["message"], "data": output}
 
         try:
-            ai_runtime = {"tenant": request.tenant}
+            ai_runtime = {
+                "tenant": request.tenant,
+                "event_loop": asyncio.get_running_loop(),
+            }
             if query:
                 try:
-                    raw_leads = legacy_leads.process_query(
+                    raw_leads = await self._run_legacy_pipeline(
+                        legacy_leads.process_query,
                         query,
                         seen_websites=set(),
                         limit=limit,
@@ -79,9 +96,20 @@ class LeadGenerationAgent(BaseAgent):
                 except TypeError as error:
                     if "unexpected keyword argument" not in str(error):
                         raise
-                    raw_leads = legacy_leads.process_query(query, seen_websites=set(), limit=limit, ai_mode=ai_mode)
+                    raw_leads = await self._run_legacy_pipeline(
+                        legacy_leads.process_query,
+                        query,
+                        seen_websites=set(),
+                        limit=limit,
+                        ai_mode=ai_mode,
+                    )
             else:
-                raw_leads = legacy_leads.generate_leads(limit=limit, ai_mode=ai_mode, ai_runtime=ai_runtime)
+                raw_leads = await self._run_legacy_pipeline(
+                    legacy_leads.generate_leads,
+                    limit=limit,
+                    ai_mode=ai_mode,
+                    ai_runtime=ai_runtime,
+                )
             pipeline_stats = self._pipeline_stats(raw_leads)
             pipeline_events = self._pipeline_events()
             await self._record_job_progress(db, request.tenant, job_id, pipeline_stats, pipeline_events)
@@ -108,6 +136,14 @@ class LeadGenerationAgent(BaseAgent):
                 junk_reason = self._junk_source_reason(item, query)
                 if not qualified or decision == "reject":
                     skipped_count += 1
+                    if str(item.get("email", "") or "").strip() or str(item.get("phone", "") or "").strip():
+                        LOGGER.info(
+                            "Rejected contactable lead website=%s email=%s phone=%s demo_mode_enabled=%s readiness=%s "
+                            "qualified=%s decision=%s skip_reason=%s persistence_result=rejected_before_persistence",
+                            item.get("website", ""), item.get("email", ""), item.get("phone", ""), demo_mode_enabled,
+                            item.get("readiness", ""), qualified, decision,
+                            item.get("skip_reason", item.get("quality_reason", "")),
+                        )
                     LOGGER.info(
                         "Skipping persistence for rejected lead tenant=%s website=%s reason=%s",
                         tenant_id,
@@ -117,6 +153,13 @@ class LeadGenerationAgent(BaseAgent):
                     continue
                 if junk_reason:
                     skipped_count += 1
+                    pipeline_stats["rejected_junk_source"] = int(pipeline_stats.get("rejected_junk_source", 0) or 0) + 1
+                    LOGGER.info(
+                        "Rejected contactable lead website=%s email=%s phone=%s demo_mode_enabled=%s readiness=%s "
+                        "qualified=%s decision=%s skip_reason=%s persistence_result=rejected_junk_source",
+                        item.get("website", ""), item.get("email", ""), item.get("phone", ""), demo_mode_enabled,
+                        item.get("readiness", ""), qualified, decision, junk_reason,
+                    )
                     LOGGER.info(
                         "Skipping persistence for junk source tenant=%s website=%s reason=%s",
                         tenant_id,
@@ -165,7 +208,18 @@ class LeadGenerationAgent(BaseAgent):
                         tenant_id,
                         item.get("website", ""),
                     )
-                saved_lead = await lead_service.upsert_lead(request.tenant, lead)
+                try:
+                    saved_lead = await lead_service.upsert_lead(request.tenant, lead)
+                except Exception as persistence_error:
+                    skipped_count += 1
+                    pipeline_stats["rejected_persistence"] = int(pipeline_stats.get("rejected_persistence", 0) or 0) + 1
+                    LOGGER.exception(
+                        "Rejected contactable lead website=%s email=%s phone=%s demo_mode_enabled=%s readiness=%s "
+                        "qualified=%s decision=%s skip_reason=persistence_error persistence_result=%s",
+                        item.get("website", ""), item.get("email", ""), item.get("phone", ""), demo_mode_enabled,
+                        item.get("readiness", ""), qualified, decision, type(persistence_error).__name__,
+                    )
+                    continue
                 saved.append(saved_lead)
                 pipeline_events.append(
                     {
@@ -194,7 +248,11 @@ class LeadGenerationAgent(BaseAgent):
             output["no_email_leads"] = sum(1 for item in saved if not item.verified_email)
             output["outreach_ready_leads"] = sum(
                 1 for item in saved
-                if item.verified_email and dict(item.metadata or {}).get("email_channel_eligible") is not False
+                if (
+                    item.verified_email
+                    and dict(item.metadata or {}).get("email_channel_eligible") is not False
+                )
+                or bool(item.phone)
             )
             await self._record_job_progress(db, request.tenant, job_id, output, pipeline_events, completed=True)
             agent_run = AgentRun(
@@ -252,6 +310,26 @@ class LeadGenerationAgent(BaseAgent):
             "scored_leads_count",
             "accepted_leads_count",
             "rejected_leads_count",
+            "pages_attempted",
+            "pages_404",
+            "pages_timeout",
+            "pages_success_text_empty",
+            "emails_found",
+            "phones_found",
+            "research_needed_count",
+            "outreach_ready_leads",
+            "no_contact",
+            "excluded_domain",
+            "relevance_not_passed",
+            "duplicate",
+            "demo_accepted_contact",
+            "demo_mode_enabled",
+            "accepted_by_contact_ready",
+            "accepted_by_relevance",
+            "rejected_no_contact",
+            "rejected_duplicate",
+            "rejected_junk_source",
+            "rejected_relevance",
         ):
             stats[key] = int(stats.get(key, 0) or 0)
         if not stats["accepted_leads_count"] and raw_leads:
@@ -288,6 +366,26 @@ class LeadGenerationAgent(BaseAgent):
             "scored_leads_count": 0,
             "accepted_leads_count": 0,
             "rejected_leads_count": 0,
+            "pages_attempted": 0,
+            "pages_404": 0,
+            "pages_timeout": 0,
+            "pages_success_text_empty": 0,
+            "emails_found": 0,
+            "phones_found": 0,
+            "research_needed_count": 0,
+            "outreach_ready_leads": 0,
+            "no_contact": 0,
+            "excluded_domain": 0,
+            "relevance_not_passed": 0,
+            "duplicate": 0,
+            "demo_accepted_contact": 0,
+            "demo_mode_enabled": False,
+            "accepted_by_contact_ready": 0,
+            "accepted_by_relevance": 0,
+            "rejected_no_contact": 0,
+            "rejected_duplicate": 0,
+            "rejected_junk_source": 0,
+            "rejected_relevance": 0,
             "saved_leads": 0,
             "skipped_leads": 0,
             "lead_count": 0,

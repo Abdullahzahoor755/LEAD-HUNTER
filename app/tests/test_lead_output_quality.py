@@ -8,7 +8,7 @@ import app.agents.outreach as outreach_module
 import leads as legacy_leads
 from app.agents.base import AgentRequest
 from app.agents.lead_generation import LeadGenerationAgent
-from app.agents.lead_pipeline import ScoringAgent, ScraperAgent
+from app.agents.lead_pipeline import DiscoveryAgent, ScoringAgent, ScraperAgent
 from app.agents.outreach import OutreachAgent
 from app.api.app import create_fastapi_app
 from app.core.models import Job, Lead, Tenant, TenantContext
@@ -31,6 +31,30 @@ def test_it_pakistan_query_builder_and_variants() -> None:
     assert "software houses in Pakistan" in variants
     assert "custom software development companies in Pakistan" in variants
     assert len(variants) >= 6
+
+
+def test_dentist_query_builds_contact_focused_variants() -> None:
+    assert legacy_leads.build_search_query_variants(query="dentist clinics in Lahore") == [
+        "dentists in Lahore contact",
+        "dental clinics in Lahore phone",
+        "best dental clinic Lahore contact",
+        "dentist Lahore email phone",
+    ]
+
+
+def test_discovery_requests_larger_raw_pool_for_contact_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    requested_sizes: list[int] = []
+
+    def fake_search(query: str, num: int = 10):
+        requested_sizes.append(num)
+        return []
+
+    monkeypatch.setattr(legacy_leads, "search_google", fake_search)
+
+    result = DiscoveryAgent().run({"query": "dentist clinics in Lahore", "limit": 5})
+
+    assert len(result["query_variants"]) == 4
+    assert requested_sizes == [30, 30, 30, 30]
 
 
 def test_search_result_filter_rejects_bad_sources_and_keeps_company() -> None:
@@ -63,6 +87,7 @@ def test_beta_acceptance_allows_low_score_verified_email_lead() -> None:
         "phone": "",
         "lead_score": 10,
         "domain_type": "business",
+        "relevance_passed": True,
     }
 
     assert legacy_leads.is_qualified_lead(lead) is True
@@ -77,13 +102,14 @@ def test_beta_acceptance_allows_phone_ready_lead_without_email() -> None:
         "phone": "+966 55 123 4567",
         "lead_score": 10,
         "domain_type": "business",
+        "relevance_passed": True,
     }
 
     assert legacy_leads.is_qualified_lead(lead) is True
     assert legacy_leads.beta_lead_readiness(lead) == "phone_ready"
 
 
-def test_beta_acceptance_allows_research_needed_business_domain_without_contact() -> None:
+def test_research_needed_business_domain_without_contact_is_not_qualified() -> None:
     lead = {
         "website": "https://research-needed.test",
         "company_name": "Research Needed Co",
@@ -93,8 +119,229 @@ def test_beta_acceptance_allows_research_needed_business_domain_without_contact(
         "domain_type": "business",
     }
 
-    assert legacy_leads.is_qualified_lead(lead) is True
+    assert legacy_leads.is_qualified_lead(lead) is False
     assert legacy_leads.beta_lead_readiness(lead) == "research_needed"
+
+
+def test_explicit_research_needed_is_not_overridden_by_generic_email() -> None:
+    lead = {
+        "website": "https://generic-email.test",
+        "company_name": "Generic Email Co",
+        "email": "info@generic-email.test",
+        "phone": "",
+        "domain_type": "business",
+        "readiness": "research_needed",
+        "email_channel_eligible": False,
+    }
+
+    assert legacy_leads.is_qualified_lead(lead) is False
+
+
+@pytest.mark.parametrize(
+    ("lead", "expected"),
+    [
+        (
+            {
+                "website": "https://forbes-style.example",
+                "company_name": "Forbes Style Publisher",
+                "email": "editor@forbes-style.example",
+                "domain_type": "business",
+                "relevance_passed": False,
+            },
+            False,
+        ),
+        (
+            {
+                "website": "https://pakistan-embassy.example",
+                "company_name": "Pakistan Embassy",
+                "email": "office@pakistan-embassy.example",
+                "domain_type": "neutral",
+                "relevance_passed": False,
+            },
+            False,
+        ),
+        (
+            {
+                "website": "https://directory.example/listings",
+                "company_name": "Business Directory",
+                "email": "sales@directory.example",
+                "domain_type": "listing",
+                "is_directory": True,
+                "relevance_passed": True,
+            },
+            False,
+        ),
+        (
+            {
+                "website": "https://energy-network.example",
+                "company_name": "Nonprofit Energy Network",
+                "phone": "+923001234567",
+                "domain_type": "neutral",
+                "relevance_passed": False,
+            },
+            False,
+        ),
+        (
+            {
+                "website": "https://real-phone-company.example",
+                "company_name": "Real Phone Company",
+                "phone": "0300 1234567",
+                "domain_type": "business",
+                "relevance_passed": True,
+            },
+            True,
+        ),
+        (
+            {
+                "website": "https://real-email-company.example",
+                "company_name": "Real Email Company",
+                "email": "owner@real-email-company.example",
+                "domain_type": "business",
+                "relevance_passed": True,
+            },
+            True,
+        ),
+    ],
+)
+def test_qualification_requires_relevance_and_contact(lead: dict, expected: bool) -> None:
+    assert legacy_leads.is_qualified_lead(lead) is expected
+
+
+def test_fallback_analysis_is_conservative_and_uses_website_content() -> None:
+    analysis = ScoringAgent()._fallback_analysis(
+        query="AI software companies in Pakistan",
+        website_text="A dental clinic providing patient healthcare and treatment services.",
+        company_name="Example Dental Clinic",
+    )
+
+    assert analysis["industry"] == "Healthcare"
+    assert analysis["needs_it_services"] is True
+    assert analysis["relevance_passed"] is False
+    assert analysis["intent_analysis"] == {
+        "buying_intent_score": 0,
+        "service_demand_score": 0,
+        "urgency_score": 0,
+        "intent_summary": analysis["reason"],
+        "signals": [],
+    }
+
+
+def test_demo_mode_accepts_real_scraped_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LEADGEN_DEMO_MODE", "true")
+    lead = ScoringAgent().run(
+        {
+            "website": "https://demo-email.example",
+            "company_name": "Demo Email Company",
+            "email": "owner@demo-email.example",
+            "website_text": "Operating business providing professional services. " * 10,
+            "ai_mode": "fallback",
+            "scrape_status": "ok",
+        }
+    )["lead"]
+
+    assert lead["qualified"] is True
+    assert lead["demo_accepted_contact"] is True
+    assert lead["email"] == "owner@demo-email.example"
+    assert lead["reason"] == "Website has scraped business contact details."
+
+
+def test_demo_mode_accepts_real_scraped_phone(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LEADGEN_DEMO_MODE", "true")
+    lead = ScoringAgent().run(
+        {
+            "website": "https://demo-phone.example",
+            "company_name": "Demo Phone Company",
+            "phone": "0300 1234567",
+            "contact_page": "https://demo-phone.example/contact",
+            "website_text": "Operating business with a public contact page. " * 10,
+            "ai_mode": "fallback",
+            "scrape_status": "ok",
+        }
+    )["lead"]
+
+    assert lead["qualified"] is True
+    assert lead["phone"] == "+923001234567"
+    assert lead["reason"] == "Company has a public phone number and contact page."
+
+
+def test_demo_mode_rejects_guessed_email_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LEADGEN_DEMO_MODE", "true")
+    lead = ScoringAgent().run(
+        {
+            "website": "https://demo-guessed.example",
+            "company_name": "Demo Guessed Company",
+            "likely_email": "info@demo-guessed.example",
+            "website_text": "Operating business without published contact details. " * 10,
+            "ai_mode": "fallback",
+            "scrape_status": "ok",
+        }
+    )["lead"]
+
+    assert lead["qualified"] is False
+    assert lead["skip_reason"] == "no_contact"
+
+
+@pytest.mark.parametrize(
+    ("website", "company_name", "website_text"),
+    [
+        ("https://directory.example/listings", "Business Directory", "Directory listings for many companies. " * 10),
+        ("https://publisher.example", "Industry Magazine Publisher", "News publisher and magazine articles. " * 10),
+        ("https://services.gov", "Government Ministry", "Official government ministry services. " * 10),
+    ],
+)
+def test_demo_mode_rejects_excluded_domains(
+    monkeypatch: pytest.MonkeyPatch,
+    website: str,
+    company_name: str,
+    website_text: str,
+) -> None:
+    monkeypatch.setenv("LEADGEN_DEMO_MODE", "true")
+    lead = ScoringAgent().run(
+        {
+            "website": website,
+            "company_name": company_name,
+            "email": "contact@company.example",
+            "website_text": website_text,
+            "ai_mode": "fallback",
+            "scrape_status": "ok",
+        }
+    )["lead"]
+
+    assert lead["qualified"] is False
+    assert lead["skip_reason"] in ("junk_source", "excluded_domain", "directory_or_listing")
+
+
+def test_production_mode_accepts_qualified_lead(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LEADGEN_DEMO_MODE", "false")
+    lead = ScoringAgent().run(
+        {
+            "website": "https://strict-production.example",
+            "company_name": "Strict Production Company",
+            "email": "owner@strict-production.example",
+            "website_text": "Operating business providing professional services. " * 10,
+            "ai_mode": "fallback",
+            "scrape_status": "ok",
+        }
+    )["lead"]
+
+    assert lead["qualified"] is True
+    assert lead["relevance_passed"] is True
+    assert lead["readiness"] in ("email_ready", "phone_ready")
+
+
+@pytest.mark.parametrize(
+    ("raw_phone", "expected"),
+    [
+        ("0300 1234567", "+923001234567"),
+        ("0300-1234567", "+923001234567"),
+        ("0092 300 1234567", "+923001234567"),
+        ("021-12345678", "+922112345678"),
+        ("042-1234567", "+92421234567"),
+    ],
+)
+def test_pakistan_phone_formats_are_normalized(raw_phone: str, expected: str) -> None:
+    assert legacy_leads.normalize_phone(raw_phone) == expected
+    assert LeadService.normalize_phone(raw_phone) == expected
 
 
 def test_beta_acceptance_still_rejects_directory_invalid_and_aggregator_domains() -> None:
@@ -107,6 +354,7 @@ def test_beta_acceptance_still_rejects_directory_invalid_and_aggregator_domains(
             "lead_score": 95,
             "domain_type": "listing",
             "is_directory": True,
+            "relevance_passed": True,
         }
     ) is False
     assert legacy_leads.is_qualified_lead(
@@ -116,6 +364,7 @@ def test_beta_acceptance_still_rejects_directory_invalid_and_aggregator_domains(
             "email": "info@invalid.test",
             "phone": "",
             "lead_score": 95,
+            "relevance_passed": True,
         }
     ) is False
     assert legacy_leads.is_qualified_lead(
@@ -126,6 +375,7 @@ def test_beta_acceptance_still_rejects_directory_invalid_and_aggregator_domains(
             "phone": "",
             "lead_score": 95,
             "domain_type": "business",
+            "relevance_passed": True,
         }
     ) is False
 
@@ -280,6 +530,82 @@ def test_scraper_uses_separate_contexts_for_contact_and_content(monkeypatch: pyt
     assert result["contact_status"] == "no_email"
 
 
+def test_scraper_classifies_successful_page_without_text_as_empty_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_contact_info(website: str, context=None):
+        return {"company_name": "Empty Co", "email": "person@empty.test", "phone": "+923001234567"}
+
+    def fake_scrape_website(website: str, context=None):
+        context.last_status = "empty_text"
+        context.metrics["pages_success_text_empty"] = 1
+        return "", "fallback_failed", "FAILED_EMPTY_CONTENT"
+
+    monkeypatch.setattr(legacy_leads, "extract_contact_info", fake_contact_info)
+    monkeypatch.setattr(legacy_leads, "scrape_website", fake_scrape_website)
+
+    result = ScraperAgent().run({"website": "https://empty.test"})
+
+    assert result["scrape_status"] == "empty_text"
+    assert result["contact_info"]["email"] == "person@empty.test"
+    assert result["contact_info"]["phone"] == "+923001234567"
+
+
+def test_scrape_website_rejects_corrupted_extracted_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    corrupted_html = "<html><body>" + ("clean business text " * 20) + ("\ufffd" * 100) + "</body></html>"
+    monkeypatch.setattr(
+        legacy_leads,
+        "fetch_page",
+        lambda url, context=None: {
+            "content": corrupted_html,
+            "status": "SUCCESS",
+            "failure_reason": "",
+            "method_used": "httpx_http2",
+        },
+    )
+    context = legacy_leads.CrawlContext()
+
+    website_text, method, failure_reason = legacy_leads.scrape_website(
+        "https://corrupted.example",
+        context=context,
+    )
+
+    assert website_text == ""
+    assert method == "httpx_bs4"
+    assert failure_reason == "FAILED_CORRUPTED_CONTENT"
+    assert context.last_status == "corrupted_content"
+    assert context.last_reason == "FAILED_CORRUPTED_CONTENT"
+
+
+@pytest.mark.parametrize("method", ["readability_fallback", "meta_title_jsonld_fallback"])
+def test_scrape_website_rejects_corruption_from_fallback_extractors(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+) -> None:
+    corrupted_text = ("clean " * 20) + ("\ufffd" * 50)
+    monkeypatch.setattr(
+        legacy_leads,
+        "fetch_page",
+        lambda url, context=None: {
+            "content": "<html><head><title>Example</title></head><body></body></html>",
+            "status": "SUCCESS",
+            "failure_reason": "",
+            "method_used": "httpx_http2",
+        },
+    )
+    monkeypatch.setattr(legacy_leads, "clean_visible_text", lambda html: "")
+    monkeypatch.setattr(
+        legacy_leads,
+        "extract_readable_text",
+        lambda html: corrupted_text if method == "readability_fallback" else "",
+    )
+    monkeypatch.setattr(legacy_leads, "extract_title_meta_jsonld", lambda html: corrupted_text)
+
+    website_text, actual_method, failure_reason = legacy_leads.scrape_website("https://corrupted.example")
+
+    assert website_text == ""
+    assert actual_method == method
+    assert failure_reason == "FAILED_CORRUPTED_CONTENT"
+
+
 def test_scoring_agent_falls_back_when_claude_key_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr(
@@ -407,10 +733,170 @@ def test_scoring_agent_uses_tenant_configured_groq_for_five_samples(monkeypatch:
 
     assert [lead["ai_mode"] for lead in results] == ["groq"] * 5
     assert len(prompts) == 5
-    expected_prompt = "\n\n".join(
-        [legacy_leads.load_skill_prompt(), legacy_leads.load_spec_prompt(), legacy_leads.load_claude_prompt()]
-    )
+    expected_prompt = "\n\n".join([legacy_leads.load_skill_prompt(), legacy_leads.load_claude_prompt()])
     assert prompts == [expected_prompt] * 5
+
+
+def test_scoring_provider_payload_is_small_and_allowlisted() -> None:
+    payload = ScoringAgent._build_provider_payload(
+        {
+            "website": "https://compact.example",
+            "company_name": "C" * 500,
+            "query": "Q" * 500,
+            "website_text": "W" * 5000,
+            "address": "A" * 500,
+            "short_contact_summary": "S" * 1000,
+            "email": "owner@compact.example",
+            "phone": "+923001234567",
+            "email_candidates": [
+                {"email": f"person{index}@compact.example", "source": "X" * 5000}
+                for index in range(6)
+            ],
+            "crawl_metrics": {"huge": "X" * 20_000},
+            "score_breakdown": "X" * 20_000,
+            "likely_emails": ["X" * 20_000],
+            "raw_html": "X" * 20_000,
+            "contact_text": "X" * 20_000,
+        }
+    )
+
+    assert set(payload) == {
+        "website", "company_name", "query", "website_text", "email_present", "phone_present", "contact_page", "short_contact_summary"
+    }
+    assert len(payload["company_name"]) == 120
+    assert len(payload["query"]) == 160
+    assert len(payload["website_text"]) == 1200
+    assert len(payload["short_contact_summary"]) == 300
+    assert payload["email_present"] is True
+    assert payload["phone_present"] is True
+    assert "address" not in payload
+    assert "crawl_metrics" not in payload
+    assert "email_candidates" not in payload
+
+
+def test_scoring_provider_retries_413_with_500_character_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.models import Tenant, TenantContext
+    from app.db.session import build_memory_session
+    from app.services.ai_provider_service import AIProviderService
+
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-groq-413")
+    db.tenants.save(
+        Tenant(
+            tenant_id=tenant.tenant_id,
+            name="Groq Retry Tenant",
+            settings={
+                "providers": {
+                    "ai": {
+                        "provider": "groq",
+                        "model": "llama-3.1-8b-instant",
+                        "api_key_encrypted": "configured-secret-placeholder",
+                        "enabled": True,
+                    }
+                }
+            },
+        )
+    )
+
+    @asynccontextmanager
+    async def fake_db_session():
+        yield db
+
+    sent_payloads: list[dict] = []
+
+    async def fake_generate(self, tenant, system_prompt, user_prompt, **kwargs):
+        payload = __import__("json").loads(user_prompt.split("Website content:\n", 1)[1].strip())
+        sent_payloads.append(payload)
+        if len(sent_payloads) == 1:
+            request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+            response = httpx.Response(413, request=request)
+            raise httpx.HTTPStatusError("Payload Too Large", request=request, response=response)
+        return {
+            "company_summary": "Relevant company",
+            "industry": "Technology",
+            "needs_it_services": True,
+            "reason": "Qualified after compact retry.",
+        }
+
+    monkeypatch.setattr("app.db.session.get_async_db_session", fake_db_session)
+    monkeypatch.setattr(AIProviderService, "generate_text", fake_generate)
+
+    analysis, provider = ScoringAgent()._provider_analysis(
+        ScoringAgent._build_provider_payload({"website_text": "W" * 5000}),
+        {"tenant": tenant},
+    )
+
+    assert provider == "groq"
+    assert analysis["needs_it_services"] is True
+    assert [len(payload["website_text"]) for payload in sent_payloads] == [1200, 500]
+
+
+def test_provider_relevance_and_scraped_contacts_reach_qualification(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ScoringAgent,
+        "_provider_analysis",
+        lambda self, text, runtime: (
+            {
+                "company_summary": "Relevant operating business",
+                "industry": "Professional Services",
+                "needs_it_services": True,
+                "relevance_passed": False,
+                "reason": "Provider marked this company relevant.",
+            },
+            "test-provider",
+        ),
+    )
+
+    lead = ScoringAgent().run(
+        {
+            "website": "https://relevant.test",
+            "website_text": "Marketing agency offering business services. " * 20,
+            "website_text_length": 900,
+            "company_name": "Relevant Agency",
+            "email": "owner@relevant.test",
+            "phone": "+923001234567",
+            "scrape_status": "ok",
+            "lead_status": "Pending",
+            "_ai_runtime": {"tenant": object()},
+        }
+    )["lead"]
+
+    assert lead["email"] == "owner@relevant.test"
+    assert lead["phone"] == "+923001234567"
+    assert lead["needs_it_services"] is True
+    assert lead["relevance_passed"] is True
+    assert lead["qualified"] is True
+    assert lead["website_text_length"] == 900
+
+
+def test_successful_scrape_rejection_never_reports_scrape_failed_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LEADGEN_DEMO_MODE", "false")
+    lead = ScoringAgent().run(
+        {
+            "website": "https://safe-reject.test",
+            "website_text": "Business services content. " * 20,
+            "company_name": "Safe Reject",
+            "scrape_status": "ok",
+            "lead_status": "Pending",
+            "ai_mode": "fallback",
+        }
+    )["lead"]
+
+    assert lead["qualified"] is False
+    assert lead["skip_reason"] in ("no_contact", "relevance_not_passed")
+
+
+def test_lead_analysis_prompt_excludes_spec_and_truncates_website_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(legacy_leads, "load_skill_prompt", lambda: "SCORING RUBRIC")
+    monkeypatch.setattr(legacy_leads, "load_spec_prompt", lambda: "PLATFORM ARCHITECTURE MUST NOT APPEAR")
+    monkeypatch.setattr(legacy_leads, "load_claude_prompt", lambda: "SCORING INSTRUCTIONS")
+
+    system_prompt, user_prompt = legacy_leads.build_lead_analysis_prompts("x" * 10_000)
+
+    assert system_prompt == "SCORING RUBRIC\n\nSCORING INSTRUCTIONS"
+    assert "PLATFORM ARCHITECTURE" not in system_prompt
+    assert "x" * legacy_leads.LEAD_ANALYSIS_WEBSITE_TEXT_LIMIT in user_prompt
+    assert "x" * (legacy_leads.LEAD_ANALYSIS_WEBSITE_TEXT_LIMIT + 1) not in user_prompt
 
 
 def test_contact_extraction_reads_mailto_footer_structured_and_careers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -452,6 +938,56 @@ def test_contact_extraction_reads_mailto_footer_structured_and_careers(monkeypat
     assert contact["lead_readiness_score"] == 100
     sources = {item["source"] for item in contact["email_candidates"]}
     assert {"mailto", "footer", "structured_data"}.issubset(sources)
+
+
+def test_contact_extraction_reads_tel_whatsapp_and_jsonld() -> None:
+    html = """
+    <html><body>
+      <a href="tel:0300-1234567">Call</a>
+      <a href="https://wa.me/923111234567">WhatsApp</a>
+      <a href="https://api.whatsapp.com/send?phone=923221234567">Chat</a>
+      <script type="application/ld+json">
+        {"@type":"Dentist","telephone":"042-1234567","email":"clinic@example.test"}
+      </script>
+    </body></html>
+    """
+
+    assert legacy_leads.extract_phone_candidates_from_page(html) == [
+        "+923001234567",
+        "+923111234567",
+        "+923221234567",
+        "+92421234567",
+    ]
+    assert legacy_leads.extract_structured_contact_info(html)["emails"] == ["clinic@example.test"]
+
+
+def test_fetch_page_does_not_retry_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, url):
+            nonlocal calls
+            calls += 1
+            return httpx.Response(404, request=httpx.Request("GET", url), headers={"Content-Type": "text/html"})
+
+    monkeypatch.setattr(legacy_leads.httpx, "Client", FakeClient)
+    context = legacy_leads.CrawlContext()
+
+    result = legacy_leads.fetch_page("https://missing.example/contact", context=context)
+
+    assert result["status"] == "FAILED"
+    assert calls == 1
+    assert context.metrics["pages_attempted"] == 1
+    assert context.metrics["pages_404"] == 1
 
 
 def test_contact_extraction_adds_likely_common_email_when_no_observed_email(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1249,7 +1785,7 @@ async def test_lead_generation_links_saved_leads_to_background_job(monkeypatch: 
 
 
 @pytest.mark.anyio
-async def test_free_plan_lead_generation_uses_fallback_without_anthropic_key(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_free_plan_fallback_does_not_auto_qualify_lead_without_provider_review(monkeypatch: pytest.MonkeyPatch) -> None:
     db = build_memory_session()
     tenant = TenantContext(tenant_id="tenant-free-fallback")
     db.tenants.save(Tenant(tenant_id=tenant.tenant_id, name="Tenant", slug="tenant-free-fallback", subscription_plan="Free"))
@@ -1288,12 +1824,52 @@ async def test_free_plan_lead_generation_uses_fallback_without_anthropic_key(mon
         db,
     )
 
-    saved = db.for_tenant(tenant).list("leads")[0]
+    saved = db.for_tenant(tenant).list("leads")
     assert result["status"] == "SUCCESS"
-    assert saved.industry == "Logistics"
-    assert saved.service_reason == "generic email — deprioritized; no valid phone channel"
-    assert saved.metadata["email_channel_eligible"] is False
-    assert saved.metadata["ai_mode"] == "fallback"
+    assert result["data"]["saved_leads"] == 1
+    assert len(saved) == 1
+    assert saved[0].verified_email == "info@logistics.example"
+
+
+@pytest.mark.anyio
+async def test_free_plan_fallback_rejects_lead_without_contact(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = build_memory_session()
+    tenant = TenantContext(tenant_id="tenant-no-contact")
+
+    monkeypatch.setattr(legacy_leads, "load_environment", lambda: None)
+    monkeypatch.setattr(legacy_leads, "search_google", lambda query: [{"link": "https://nocontact.example"}])
+    monkeypatch.setattr(legacy_leads, "extract_websites", lambda results: ["https://nocontact.example"])
+    monkeypatch.setattr(
+        legacy_leads,
+        "extract_contact_info",
+        lambda website, context=None: {
+            "company_name": "No Contact Co",
+            "email": "",
+            "phone": "",
+            "address": "",
+            "contact_page": "",
+        },
+    )
+    monkeypatch.setattr(
+        legacy_leads,
+        "scrape_website",
+        lambda website, context=None: ("Some generic website text with no business signals.", "requests_bs4", ""),
+    )
+    monkeypatch.setattr(
+        legacy_leads,
+        "analyze_lead_with_claude",
+        lambda website_text: pytest.fail("Claude should not be called for Free fallback lead generation."),
+    )
+
+    result = await LeadGenerationAgent().run(
+        AgentRequest(tenant=tenant, payload={"query": "test companies", "limit": 1}),
+        db,
+    )
+
+    saved = db.for_tenant(tenant).list("leads")
+    assert result["status"] == "SUCCESS"
+    assert result["data"]["saved_leads"] == 0
+    assert saved == []
 
 
 @pytest.mark.anyio

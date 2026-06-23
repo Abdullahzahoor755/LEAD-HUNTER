@@ -45,6 +45,9 @@ class Settings:
     demo_mode: bool = dataclass_field(
         default_factory=lambda: os.getenv("DEMO_MODE", os.getenv("APP_DEMO_MODE", "false")).lower() == "true"
     )
+    leadgen_demo_mode: bool = dataclass_field(
+        default_factory=lambda: os.getenv("LEADGEN_DEMO_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
+    )
     provider_config: Dict[str, str] = dataclass_field(
         default_factory=lambda: {
             "anthropic_model": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),

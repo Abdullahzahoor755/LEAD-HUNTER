@@ -13,12 +13,13 @@ import os
 import random
 import re
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import httpx
 import requests
@@ -31,7 +32,7 @@ from app.services.auth_service import AuthService
 from app.services.lead_service import LeadService
 from app.services.outreach_service import OutreachService
 from app.services._async import maybe_await
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, UnicodeDammit
 from dotenv import load_dotenv
 from sqlalchemy import select
 
@@ -57,12 +58,15 @@ DEFAULT_SHEET_RANGE = "Sheet1!A1"
 LOCAL_TIMEZONE = timezone.utc
 UTC = timezone.utc
 REQUEST_CONNECT_TIMEOUT = 5
-REQUEST_READ_TIMEOUT = 20
-SEARCH_TIMEOUT = 8
+REQUEST_READ_TIMEOUT = 40
+SEARCH_TIMEOUT = 15
 MAX_RETRIES_PER_REQUEST = 3
 MAX_PAGES_PER_DOMAIN = 8
 MAX_WORKERS = 4
 MAX_HTML_BYTES = 250_000
+MAX_DECODED_HTML_BYTES = 2_000_000
+LEAD_ANALYSIS_WEBSITE_TEXT_LIMIT = 3_000
+CORRUPTED_CONTENT_RATIO = 0.10
 FIT_SCORE_EMAIL = 40
 FIT_SCORE_PHONE = 25
 FIT_SCORE_RELEVANCE = 20
@@ -182,6 +186,10 @@ BUSINESS_RESULT_KEYWORDS = (
     "business services",
     "solutions",
     "services",
+    "dentist",
+    "dental",
+    "clinic",
+    "healthcare",
 )
 
 
@@ -349,6 +357,12 @@ class CrawlContext:
         self.last_status: str = ""
         self.last_method: str = ""
         self.last_reason: str = ""
+        self.metrics: Dict[str, int] = {
+            "pages_attempted": 0,
+            "pages_404": 0,
+            "pages_timeout": 0,
+            "pages_success_text_empty": 0,
+        }
 
 
 RELEVANT_BUSINESS_KEYWORDS = (
@@ -466,11 +480,13 @@ def load_claude_prompt() -> str:
 def build_lead_analysis_prompts(website_text: str) -> Tuple[str, str]:
     """Build the provider-agnostic lead scoring prompts."""
     system_prompt = "\n\n".join(
-        part for part in [load_skill_prompt(), load_spec_prompt(), load_claude_prompt()] if part
+        part for part in [load_skill_prompt(), load_claude_prompt()] if part
     ) or (
         "You are an AI lead qualification assistant for a B2B IT system integrator. "
         "Analyze company website content and return only valid JSON."
     )
+    normalized_website_text = re.sub(r"\s+", " ", str(website_text or "")).strip()
+    truncated_website_text = normalized_website_text[:LEAD_ANALYSIS_WEBSITE_TEXT_LIMIT]
     user_prompt = (
         "Analyze the following company website content and decide whether the company is a good B2B lead "
         "for IT services such as cloud, infrastructure, cybersecurity, managed services, software "
@@ -491,7 +507,7 @@ def build_lead_analysis_prompts(website_text: str) -> Tuple[str, str]:
         '    "intent_summary": "",\n'
         '    "signals": []\n'
         "  }\n}\n\n"
-        f"Website content:\n{website_text}\n"
+        f"Website content:\n{truncated_website_text}\n"
     )
     return system_prompt, user_prompt
 
@@ -516,6 +532,55 @@ def load_environment() -> None:
         LOGGER.warning(".env file is empty: %s", ENV_FILE)
         return
     load_dotenv(dotenv_path=ENV_FILE, override=False)
+
+
+def leadgen_demo_mode_enabled() -> bool:
+    """Load and resolve the lead-generation demo flag at run time."""
+    load_environment()
+    return str(os.getenv("LEADGEN_DEMO_MODE", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def normalize_rejection_reason(reason: str, lead: Optional[Dict[str, Any]] = None) -> str:
+    reason_lower = str(reason or "").strip().lower()
+    normalized_map = {
+        "no_contact": "no_contact",
+        "no_contact_method": "no_contact",
+        "duplicate": "duplicate_domain",
+        "duplicate_domain": "duplicate_domain",
+        "junk_source": "junk_source",
+        "excluded_domain": "junk_source",
+        "excluded_domain_type": "directory_or_listing",
+        "directory_or_listing": "directory_or_listing",
+        "is_directory": "directory_or_listing",
+        "publisher": "publisher_or_media",
+        "publisher_or_media": "publisher_or_media",
+        "media": "publisher_or_media",
+        "government": "government_or_embassy",
+        "government_or_embassy": "government_or_embassy",
+        "embassy": "government_or_embassy",
+        "relevance_not_passed": "relevance_not_passed",
+        "provider_failed": "provider_failed",
+        "provider_error": "provider_failed",
+        "provider_not_configured": "provider_failed",
+        "scrape_failed": "scrape_failed",
+        "invalid_email": "invalid_email",
+        "invalid_phone": "invalid_phone",
+        "no_email": "invalid_email",
+    }
+    if reason_lower in normalized_map:
+        return normalized_map[reason_lower]
+    if reason_lower.startswith("scrape_failed"):
+        return "scrape_failed"
+    if lead:
+        domain_type = str(lead.get("domain_type", "") or "").strip().lower()
+        if domain_type in {"excluded", "non_business"}:
+            return "junk_source"
+        if domain_type == "listing":
+            return "directory_or_listing"
+        is_directory = bool(lead.get("is_directory", False))
+        if is_directory:
+            return "directory_or_listing"
+    return reason_lower if reason_lower else "no_contact"
 
 
 def now_utc() -> datetime:
@@ -600,7 +665,28 @@ def build_search_query_variants(niche: str = "", location: str = "", query: str 
             f"custom software development companies in {location_value}",
         ]
     elif final_query:
-        variants = [final_query]
+        query_match = re.match(r"^(.+?)\s+in\s+(.+)$", final_query, flags=re.IGNORECASE)
+        inferred_niche = niche_value
+        inferred_location = location_value
+        if query_match:
+            inferred_niche = inferred_niche or query_match.group(1).strip().lower()
+            inferred_location = inferred_location or query_match.group(2).strip()
+        if inferred_location and any(term in inferred_niche for term in ("dentist", "dental")):
+            variants = [
+                f"dentists in {inferred_location} contact",
+                f"dental clinics in {inferred_location} phone",
+                f"best dental clinic {inferred_location} contact",
+                f"dentist {inferred_location} email phone",
+            ]
+        elif inferred_location and inferred_niche:
+            variants = [
+                final_query,
+                f"{inferred_niche} in {inferred_location} contact",
+                f"{inferred_niche} {inferred_location} email",
+                f"{inferred_niche} {inferred_location} phone",
+            ]
+        else:
+            variants = [final_query]
     deduped: List[str] = []
     for item in variants:
         normalized = re.sub(r"\s+", " ", str(item or "").strip())
@@ -761,6 +847,29 @@ def clean_visible_text(html: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def is_corrupted_content(text: str, threshold: float = CORRUPTED_CONTENT_RATIO) -> bool:
+    """Return True when decoded text contains too many replacement/control characters."""
+    normalized = str(text or "")
+    if not normalized:
+        return False
+    corrupted_count = sum(
+        character == "\ufffd"
+        or (unicodedata.category(character) == "Cc" and character not in "\n\t\r")
+        for character in normalized
+    )
+    return corrupted_count / len(normalized) > threshold
+
+
+def decode_html_content(content: bytes, declared_encoding: str = "") -> str:
+    """Decode HTML bytes without trusting a frequently incorrect server charset."""
+    markup = UnicodeDammit(
+        content,
+        user_encodings=[declared_encoding] if declared_encoding else None,
+        is_html=True,
+    ).unicode_markup
+    return str(markup or "")
+
+
 def should_skip_url(url: str) -> bool:
     lowered = url.lower()
     blocked_extensions = (
@@ -805,6 +914,11 @@ def _set_scrape_failure(context: Optional[CrawlContext], status: str, reason: st
     context.last_status = status
     context.last_reason = reason
     context.last_method = method
+
+
+def _increment_crawl_metric(context: Optional[CrawlContext], key: str) -> None:
+    if context is not None:
+        context.metrics[key] = int(context.metrics.get(key, 0)) + 1
 
 
 def build_scrape_result(
@@ -856,7 +970,7 @@ def extract_readable_text(html: str) -> str:
         if len(" ".join(text_blocks)) >= 3000:
             break
     if text_blocks:
-        return re.sub(r"\s+", " ", " ".join(text_blocks)).strip()[:3000]
+        return re.sub(r"\s+", " ", " ".join(text_blocks)).strip()
     return ""
 
 
@@ -927,6 +1041,7 @@ def fetch_page(url: str, context: Optional[CrawlContext] = None) -> Dict[str, An
                     http2=True,
                     verify=False,
                 ) as client:
+                    _increment_crawl_metric(context, "pages_attempted")
                     response = client.get(normalized_url)
             except Exception as client_err:
                 http2_failed = True
@@ -940,6 +1055,7 @@ def fetch_page(url: str, context: Optional[CrawlContext] = None) -> Dict[str, An
                         http2=False,
                         verify=False,
                     ) as client:
+                        _increment_crawl_metric(context, "pages_attempted")
                         response = client.get(normalized_url)
                 except Exception as fallback_err:
                     LOGGER.warning("HTTPX HTTP1 failed for %s: %s", normalized_url, fallback_err)
@@ -983,14 +1099,28 @@ def fetch_page(url: str, context: Optional[CrawlContext] = None) -> Dict[str, An
                     method_used=method_used,
                 )
 
-            if not response.encoding:
-                response.encoding = "utf-8"
+            decoded_body_size = len(response.content)
+            if decoded_body_size > MAX_DECODED_HTML_BYTES:
+                LOGGER.info("Skipping oversized decoded page: %s (%s bytes)", normalized_url, decoded_body_size)
+                if context is not None:
+                    context.last_status = "heavy_page"
+                    context.last_method = method_used
+                    context.last_reason = f"decoded-content-length={decoded_body_size}"
+                response.close()
+                return build_scrape_result(
+                    content=None,
+                    status="FAILED",
+                    failure_reason="FAILED_EMPTY_CONTENT",
+                    method_used=method_used,
+                )
+
+            html_content = decode_html_content(response.content, response.encoding or "")
             if context is not None:
                 context.last_status = "ok"
                 context.last_method = method_used
                 context.last_reason = "html fetched"
             return build_scrape_result(
-                content=response.text,
+                content=html_content,
                 status="SUCCESS",
                 failure_reason="",
                 method_used=method_used,
@@ -1000,13 +1130,18 @@ def fetch_page(url: str, context: Optional[CrawlContext] = None) -> Dict[str, An
             LOGGER.error("Scrape failed for %s: %s: %s", normalized_url, type(error).__name__, str(error))
             LOGGER.warning("Fetch failed for %s after %.2fs via %s: %s", normalized_url, elapsed, method_used, error)
             status_code = getattr(getattr(error, "response", None), "status_code", None)
+            if status_code in (404, 410):
+                _increment_crawl_metric(context, "pages_404")
+            if isinstance(error, httpx.TimeoutException):
+                _increment_crawl_metric(context, "pages_timeout")
             if status_code in (401, 403):
                 _set_scrape_failure(context, "blocked_site", f"FAILED_BLOCKED:http {status_code}", method_used)
             elif elapsed >= REQUEST_READ_TIMEOUT or isinstance(error, httpx.TimeoutException):
                 _set_scrape_failure(context, "slow_site", f"FAILED_TIMEOUT:request timeout after {elapsed:.2f}s", method_used)
             else:
                 _set_scrape_failure(context, "request_failed", f"FAILED_REQUEST_ERROR:{error}", method_used)
-            if attempt >= MAX_RETRIES_PER_REQUEST:
+            retryable = isinstance(error, httpx.TimeoutException) or status_code == 429 or bool(status_code and status_code >= 500)
+            if not retryable or attempt >= MAX_RETRIES_PER_REQUEST:
                 LOGGER.info("Skip reason: blocked/slow/error page %s", normalized_url)
                 return build_scrape_result(
                     content=None,
@@ -1050,27 +1185,51 @@ def scrape_website(url: str, context: Optional[CrawlContext] = None) -> Tuple[st
     if any(keyword in html.lower() for keyword in LOW_QUALITY_PAGE_KEYWORDS):
         LOGGER.info("Skipping low-quality or blocked page content: %s", url)
         _set_scrape_failure(context, "js_site", "FAILED_EMPTY_CONTENT:blocked or placeholder content", "httpx")
+        _increment_crawl_metric(context, "pages_success_text_empty")
         return "", "httpx", "FAILED_EMPTY_CONTENT:blocked or placeholder content"
 
-    primary_text = clean_visible_text(html)[:3000]
+    primary_text = clean_visible_text(html)
     if primary_text:
-        return primary_text, "httpx_bs4", ""
+        if is_corrupted_content(primary_text):
+            LOGGER.warning("Corrupted scraped content detected for %s using httpx_bs4", url)
+            _set_scrape_failure(context, "corrupted_content", "FAILED_CORRUPTED_CONTENT", "httpx_bs4")
+            return "", "httpx_bs4", "FAILED_CORRUPTED_CONTENT"
+        return primary_text[:3000], "httpx_bs4", ""
 
     readable_text = extract_readable_text(html)
     if readable_text:
+        if is_corrupted_content(readable_text):
+            LOGGER.warning("Corrupted scraped content detected for %s using readability_fallback", url)
+            _set_scrape_failure(
+                context,
+                "corrupted_content",
+                "FAILED_CORRUPTED_CONTENT",
+                "readability_fallback",
+            )
+            return "", "readability_fallback", "FAILED_CORRUPTED_CONTENT"
         if context is not None:
             context.last_method = "readability_fallback"
             context.last_reason = "bs4 text empty; readability fallback used"
-        return readable_text, "readability_fallback", "bs4 text empty"
+        return readable_text[:3000], "readability_fallback", "bs4 text empty"
 
     fallback_text = extract_title_meta_jsonld(html)
     if fallback_text:
+        if is_corrupted_content(fallback_text):
+            LOGGER.warning("Corrupted scraped content detected for %s using meta_title_jsonld_fallback", url)
+            _set_scrape_failure(
+                context,
+                "corrupted_content",
+                "FAILED_CORRUPTED_CONTENT",
+                "meta_title_jsonld_fallback",
+            )
+            return "", "meta_title_jsonld_fallback", "FAILED_CORRUPTED_CONTENT"
         if context is not None:
             context.last_method = "meta_title_jsonld_fallback"
             context.last_reason = "content extracted from title/meta/json-ld"
         return fallback_text[:3000], "meta_title_jsonld_fallback", "bs4 and readability empty"
 
-    _set_scrape_failure(context, "js_site", "FAILED_EMPTY_CONTENT:no usable text after all fallback methods", "fallback_failed")
+    _set_scrape_failure(context, "empty_text", "FAILED_EMPTY_CONTENT:no usable text after all fallback methods", "fallback_failed")
+    _increment_crawl_metric(context, "pages_success_text_empty")
     return "", "fallback_failed", "FAILED_EMPTY_CONTENT:no usable text after all fallback methods"
 
 
@@ -1300,6 +1459,43 @@ def extract_email_candidates_from_html_pages(html_pages: List[Tuple[str, str]]) 
     return candidates
 
 
+def extract_phone_candidates_from_page(html: str) -> List[str]:
+    soup = BeautifulSoup(html, "html.parser")
+    candidates: List[str] = []
+    seen: Set[str] = set()
+
+    def append_phone(value: str) -> None:
+        normalized = normalize_phone(unquote(str(value or "")).strip())
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            candidates.append(normalized)
+
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor.get("href", "") or "").strip()
+        lowered_href = href.lower()
+        if lowered_href.startswith("tel:"):
+            append_phone(href.split(":", 1)[1].split("?", 1)[0])
+            continue
+        parsed = urlparse(href if "://" in href else f"https://{href.lstrip('/')}")
+        host = parsed.netloc.lower()
+        if host.endswith("wa.me"):
+            append_phone(parsed.path.strip("/").split("/", 1)[0])
+        elif host.endswith("whatsapp.com"):
+            append_phone(parse_qs(parsed.query).get("phone", [""])[0])
+
+    for phone in extract_structured_contact_info(html).get("phones", []):
+        append_phone(phone)
+
+    header_footer_text = " ".join(
+        node.get_text(" ", strip=True)
+        for selector in ("header", "footer", ".header", ".footer", "#header", "#footer")
+        for node in soup.select(selector)
+    )
+    for match in PHONE_PATTERN.findall(header_footer_text):
+        append_phone(match)
+    return candidates
+
+
 def extract_emails_from_html(html: str) -> List[str]:
     return [candidate["email"] for candidate in extract_email_candidates_from_page("", html)]
 
@@ -1374,6 +1570,14 @@ def normalize_phone(phone: str) -> str:
     if not raw:
         return ""
     cleaned = re.sub(r"[\s().-]", "", raw)
+    if cleaned.startswith("0092"):
+        cleaned = f"+92{cleaned[4:]}"
+    elif re.fullmatch(r"92\d{10}", cleaned):
+        cleaned = f"+{cleaned}"
+    elif re.fullmatch(r"03\d{9}", cleaned):
+        cleaned = f"+92{cleaned[1:]}"
+    elif re.fullmatch(r"0(?:21|42)\d{7,8}", cleaned):
+        cleaned = f"+92{cleaned[1:]}"
     if not re.fullmatch(r"\+?\d{10,15}", cleaned):
         return ""
     digits = cleaned.lstrip("+")
@@ -1425,41 +1629,38 @@ def extract_contact_info(website: str, context: Optional[CrawlContext] = None) -
 
     homepage_html = str(homepage_result.get("content", "") or "")
     html_pages = [(website.rstrip("/"), homepage_html)]
-    contact_links = extract_contact_links(homepage_html, website) or build_common_contact_urls(website)
-    extra_paths = [
-        "/contact",
-        "/contact-us",
-        "/about",
-        "/about-us",
-        "/team",
-        "/our-team",
-        "/careers",
-        "/career",
-        "/jobs",
-        "/support",
-        "/company",
+    discovered_contact_links = extract_contact_links(homepage_html, website)
+    fallback_links = [
+        urljoin(website.rstrip("/") + "/", path)
+        for path in ("contact", "contact-us")
     ]
-    contact_links = list(dict.fromkeys(contact_links + [urljoin(website.rstrip("/") + "/", path.lstrip("/")) for path in extra_paths]))
     seen_links = {website.rstrip("/")}
-    for link in contact_links:
-        normalized_link = link.rstrip("/")
-        if normalized_link in seen_links:
-            continue
-        if not is_valid_crawl_url(normalized_link):
-            continue
-        seen_links.add(normalized_link)
-        response = fetch_page(link, context=context)
-        LOGGER.info(
-            "Contact page result for %s: status=%s method=%s failure_reason=%s",
-            normalized_link,
-            response.get("status", ""),
-            response.get("method_used", ""),
-            response.get("failure_reason", ""),
-        )
-        if response.get("status") == "SUCCESS":
-            html_pages.append((normalized_link, str(response.get("content", "") or "")))
-        if len(html_pages) >= MAX_PAGES_PER_DOMAIN:
-            break
+
+    def crawl_contact_links(links: List[str]) -> None:
+        for link in links:
+            normalized_link = link.rstrip("/")
+            if normalized_link in seen_links or not is_valid_crawl_url(normalized_link):
+                continue
+            seen_links.add(normalized_link)
+            response = fetch_page(link, context=context)
+            LOGGER.info(
+                "Contact page result for %s: status=%s method=%s failure_reason=%s",
+                normalized_link,
+                response.get("status", ""),
+                response.get("method_used", ""),
+                response.get("failure_reason", ""),
+            )
+            if response.get("status") == "SUCCESS":
+                html_pages.append((normalized_link, str(response.get("content", "") or "")))
+            if len(html_pages) >= MAX_PAGES_PER_DOMAIN:
+                break
+
+    crawl_contact_links(discovered_contact_links)
+    has_observed_contact = bool(extract_email_candidates_from_html_pages(html_pages)) or any(
+        extract_phone_candidates_from_page(html) for _, html in html_pages
+    )
+    if not has_observed_contact:
+        crawl_contact_links(fallback_links)
 
     combined_text_parts = []
     contact_page = ""
@@ -1471,10 +1672,10 @@ def extract_contact_info(website: str, context: Optional[CrawlContext] = None) -
     combined_text = " ".join(combined_text_parts)
     email_candidates = extract_email_candidates_from_html_pages(html_pages)
     email = choose_best_email_candidate(html_pages, email_candidates) or extract_first_email(combined_text)
-    structured_phones: List[str] = []
+    phone_candidates: List[str] = []
     for _, html in html_pages:
-        structured_phones.extend(extract_structured_contact_info(html).get("phones", []))
-    phone = structured_phones[0] if structured_phones else extract_first_phone(combined_text)
+        phone_candidates.extend(extract_phone_candidates_from_page(html))
+    phone = phone_candidates[0] if phone_candidates else extract_first_phone(combined_text)
     likely_emails = build_likely_business_emails(website, email)
     likely_email = likely_emails[0] if likely_emails else ""
     failure_reason = "FAILED_NO_EMAIL" if not email else ""
@@ -2447,7 +2648,7 @@ def dedupe_leads(leads: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def beta_lead_readiness(analysis: Dict[str, Any]) -> str:
     email = str(analysis.get("email", analysis.get("verified_email", "")) or "").strip().lower()
-    phone = str(analysis.get("phone", "") or "").strip()
+    phone = normalize_phone(str(analysis.get("phone", "") or "").strip())
     website = str(analysis.get("website", analysis.get("company_url", "")) or "").strip()
     company = str(analysis.get("company_name", analysis.get("company", "")) or "").strip()
     if is_valid_email(email):
@@ -2471,7 +2672,11 @@ def is_qualified_lead(analysis: Dict[str, Any]) -> bool:
     if bool(analysis.get("is_directory", False)) or domain_type in {"excluded", "listing", "non_business"}:
         return False
 
-    return bool(beta_lead_readiness(analysis))
+    if not bool(analysis.get("relevance_passed", analysis.get("needs_it_services", False))):
+        return False
+
+    readiness = beta_lead_readiness(analysis)
+    return readiness in {"email_ready", "phone_ready"}
 
 
 def process_website(website: str, query: str = "", ai_mode: str = "", ai_runtime: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2513,6 +2718,26 @@ def process_query(
         "scored_leads_count": 0,
         "accepted_leads_count": 0,
         "rejected_leads_count": 0,
+        "pages_attempted": 0,
+        "pages_404": 0,
+        "pages_timeout": 0,
+        "pages_success_text_empty": 0,
+        "emails_found": 0,
+        "phones_found": 0,
+        "research_needed_count": 0,
+        "outreach_ready_leads": 0,
+        "no_contact": 0,
+        "excluded_domain": 0,
+        "relevance_not_passed": 0,
+        "duplicate": 0,
+        "demo_accepted_contact": 0,
+        "demo_mode_enabled": leadgen_demo_mode_enabled(),
+        "accepted_by_contact_ready": 0,
+        "accepted_by_relevance": 0,
+        "rejected_no_contact": 0,
+        "rejected_duplicate": 0,
+        "rejected_junk_source": 0,
+        "rejected_relevance": 0,
         "rejection_reasons": {},
     }
     if seen_websites is None:
@@ -2542,6 +2767,8 @@ def process_query(
         "duplicate_domain_count",
     ):
         stats[key] = discovered.get(key, 0 if key != "final_query" else "")
+    stats["duplicate"] = int(stats.get("duplicate_domain_count", 0) or 0)
+    stats["rejected_duplicate"] = stats["duplicate"]
     events.extend(list(discovered.get("events", []) or []))
 
     if not candidate_websites:
@@ -2560,14 +2787,35 @@ def process_query(
                 LOGGER.exception("Unexpected website processing failure for %s", website)
                 reason = type(error).__name__
                 stats["rejection_reasons"][reason] = int(stats["rejection_reasons"].get(reason, 0)) + 1
+                rejection_counter = {
+                    "no_contact": "no_contact",
+                    "no_contact_method": "no_contact",
+                    "excluded_domain": "excluded_domain",
+                    "excluded_domain_type": "excluded_domain",
+                    "relevance_not_passed": "relevance_not_passed",
+                }.get(reason)
+                if rejection_counter:
+                    stats[rejection_counter] += 1
+                if reason == "no_contact" and bool(stats["demo_mode_enabled"]):
+                    stats["rejected_demo_no_contact"] += 1
+                if bool(lead.get("scraped_email_invalid", False)):
+                    stats["rejected_invalid_email"] += 1
                 events.append({"stage": "scraping", "status": "failed", "domain": root_domain_from_url(website), "url": website, "reason": "rejected_scrape_failed", "message": "scrape_failed"})
                 continue
             events.append({"stage": "scraping", "status": "success", "domain": root_domain_from_url(website), "url": website, "message": "scrape_success"})
             stats["scraped_pages_count"] += 1
             stats["cleaned_records_count"] += 1
             stats["scored_leads_count"] += 1
+            crawl_metrics = dict(lead.get("crawl_metrics", {}) or {})
+            for metric in ("pages_attempted", "pages_404", "pages_timeout", "pages_success_text_empty"):
+                stats[metric] += int(crawl_metrics.get(metric, 0) or 0)
             if str(lead.get("email", "")).strip():
                 stats["extracted_emails_count"] += 1
+                stats["emails_found"] += 1
+            if str(lead.get("phone", "")).strip():
+                stats["phones_found"] += 1
+            if str(lead.get("readiness", "")).strip().lower() == "research_needed":
+                stats["research_needed_count"] += 1
             events.append(
                 {
                     "stage": "extracting",
@@ -2585,29 +2833,56 @@ def process_query(
             if not bool(lead.get("qualified", False)) or str(lead.get("decision", "")).strip().lower() == "reject":
                 skipped_count += 1
                 stats["rejected_leads_count"] += 1
-                reason = str(
+                skip_reason = str(
                     lead.get("skip_reason")
                     or lead.get("quality_reason")
                     or lead.get("scrape_status")
                     or lead.get("email_status")
                     or "rejected"
                 ).strip()
-                stats["rejection_reasons"][reason] = int(stats["rejection_reasons"].get(reason, 0)) + 1
-                LOGGER.info(
-                    "Skipping rejected lead for %s (qualified=%s, decision=%s, reason=%s)",
-                    website,
-                    lead.get("qualified", False),
-                    lead.get("decision", ""),
-                    lead.get("skip_reason", lead.get("quality_reason", "")),
-                )
-                events.append({"stage": "scoring", "status": "rejected", "domain": root_domain_from_url(website), "url": website, "reason": reason, "message": "lead_rejected"})
+                normalized_reason = normalize_rejection_reason(skip_reason, lead)
+                stats["rejection_reasons"][normalized_reason] = int(stats["rejection_reasons"].get(normalized_reason, 0)) + 1
+                if normalized_reason == "no_contact":
+                    stats["rejected_no_contact"] += 1
+                elif normalized_reason == "relevance_not_passed":
+                    stats["rejected_relevance"] += 1
+                elif normalized_reason == "duplicate_domain":
+                    stats["rejected_duplicate"] += 1
+                elif normalized_reason in {"junk_source", "directory_or_listing", "publisher_or_media", "government_or_embassy"}:
+                    stats["rejected_junk_source"] += 1
+                if str(lead.get("email", "") or "").strip() or str(lead.get("phone", "") or "").strip():
+                    LOGGER.info(
+                        "Rejected contactable lead website=%s email=%s phone=%s demo_mode_enabled=%s readiness=%s "
+                        "qualified=%s decision=%s skip_reason=%s normalized_reason=%s persistence_result=not_attempted",
+                        website,
+                        str(lead.get("email", "") or "").strip(),
+                        str(lead.get("phone", "") or "").strip(),
+                        bool(stats["demo_mode_enabled"]),
+                        lead.get("readiness", ""),
+                        bool(lead.get("qualified", False)),
+                        lead.get("decision", ""),
+                        skip_reason,
+                        normalized_reason,
+                    )
+                events.append({"stage": "scoring", "status": "rejected", "domain": root_domain_from_url(website), "url": website, "reason": normalized_reason, "message": "lead_rejected"})
                 continue
-            block_reason = blocklisted_lead_reason(lead, query)
+            block_reason = "" if bool(lead.get("demo_accepted_contact", False)) else blocklisted_lead_reason(lead, query)
             if block_reason:
                 LOGGER.debug("Skipping blocklisted lead for %s: %s", website, block_reason)
+                stats["rejected_leads_count"] += 1
+                normalized = normalize_rejection_reason(block_reason, lead)
+                stats["rejected_junk_source"] += 1
+                stats["rejection_reasons"][normalized] = int(stats["rejection_reasons"].get(normalized, 0)) + 1
                 continue
             leads.append(lead)
             stats["accepted_leads_count"] += 1
+            if bool(lead.get("demo_accepted_contact", False)):
+                stats["demo_accepted_contact"] += 1
+                stats["accepted_by_contact_ready"] += 1
+            if bool(lead.get("relevance_passed", False)) or bool(lead.get("needs_it_services", False)):
+                stats["accepted_by_relevance"] += 1
+            if str(lead.get("email", "")).strip() or str(lead.get("phone", "")).strip():
+                stats["outreach_ready_leads"] += 1
             events.append({"stage": "scoring", "status": "accepted", "domain": root_domain_from_url(website), "url": website, "message": "lead_accepted"})
             LOGGER.info(
                 "Lead stored: %s (score=%s, email=%s, total_saved=%s)",
